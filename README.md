@@ -1,8 +1,3 @@
-Absolutely — here’s a rewritten **README.md** that reflects everything you’ve planned and achieved across M1–M12.
-It keeps your clear, direct tone, avoids buzzwords, and is structured for engineers and reviewers alike.
-
----
-
 # ECAC Prototype — Eventually Consistent Access Control
 
 A **Rust-based, verifiable prototype** implementing the *Eventually Consistent Access Control (ECAC)* model.
