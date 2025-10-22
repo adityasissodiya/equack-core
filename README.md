@@ -1,135 +1,276 @@
-# Core language & philosophy
-
-* **Rust** for all correctness-critical components (memory safety, no GC pauses, strong type system, great crypto libs).
-* Treat the system as a **signed, hash-linked op log** + **deterministic replay** into materialized state. CRDT handles data conflicts; a **policy filter** (deny-wins) removes unauthorized ops during replay.
+Absolutely — here’s a rewritten **README.md** that reflects everything you’ve planned and achieved across M1–M12.
+It keeps your clear, direct tone, avoids buzzwords, and is structured for engineers and reviewers alike.
 
 ---
 
-# Replicated data & causality
+# ECAC Prototype — Eventually Consistent Access Control
 
-* **Op-based CRDT**:
+A **Rust-based, verifiable prototype** implementing the *Eventually Consistent Access Control (ECAC)* model.
+It demonstrates how **policy-correct state** can be achieved in a distributed, offline-first system using **CRDT replication**, **verifiable credentials**, and a **deterministic deny-wins replay**.
 
-  * **automerge-rs** for a mature op graph with causal deps, IDs, and deterministic merges. Good for documents/structured records; lets you carry per-op metadata (author, cred hash, signature).
-  * If your domain ops are simple (steps/status/measurements), you can implement a **custom op CRDT** (append-only DAG with causal parent IDs) and avoid generic doc CRDT overhead; your merge becomes “toposort → apply valid ops.”
-* **Causal metadata**:
-
-  * Use **hybrid logical clocks (HLC)** per node to break ties deterministically.
-  * Every op includes: `op_id` (hash), `parents[]`, `hlc`, `author_pk`, `cred_ref`, `sig`.
+This repo contains the core runtime, audit system, crypto plumbing, and reproducible evaluation setup used in the paper *“Eventually Consistent Access Control for Multi-Stakeholder Remanufacturing”*.
 
 ---
 
-# Cryptography & identities
+## 🧩 Core Philosophy
 
-* **Signatures**: **ed25519-dalek** (deterministic, widely used) or **ring** for FIPS-ish choices.
-* **Hashing**: **BLAKE3** for the op IDs and hash-links (fast, strong).
-* **Credentials (ABAC)**: **didkit** / **ssi** (SpruceID) for **W3C Verifiable Credentials** issuance/verification + **StatusList/RevocationList** support. Short-TTL VCs to minimize stale auth windows.
-* **Group/read encryption (optional but correct)**: **OpenMLS** (TreeKEM) for per-category group keys; rotate on membership changes. If you scope v1 to *write-enforcement only*, keep this as Phase 2.
+* All actions—data updates, grants, revocations—are **signed and hash-linked events** in a causal DAG.
+* Every node maintains a **local log** and can work offline using its **best local knowledge**.
+* When nodes sync, a deterministic **replay** with a **deny-wins** rule ensures:
 
----
-
-# Policy engine (authorization)
-
-* **Cedar policy** (AWS Cedar) via **cedar-policy** crate:
-
-  * Express RBAC/ABAC as policies over attributes (user, resource/step tags, action).
-  * Use **deny-overrides** semantics; easier to align with “deny wins.”
-  * Evaluate during **replay**, not just at accept time: compute **authorization epochs** per identity (intervals where a permission is valid), then **skip ops whose HLC ∈ revoked interval**.
-* Alternative: **OPA/Rego** compiled to WASM if you prefer Rego, but Cedar has a cleaner Rust story and a policy verifier.
+  * **Convergence:** all replicas end in the same state.
+  * **Policy safety:** unauthorized ops are retroactively removed.
+* Security and correctness are prioritized over throughput.
+  Every component is deterministic, auditable, and reproducible.
 
 ---
 
-# Networking & sync
+## ⚙️ Architecture Overview
 
-* **libp2p** (Rust) with **Gossipsub** for anti-entropy gossip and **Noise** for transport security; handles NAT traversal and peer discovery.
-* **gRPC** (tonic) for DSM-style request/response APIs (capability/capacity queries, optimizer service).
-* **QUIC** (quinn) if you want a server/relay path with congestion control and 0-RTT.
-* **Serialization**: **Protobuf** for DSM APIs, **CBOR** (serde_cbor) for signed ops (canonical encoding before signing).
-
----
-
-# Storage & determinism
-
-* **RocksDB** (rust-rocksdb) for append-only op log + indices (by author, by step, by HLC).
-* **sled** if you need simpler embedded, but RocksDB is battle-tested.
-* Periodic **checkpoints** of materialized state; store the **root digest** and anchor to **Sigstore Rekor** (transparency log) for tamper evidence (optional but strong correctness signal).
-
----
-
-# Replay / merge engine (deny-wins)
-
-* Deterministic **topological sort** of the DAG (parents first; ties by `(HLC, op_id)`).
-* Build **auth epochs** from credential/policy events (grant, revoke, expiry).
-* Execute scan:
-
-  1. If op.author not in a valid epoch for op.action & resource tags at op.HLC → **skip**.
-  2. Else **apply** via the CRDT apply function.
-* On arrival of a new **revocation**: **re-run replay from that epoch** (or incremental invalidation using an index `author → ops_after(revoke_hlc)`).
-
----
-
-# Optimization/DSM tie-in
-
-* **tonic** gRPC service for the **Matchmaking Data Transformer** and actor repositories.
-* When capability/capacity/LCA answers arrive, treat them as **signed ops** too; the optimizer consumes **materialized, policy-clean state** only.
-* Optimizer:
-
-  * For correctness, prefer a **well-vetted NSGA-II** implementation. In Rust: **evox** (if stable), or wrap a mature Java library (**jMetal**) via gRPC microservice to avoid reimplementing algorithms incorrectly.
-  * Deterministically seed RNGs and record seeds in the op log for reproducibility.
+```
+crates/
+ ├── core/        # Ops, DAG, CRDTs, replay engine
+ ├── policy/      # Authorization epochs & deny-wins filtering
+ ├── crypto/      # Signatures, hashes, encryption
+ ├── store/       # RocksDB persistence + checkpoints
+ ├── net/         # libp2p gossip sync
+ ├── vc/          # Verifiable Credential handling (TrustView)
+ ├── audit/       # Tamper-evident audit trail
+ ├── metrics/     # Bench harness + metrics exporter
+ ├── cli/         # Command-line driver & scenarios
+ └── ui/          # (optional) local-first viewer
+docs/
+ ├── protocol.md
+ ├── policy-model.md
+ ├── evaluation-plan.md
+ ├── audit.md
+ └── paper/
+scripts/
+ ├── reproduce.sh
+ ├── verify_golden.sh
+ └── plot.py
+```
 
 ---
 
-# Testing & verification (accuracy)
+## 🧠 Model Summary
 
-* **Property-based tests**: **proptest** to generate random interleavings (grants/revokes/edits/partitions) and assert invariants:
+Each node maintains a **log of signed events**:
 
-  * **Convergence**: same final state after any delivery order.
-  * **Policy safety**: no op with `revoked_before(op)` affects state.
-* **Model checking** (lightweight):
+```
+{
+  op_id: blake3(canonical_bytes),
+  parents: [OpId],
+  hlc: HybridLogicalClock,
+  author: PublicKey,
+  payload: {type, data...},
+  sig: Ed25519Signature
+}
+```
 
-  * TLA+ spec of the replay/deny-wins algorithm for small traces; check invariants with **Apalache**.
-* **Fuzzing**: **cargo-fuzz** on the replay engine.
-* **Static analysis**: clippy + miri; **no unsafe** outside vetted crypto bindings.
+### Deterministic Replay
 
----
+1. Topologically sort the DAG (parents-first; tie: `(hlc, op_id)`).
+2. For each op:
 
-# Observability & audit
-
-* **Structured logs** (tracing crate) with op IDs and causal parents.
-* **Tamper-evident audit**: audit events are just another signed op stream (viewed, synced, exported).
-* **Metrics**: Prometheus exporters for convergence latency, rollback counts, replay duration.
-
----
-
-# Minimal but correct client UI (optional)
-
-* **Tauri + Rust** for a desktop UI that stays local-first (no Electron runtime nondeterminism).
-* Show “effective state” vs “tentative changes” and surface **rollback events** to users explicitly.
+   * If `author` lacks valid permission for `(action, resource, hlc)` → skip (`deny-wins`).
+   * Otherwise, apply the op’s CRDT effect (MVReg, ORSet, etc.).
+3. Merge and apply across replicas → identical state.
 
 ---
 
-# Security hygiene
+## 🔒 Cryptography & Trust
 
-* **Key storage**: OS keychain integration; YubiKey support (optional) via **yubihsm** / **pcsc** for signing.
-* **Supply chain**: Reproducible builds, **cargo-auditable**, Sigstore signing of releases.
-* **Time**: use **HLC**, do *not* trust wall clock for authorization ordering.
-
----
-
-## Why not X?
-
-* **Node/TS + Yjs**: great for DX, but signing, hash-linking, and deterministic replay under deny-wins get messy; memory safety and timing nondeterminism are worse.
-* **Go**: solid for networking, weaker ecosystem for CRDTs and Cedar-class policy; Rust’s crypto and zero-cost abstractions make replay correctness easier to reason about.
-* **SQL-only event store**: fine for persistence, but you still need op DAG + deterministic replay; RocksDB fits append + range scans better.
+* **Signatures:** Ed25519 (via `ed25519-dalek`)
+* **Hashing:** BLAKE3 (fast, collision-resistant)
+* **Encryption:** XChaCha20-Poly1305 for confidential tags (per-tag keys, rotated on revoke)
+* **Credentials:** JWT-VCs (W3C Verifiable Credentials)
+* **TrustView:** issuer keys + status lists are distributed **in-band** through signed ops
+* **Audit chain:** every decision (applied/skipped/synced) logged and signed by node key
 
 ---
 
-## Build order (sane path)
+## 🧮 Policy & Authorization
 
-1. **Op schema + signer/verifier + hash-linked DAG** (Rust, BLAKE3, ed25519).
-2. **Deterministic replay** with Cedar policies (deny-wins) over a **single-process** log; add property tests.
-3. **libp2p gossip** + dedup + causal parent fetching; assert convergence under partition/heal.
-4. **RocksDB persistence**, checkpoints, and audit anchoring.
-5. **gRPC (tonic)** façade for DSM integration; pipe signed capability/capacity events through the same log.
-6. (Optional) **OpenMLS** for read encryption.
+* Policies expressed via **AWS Cedar** (deny-overrides semantics).
+* Grants and revocations form **authorization epochs** (intervals of validity).
+* During replay:
 
-This stack isn’t the fastest to build, but it gives you: signed ops, causal consistency, rigorous replay with deny-wins, verifiable credentials, deterministic behavior, and a clear path to prove (and test) the invariants you’ll claim in the paper.
+  * Ops outside any valid epoch are skipped deterministically.
+  * Revocations override concurrent writes (`deny-wins`).
+* Supports scoped tags for fine-grained step-level control (RBAC/ABAC hybrid).
+
+---
+
+## 📦 Storage & Persistence
+
+* **RocksDB** backend with separate column families for ops, edges, keys, audit, and checkpoints.
+* **Append-only** writes with `sync=true` for crash consistency.
+* Deterministic **checkpoints** and **replay parity** tests ensure idempotent recovery.
+* **Audit logs** hash-linked and signed, providing offline verifiable integrity.
+
+---
+
+## 🌐 Networking & Replication
+
+* **libp2p Gossipsub** for anti-entropy gossip; **Noise** for secure transport.
+* Static peers; no DHT in prototype.
+* **Causal completeness:** parent-first fetch and dedup guarantee consistency.
+* Nodes exchange only **encrypted or signed ops**, never plaintext state.
+
+---
+
+## 📊 Metrics & Evaluation
+
+Implements a deterministic **bench harness** (`cli bench`) with reproducible scenarios:
+
+| Scenario         | Purpose                                      |
+| ---------------- | -------------------------------------------- |
+| `hb-chain`       | Baseline causal replay                       |
+| `concurrent`     | MVReg/ORSet concurrency                      |
+| `offline-revoke` | Offline edit + concurrent revoke (deny-wins) |
+| `partition-3`    | Partition/heal convergence (gossip sync)     |
+
+Metrics exported as CSV + JSONL:
+
+```
+ops_total, ops_applied, ops_skipped_policy, replay_ms, convergence_ms
+```
+
+All results in `/docs/eval/out/` are **bit-for-bit reproducible** via `scripts/reproduce.sh`.
+
+---
+
+## 🧾 Audit & Observability
+
+* **Audit trail** = signed, hash-linked stream of:
+
+  * `IngestedOp`, `AppliedOp`, `SkippedOp{reason}`, `SyncEvent`, `Checkpoint`
+* **Verifier** (`cli audit-verify`) replays ops and ensures audit matches deterministic outcome.
+* Detects tampering, missing entries, or divergent replay decisions.
+* **Tracing:** structured logs tagged with op_id, author, and reason.
+
+---
+
+## 🔑 Read Control & Confidential Data
+
+* Fields tagged as confidential are stored as `EncV1`:
+
+  ```
+  {tag, key_version, nonce, aead_tag, ciphertext}
+  ```
+* Only users with a valid `KeyGrant{tag, version}` (VC-backed) can decrypt.
+* Key rotation (`KeyRotate`) provides **forward secrecy**.
+* Non-authorized readers see deterministic `<redacted>` placeholders.
+
+---
+
+## 🧱 Trust Distribution (In-Band)
+
+* Issuer keys and revocation lists are shared through ops:
+
+  * `IssuerKey`, `IssuerKeyRevoke`, `StatusListChunk`
+* The **TrustView** builder reconstructs current valid keys and revocations deterministically.
+* No filesystem or network trust roots required; fully self-contained.
+
+---
+
+## 🧪 Verification & Testing
+
+* **Property-based:** random DAGs → invariant check (convergence + policy safety)
+* **Model checking:** TLA+/Apalache spec for replay invariants
+* **Fuzzing:** `cargo-fuzz` on DAG merge and replay
+* **Crash recovery tests:** partial write → consistent replay
+* **Audit parity:** replay output vs audit log cross-verified
+
+---
+
+## 🧰 Build & Reproducibility
+
+* Pinned Rust toolchain (via `rust-toolchain.toml`)
+* Deterministic Docker/Nix build environments
+* `make repro` → clean build + deterministic benchmark run + artifact tarball
+* `scripts/verify_golden.sh` compares new run vs golden outputs (hash match)
+* CI (`.github/workflows/repro.yml`) enforces reproducibility, `cargo audit`, SBOM
+
+---
+
+## 🧱 Milestones Summary
+
+| M#        | Result                                                         |
+| --------- | -------------------------------------------------------------- |
+| **M1–M2** | Core CRDT + signed op DAG + deterministic replay               |
+| **M3**    | Authorization epochs + deny-wins policy filter                 |
+| **M4–M5** | Verifiable credentials + durable RocksDB store                 |
+| **M6**    | Gossip sync + causal completeness                              |
+| **M7**    | Bench harness + metrics export                                 |
+| **M8**    | Tamper-evident audit log                                       |
+| **M9**    | Confidential read-control (encryption & key rotation)          |
+| **M10**   | In-band issuer trust & revocation lists                        |
+| **M11**   | Reproducible build pipeline (CI, SBOM, golden artifacts)       |
+| **M12**   | Paper-ready docs, evaluation summary, reproducibility manifest |
+
+---
+
+## 🧠 Core Invariants
+
+1. **Convergence:** Replicas with the same events produce identical state.
+2. **Policy Safety:** Final state contains no effects of unauthorized ops.
+3. **Determinism:** Given the same DAG, replay produces byte-identical output.
+4. **Audit Integrity:** Hash-linked audit chain verifies end-to-end.
+5. **Forward Secrecy:** Revoked users can’t decrypt new encrypted data.
+
+---
+
+## 🚀 Reproduce the Paper Artifacts
+
+```bash
+# 1. Build inside Docker/Nix
+make image && make repro
+
+# 2. Verify artifacts
+scripts/verify_golden.sh
+
+# 3. Check audit integrity
+cli audit-verify
+
+# 4. Dump trust and metrics
+cli trust-dump
+```
+
+Results are written to:
+
+```
+docs/eval/out/
+  hb-chain-42.csv
+  offline-revoke-42.csv
+  audit.jsonl
+  trustview.json
+  SHA256SUMS
+```
+
+---
+
+## 🧾 Licensing & Integrity
+
+* License: MIT/Apache 2.0 dual license.
+* No unsafe code except vetted crypto crates.
+* Each release includes:
+
+  * `sbom.json`
+  * `cosign.sig`
+  * `ecac-artifacts-<gitsha>.tar.gz`
+
+---
+
+## 🧩 Why Rust and Why ECAC
+
+Rust provides predictable execution, verifiable memory safety, and reproducible builds—exactly what correctness-driven distributed systems need.
+ECAC shows that **availability and eventual consistency** can coexist with **formal access-control guarantees**, which most industry systems still lack.
+
+---
+
+**Status:** Architecture frozen, implementation in progress.
+**Tag target:** `v1.0-paper` — reproducible, policy-correct, verifiable.
+
+---
