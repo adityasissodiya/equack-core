@@ -1,0 +1,45 @@
+# === Rust / Cargo ===
+/target/
+**/*.rs.bk
+
+# Keep Cargo.lock (reproducibility). Do NOT ignore it.
+
+# === Editor / OS cruft ===
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.direnv/
+
+# === Environment / local config ===
+.env
+.env.*
+*.local
+
+# === Logs / temp ===
+*.log
+*.tmp
+tmp/
+.cache/
+
+# === Nix / Docker (build artifacts) ===
+result
+dist/
+*.tar
+*.tar.gz
+
+# === Node (if ui/ appears later) ===
+node_modules/
+**/node_modules/
+
+# === Project artifacts we don't commit (paper run outputs) ===
+docs/eval/out/
+!docs/eval/golden/**
+
+# === Security / release extras (generated) ===
+sbom.json
+cosign.sig
+SHA256SUMS

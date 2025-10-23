@@ -1,0 +1,6 @@
+- Hash preimage = CBOR(OpHeader) without sig/op_id
+- Domain: "ECAC_OP_V1"
+- op_id = blake3(domain || cbor_bytes)
+- Signature = Ed25519(op_id)
+- HLC ordering tie-break: (physical_ms, logical, node_id), then op_id
+- DAG rule: child staged until all parents present
