@@ -19,10 +19,31 @@ pub struct OpHeader {
     pub payload: Payload,
 }
 
-/// Minimal payload variants for M1. Extend later.
+/// Payload variants.
+/// IMPORTANT: Do NOT change the CBOR preimage structure or op_id domain.
+/// `Data` must remain exactly as in M1/M2; M3 adds policy events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Payload {
+    /// M1/M2 data op (naming convention interprets semantics in replay/policy).
     Data { key: String, value: Vec<u8> },
+
+    /// M3 policy: grant a role to a subject for a tag scope and (optionally) time window.
+    Grant {
+        subject_pk: PublicKeyBytes,
+        role: String,
+        scope_tags: Vec<String>,
+        not_before: Hlc,
+        not_after: Option<Hlc>,
+    },
+
+    /// M3 policy: revoke a role for a subject on a tag scope at this event.
+    Revoke {
+        subject_pk: PublicKeyBytes,
+        role: String,
+        scope_tags: Vec<String>,
+        at: Hlc,
+    },
+
     #[serde(other)]
     _Reserved,
 }

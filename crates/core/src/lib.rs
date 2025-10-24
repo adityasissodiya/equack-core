@@ -3,3 +3,7 @@ pub mod serialize;
 pub mod hlc;
 pub mod op;
 pub mod dag;
+pub mod crdt;
+pub mod state;
+pub mod replay;
+pub mod policy;
