@@ -1,4 +1,11 @@
 //! Operation definition: header (hashed), signature, and derived op_id.
+//!
+//! M4 change summary:
+//! - Payload::Data remains EXACTLY as in M1/M2 (schema & bytes unchanged).
+//! - Add `Payload::Credential` to carry a VC on the log (JWT compact bytes).
+//! - Change `Payload::Grant` to reference a VC by `cred_hash` and `subject_pk`.
+//!   Role/scope/time now come from the VC (verified during M4 policy build).
+//! - `Payload::Revoke` remains as in M3 (explicit deny).
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +17,13 @@ use crate::serialize::canonical_cbor;
 
 pub type OpId = [u8; 32];
 
+/// Credential formats we support on the log.
+/// M4 freezes to JWT (compact JWS, Ed25519, alg=EdDSA). JSON-LD is out of scope.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CredentialFormat {
+    Jwt,
+}
+
 /// The part we hash & sign (no sig/op_id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpHeader {
@@ -20,23 +34,35 @@ pub struct OpHeader {
 }
 
 /// Payload variants.
+///
 /// IMPORTANT: Do NOT change the CBOR preimage structure or op_id domain.
-/// `Data` must remain exactly as in M1/M2; M3 adds policy events.
+/// `Data` must remain exactly as in M1/M2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Payload {
     /// M1/M2 data op (naming convention interprets semantics in replay/policy).
     Data { key: String, value: Vec<u8> },
 
-    /// M3 policy: grant a role to a subject for a tag scope and (optionally) time window.
-    Grant {
-        subject_pk: PublicKeyBytes,
-        role: String,
-        scope_tags: Vec<String>,
-        not_before: Hlc,
-        not_after: Option<Hlc>,
+    /// M4: Carry a verifiable credential on the log (JWT compact bytes).
+    /// - `cred_id`: application-level identifier (e.g., jti)
+    /// - `cred_bytes`: the EXACT compact JWT bytes (ASCII) as received
+    /// - `format`: must be `Jwt` in M4
+    Credential {
+        cred_id: String,
+        cred_bytes: Vec<u8>,
+        format: CredentialFormat,
     },
 
-    /// M3 policy: revoke a role for a subject on a tag scope at this event.
+    /// M4: Grant references a credential by its hash.
+    /// - `cred_hash` = blake3 over EXACT compact JWT bytes (header.payload.signature)
+    /// - `subject_pk`: the intended subject of the grant (authorizing identity)
+    ///
+    /// Role, scope, nbf/exp are derived from the verified VC; not embedded here.
+    Grant {
+        subject_pk: PublicKeyBytes,
+        cred_hash: [u8; 32],
+    },
+
+    /// M3/M4: explicit deny event. Still supported and intersected with VC epochs.
     Revoke {
         subject_pk: PublicKeyBytes,
         role: String,
@@ -100,7 +126,7 @@ mod tests {
     use crate::crypto::{generate_keypair, vk_to_bytes};
 
     #[test]
-    fn op_id_stable_and_signature_valid() {
+    fn op_id_stable_and_signature_valid_for_data() {
         let (sk, vk) = generate_keypair();
         let vk_bytes = vk_to_bytes(&vk);
 

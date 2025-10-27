@@ -5,6 +5,8 @@ use ecac_core::op::{Op, Payload};
 use ecac_core::replay::{apply_incremental, replay_full};
 use ecac_core::state::State;
 
+mod util;
+
 #[test]
 fn incremental_parity_with_policy_any_split() {
     // Admin + user
@@ -16,12 +18,9 @@ fn incremental_parity_with_policy_any_split() {
     // Policy+data:
     // grant → write(A) → revoke → write(B) → grant → write(C)
     // Expected final: only A and C (B denied by revoke).
-    let g1 = Op::new(
-        vec![], Hlc::new(10,1), admin_pk,
-        Payload::Grant {
-            subject_pk: user_pk, role: "editor".into(), scope_tags: vec!["hv".into()],
-            not_before: Hlc::new(10,1), not_after: None
-        }, &admin_sk);
+    let (cred1, g1) = util::make_credential_and_grant(
+        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 10, 10_000, &admin_sk, admin_pk
+    );
     let w1 = Op::new(
         vec![], Hlc::new(11,1), user_pk,
         Payload::Data { key: "mv:o:x".into(), value: b"A".to_vec() }, &user_sk);
@@ -32,17 +31,14 @@ fn incremental_parity_with_policy_any_split() {
     let w2 = Op::new(
         vec![], Hlc::new(13,1), user_pk,
         Payload::Data { key: "mv:o:x".into(), value: b"B".to_vec() }, &user_sk);
-    let g2 = Op::new(
-        vec![], Hlc::new(14,1), admin_pk,
-        Payload::Grant {
-            subject_pk: user_pk, role: "editor".into(), scope_tags: vec!["hv".into()],
-            not_before: Hlc::new(14,1), not_after: None
-        }, &admin_sk);
+    let (cred2, g2) = util::make_credential_and_grant(
+        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 14, 10_000, &admin_sk, admin_pk
+    );
     let w3 = Op::new(
         vec![], Hlc::new(15,1), user_pk,
         Payload::Data { key: "mv:o:x".into(), value: b"C".to_vec() }, &user_sk);
 
-    let ops = vec![g1, w1, r1, w2, g2, w3];
+    let ops = vec![cred1, g1, w1, r1, w2, cred2, g2, w3];
 
     // Baseline: full replay over all ops.
     let mut dag_all = Dag::new();

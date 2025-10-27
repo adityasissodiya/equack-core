@@ -7,24 +7,45 @@
 //!   2) project <ops.cbor> <obj field>
 //!      - Same replay, then prints a deterministic projection of the requested field.
 //!   3) simulate <scenario>
-//!      - Synthesizes policy+data scenarios to demonstrate M3 deny-wins gating.
-//!        Scenarios: "offline_edit", "grant_after_edit", "both" (default: both).
+//!      - Stub for now (M4 uses VC-backed grants). We'll wire a VC-backed simulator later.
+//!   4) vc-verify <vc.jwt>
+//!      - Verifies a JWT-VC using ./trust and ./trust/status.
+//!   5) vc-attach <vc.jwt> <issuer_sk_hex> <admin_sk_hex> [out_dir]
+//!      - Emits Credential + Grant ops (CBOR) after verifying the VC.
+//
+// Notes:
+//   - DAG ignores ops whose parents are unknown (pending); replay only uses activated ops.
+//   - Deny-wins gate is enforced iff the log contains *any* Grant/Revoke events.
+//! ECAC CLI
+//!
+//! Commands:
+//!   1) replay <ops.cbor>
+//!      - Loads CBOR-encoded Vec<Op> (or single Op), builds DAG, replays deterministically,
+//!        prints deterministic JSON and state digest.
+//!   2) project <ops.cbor> <obj field>
+//!      - Same replay, then prints a deterministic projection of the requested field.
+//!   3) simulate <scenario>
+//!      - Stub for now (M4 uses VC-backed grants). We'll wire a VC-backed simulator later.
+//!   4) vc-verify <vc.jwt>
+//!      - Verifies a JWT-VC using ./trust and ./trust/status.
+//!   5) vc-attach <vc.jwt> <issuer_sk_hex> <admin_sk_hex> [out_dir]
+//!      - Emits Credential + Grant ops (CBOR) after verifying the VC.
+//!   6) vc-status-set <list_id> <index> <0|1|true|false|on|off>
+//!      - Flips a single bit in trust/status/<list_id>.bin (little-endian bit order).
 //!
 //! Notes:
 //!   - DAG ignores ops whose parents are unknown (pending); replay only uses activated ops.
 //!   - Deny-wins gate is enforced iff the log contains *any* Grant/Revoke events.
-//!     If there are no policy events, replay behaves like M2 (allow-all).
+
+mod commands;
+mod simulate; // now implemented as a safe stub for M4
 
 use std::fs;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use ecac_core::crypto::{generate_keypair, vk_to_bytes};
 use ecac_core::dag::Dag;
-use ecac_core::hlc::Hlc;
-use ecac_core::op::{Op, Payload};
-use ecac_core::policy;
-use ecac_core::policy::Action;
+use ecac_core::op::Op;
 use ecac_core::replay::replay_full;
 use ecac_core::state::FieldValue;
 
@@ -54,26 +75,102 @@ enum Cmd {
         field: String,
     },
 
-    /// Synthesize scenarios to demonstrate deny-wins gating.
-    /// Scenarios: "offline_edit", "grant_after_edit", "both" (default: both)
+    /// (Temporarily stubbed) Synthesize scenarios. Will be VC-backed in M4.
     Simulate {
-        /// Scenario name
+        /// Scenario name (ignored for now)
         #[arg(default_value = "both")]
         scenario: String,
     },
+
+    /// Verify a JWT-VC under ./trust (issuers.toml) and ./trust/status
+    VcVerify {
+        /// Path to compact JWS (JWT-VC)
+        vc: PathBuf,
+    },
+
+    /// Attach a validated JWT-VC by writing Credential + Grant ops
+    VcAttach {
+        /// Path to compact JWS (JWT-VC)
+        vc: PathBuf,
+        /// Issuer secret key (32-byte ed25519) hex
+        issuer_sk_hex: String,
+        /// Admin secret key (32-byte ed25519) hex
+        admin_sk_hex: String,
+        /// Output directory (default ".")
+        out_dir: Option<PathBuf>,
+    },
+
+    /// Flip a bit in a local status list: 1 = revoked, 0 = not revoked
+    VcStatusSet {
+        /// Status list id (file is ./trust/status/<list_id>.bin)
+        list_id: String,
+        /// Bit index to set or clear
+        index: u32,
+        /// New value (true/1 = set, false/0 = clear)
+        //#[arg(action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
+        //value: bool,
+        /// Value to set: 1/0/true/false/on/off
+        value: String,
+    },
+    
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+// fn main() -> anyhow::Result<()> {
+//     let cli = Cli::parse();
+//     match cli.cmd {
+//         Cmd::Replay { ops } => cmd_replay(ops)?,
+//         Cmd::Project { ops, obj, field } => cmd_project(ops, obj, field)?,
+//         Cmd::Simulate { scenario } => simulate::cmd_simulate(Some(scenario.as_str()))?,
+//         Cmd::VcVerify { vc } => commands::cmd_vc_verify(vc.as_os_str().to_str().unwrap())?,
+//         Cmd::VcAttach { vc, issuer_sk_hex, admin_sk_hex, out_dir } => {
+//             let out = out_dir
+//                 .as_ref()
+//                 .and_then(|p| p.as_os_str().to_str())
+//                 .or_else(|| Some(".")) // default "."
+//                 .unwrap();
+//             commands::cmd_vc_attach(
+//                 vc.as_os_str().to_str().unwrap(),
+//                 &issuer_sk_hex,
+//                 &admin_sk_hex,
+//                 Some(out),
+//             )?;
+//         }
+//         Cmd::VcStatusSet { list_id, index, value } => {
+//             commands::cmd_vc_status_set(&list_id, index, value)?;
+//         }
+//     }
+//     Ok(())
+// }
+
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Replay { ops } => cmd_replay(ops)?,
         Cmd::Project { ops, obj, field } => cmd_project(ops, obj, field)?,
-        Cmd::Simulate { scenario } => cmd_simulate(scenario)?,
+        Cmd::Simulate { scenario } => simulate::cmd_simulate(Some(scenario.as_str()))?,
+        Cmd::VcVerify { vc } => commands::cmd_vc_verify(vc.as_os_str().to_str().unwrap())?,
+        Cmd::VcAttach { vc, issuer_sk_hex, admin_sk_hex, out_dir } => {
+            let out = out_dir
+                .as_ref()
+                .and_then(|p| p.as_os_str().to_str())
+                .unwrap_or(".");
+            commands::cmd_vc_attach(
+                vc.as_os_str().to_str().unwrap(),
+                &issuer_sk_hex,
+                &admin_sk_hex,
+                Some(out),
+            )?;
+        }
+        Cmd::VcStatusSet { list_id, index, value } => {
+            let v = parse_bool_flag(&value)?;
+            commands::cmd_vc_status_set(&list_id, index, v)?;
+        }
     }
     Ok(())
 }
 
-fn cmd_replay(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+
+fn cmd_replay(path: PathBuf) -> anyhow::Result<()> {
     let ops = read_ops_cbor(&path)?;
     let (state, digest) = replay_over_ops(&ops);
 
@@ -82,7 +179,7 @@ fn cmd_replay(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_project(path: PathBuf, obj: String, field: String) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_project(path: PathBuf, obj: String, field: String) -> anyhow::Result<()> {
     let ops = read_ops_cbor(&path)?;
     let (state, _digest) = replay_over_ops(&ops);
 
@@ -100,17 +197,24 @@ fn cmd_project(path: PathBuf, obj: String, field: String) -> Result<(), Box<dyn 
             let project = mv.project().map(hex);
             // winners should be hash-sorted in JSON; mv.values() returns byte-sorted.
             // We'll compute hash order locally for display parity with core exporter.
-            let mut winners = mv.values()
+            let mut winners = mv
+                .values()
                 .into_iter()
                 .map(|v| (blake3_hash32(&v), v))
                 .collect::<Vec<_>>();
             winners.sort_by(|a, b| if a.0 != b.0 { a.0.cmp(&b.0) } else { a.1.cmp(&b.1) });
 
-            print!(r#"{{"type":"mv","project":{},"winners":["#,
-                project.as_ref().map(|s| format!(r#""{}""#, s)).unwrap_or_else(|| "null".into())
+            print!(
+                r#"{{"type":"mv","project":{},"winners":["#,
+                project
+                    .as_ref()
+                    .map(|s| format!(r#""{}""#, s))
+                    .unwrap_or_else(|| "null".into())
             );
             for (i, (_, v)) in winners.iter().enumerate() {
-                if i > 0 { print!(","); }
+                if i > 0 {
+                    print!(",");
+                }
                 print!(r#""{}""#, hex(v));
             }
             println!("]}}");
@@ -120,7 +224,9 @@ fn cmd_project(path: PathBuf, obj: String, field: String) -> Result<(), Box<dyn 
             print!(r#"{{"type":"set","elements":["#);
             let mut first = true;
             for (ek, v) in set.iter_present() {
-                if !first { print!(","); }
+                if !first {
+                    print!(",");
+                }
                 first = false;
                 print!(r#"{{"key":"{}","value":"{}"}}"#, ek, hex(&v));
             }
@@ -128,23 +234,6 @@ fn cmd_project(path: PathBuf, obj: String, field: String) -> Result<(), Box<dyn 
         }
     }
 
-    Ok(())
-}
-
-fn cmd_simulate(scenario: String) -> Result<(), Box<dyn std::error::Error>> {
-    match scenario.as_str() {
-        "offline_edit" => run_offline_edit()?,
-        "grant_after_edit" => run_grant_after_edit()?,
-        "both" => {
-            run_offline_edit()?;
-            println!();
-            run_grant_after_edit()?;
-        }
-        other => {
-            eprintln!("unknown scenario '{}'; use offline_edit | grant_after_edit | both", other);
-            std::process::exit(2);
-        }
-    }
     Ok(())
 }
 
@@ -157,7 +246,7 @@ fn replay_over_ops(ops: &[Op]) -> (ecac_core::state::State, [u8; 32]) {
 }
 
 /// Read a CBOR file containing either Vec<Op> or a single Op.
-fn read_ops_cbor(path: &PathBuf) -> Result<Vec<Op>, Box<dyn std::error::Error>> {
+fn read_ops_cbor(path: &PathBuf) -> anyhow::Result<Vec<Op>> {
     let data = fs::read(path)?;
     // Try Vec<Op>
     if let Ok(v) = serde_cbor::from_slice::<Vec<Op>>(&data) {
@@ -167,134 +256,7 @@ fn read_ops_cbor(path: &PathBuf) -> Result<Vec<Op>, Box<dyn std::error::Error>> 
     if let Ok(op) = serde_cbor::from_slice::<Op>(&data) {
         return Ok(vec![op]);
     }
-    Err(format!("{}: not a CBOR Vec<Op> or Op", path.display()).into())
-}
-
-/// Scenario 1: user edits while admin revokes concurrently; on reconcile, post-revoke edit is skipped.
-fn run_offline_edit() -> Result<(), Box<dyn std::error::Error>> {
-    println!("-- simulate: offline_edit (grant → write BEFORE → revoke → write AFTER) --");
-
-    let (admin_sk, admin_vk) = generate_keypair();
-    let admin_pk = vk_to_bytes(&admin_vk);
-    let (user_sk, user_vk) = generate_keypair();
-    let user_pk = vk_to_bytes(&user_vk);
-
-    let grant = Op::new(
-        vec![], Hlc::new(10,1), admin_pk,
-        Payload::Grant {
-            subject_pk: user_pk, role: "editor".into(), scope_tags: vec!["hv".into()],
-            not_before: Hlc::new(10,1), not_after: None
-        },
-        &admin_sk
-    );
-    let write_before = Op::new(
-        vec![], Hlc::new(11,1), user_pk,
-        Payload::Data { key: "mv:o:x".into(), value: b"BEFORE".to_vec() },
-        &user_sk
-    );
-    let revoke = Op::new(
-        vec![], Hlc::new(12,1), admin_pk,
-        Payload::Revoke { subject_pk: user_pk, role: "editor".into(), scope_tags: vec!["hv".into()], at: Hlc::new(12,1) },
-        &admin_sk
-    );
-    let write_after = Op::new(
-        vec![], Hlc::new(13,1), user_pk,
-        Payload::Data { key: "mv:o:x".into(), value: b"AFTER".to_vec() },
-        &user_sk
-    );
-
-    let ops = vec![grant.clone(), write_before.clone(), revoke.clone(), write_after.clone()];
-    explain_apply("offline_edit", &ops)?;
-    Ok(())
-}
-
-/// Scenario 2: user edits, then admin grants; the earlier edit remains denied; a later edit is allowed.
-fn run_grant_after_edit() -> Result<(), Box<dyn std::error::Error>> {
-    println!("-- simulate: grant_after_edit (write → grant → write) --");
-
-    let (admin_sk, admin_vk) = generate_keypair();
-    let admin_pk = vk_to_bytes(&admin_vk);
-    let (user_sk, user_vk) = generate_keypair();
-    let user_pk = vk_to_bytes(&user_vk);
-
-    let write_early = Op::new(
-        vec![], Hlc::new(10,1), user_pk,
-        Payload::Data { key: "mv:o:x".into(), value: b"EARLY".to_vec() },
-        &user_sk
-    );
-    let grant = Op::new(
-        vec![], Hlc::new(11,1), admin_pk,
-        Payload::Grant {
-            subject_pk: user_pk, role: "editor".into(), scope_tags: vec!["hv".into()],
-            not_before: Hlc::new(11,1), not_after: None
-        },
-        &admin_sk
-    );
-    let write_late = Op::new(
-        vec![], Hlc::new(12,1), user_pk,
-        Payload::Data { key: "mv:o:x".into(), value: b"LATE".to_vec() },
-        &user_sk
-    );
-
-    let ops = vec![write_early.clone(), grant.clone(), write_late.clone()];
-    explain_apply("grant_after_edit", &ops)?;
-    Ok(())
-}
-
-/// Build DAG, compute epochs, and print applied vs skipped + final state.
-fn explain_apply(label: &str, ops: &[Op]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut dag = Dag::new();
-    for op in ops { dag.insert(op.clone()); }
-    let order = dag.topo_sort();
-
-    let has_policy = order.iter().any(|id| {
-        dag.get(id)
-            .map(|op| matches!(op.header.payload, Payload::Grant { .. } | Payload::Revoke { .. }))
-            .unwrap_or(false)
-    });
-    let epochs = if has_policy { policy::build_auth_epochs(&dag, &order) } else { Default::default() };
-
-    println!("scenario={}", label);
-    println!("order={:?}", order.iter().map(hex32).collect::<Vec<_>>());
-
-    let mut applied = Vec::new();
-    let mut skipped = Vec::new();
-    for (pos, id) in order.iter().enumerate() {
-        let op = dag.get(id).unwrap();
-        match &op.header.payload {
-            Payload::Data { key, .. } => {
-                if let Some((action, _obj, _field, _elem, tags)) = policy::derive_action_and_tags(key) {
-                    let allow = if has_policy {
-                        policy::is_permitted_at_pos(&epochs, &op.header.author_pk, action, &tags, pos, op.hlc())
-                    } else { true };
-                    if allow {
-                        applied.push((hex32(id), action));
-                    } else {
-                        skipped.push((hex32(id), action));
-                    }
-                }
-            }
-            Payload::Grant { .. } => applied.push((hex32(id), Action::SetField)), // tag as policy
-            Payload::Revoke { .. } => applied.push((hex32(id), Action::SetField)), // tag as policy
-            _ => {}
-        }
-    }
-
-    let (state, digest) = replay_full(&dag);
-
-    println!("applied=[{}]", applied.iter().map(|(h,a)| format!(r#"{{"op":"{}","action":"{}"}}"#, h, action_name(*a))).collect::<Vec<_>>().join(","));
-    println!("skipped=[{}]", skipped.iter().map(|(h,a)| format!(r#"{{"op":"{}","action":"{}","reason":"deny-wins"}}"#, h, action_name(*a))).collect::<Vec<_>>().join(","));
-    println!("{}", state.to_deterministic_json_string());
-    println!("digest={}", hex32(&digest));
-    Ok(())
-}
-
-fn action_name(a: Action) -> &'static str {
-    match a {
-        Action::SetField => "SetField",
-        Action::SetAdd => "SetAdd",
-        Action::SetRem => "SetRem",
-    }
+    anyhow::bail!("{}: not a CBOR Vec<Op> or Op", path.display())
 }
 
 /// Hex for arbitrary byte slice.
@@ -320,4 +282,12 @@ fn blake3_hash32(v: &[u8]) -> [u8; 32] {
     let mut h = Hasher::new();
     h.update(v);
     h.finalize().into()
+}
+
+fn parse_bool_flag(s: &str) -> anyhow::Result<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on"  => Ok(true),
+        "0" | "false" | "off" => Ok(false),
+        other => anyhow::bail!("invalid value '{other}'; expected one of: 1,0,true,false,on,off"),
+    }
 }
