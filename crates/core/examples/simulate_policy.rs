@@ -20,6 +20,14 @@ use ecac_core::policy::{build_auth_epochs_with, derive_action_and_tags, is_permi
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
+use std::collections::HashMap;
+use ed25519_dalek::VerifyingKey;
+
+fn trust_from_single(issuer_id: &str, vk: VerifyingKey) -> TrustStore {
+    let mut issuers = HashMap::new();
+    issuers.insert(issuer_id.to_string(), vk);
+    TrustStore { issuers, schemas: HashMap::new() }
+}
 
 fn main() {
     // Keys
@@ -60,7 +68,7 @@ fn main() {
     let cred_hash = blake3_hash32(&cred_bytes);
 
     // Trust
-    let trust = TrustStore::from_single(issuer_id, issuer_vk.clone());
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
 
     // Case A: NOT REVOKED → allowed
     let mut status_ok = StatusCache::empty();

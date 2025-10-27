@@ -92,6 +92,12 @@ pub fn verify_vc(
 
     // required claims
     let iss = payload.get("iss").and_then(|v| v.as_str()).ok_or(VcError::MissingField("iss"))?;
+    if let Some(schema) = trust.schema_for(iss) {
+        match schema {
+            "standard-v1" => { /* already enforced by required field parsing below */ }
+            other => { return Err(VcError::BadJson); } // unknown schema label (future guard)
+        }
+    }
     let jti = payload.get("jti").and_then(|v| v.as_str()).ok_or(VcError::MissingField("jti"))?;
     let role = payload.get("role").and_then(|v| v.as_str()).ok_or(VcError::MissingField("role"))?;
     let sub_pk_hex = payload.get("sub_pk").and_then(|v| v.as_str()).ok_or(VcError::MissingField("sub_pk"))?;

@@ -6,8 +6,7 @@
 //! oem-issuer-1 = "f1e2d3...<64 hex chars ed25519 verifying key>"
 //! another-issuer = "ab12..."
 //! ```
-
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,18 +28,20 @@ impl From<std::str::Utf8Error> for TrustError { fn from(e: std::str::Utf8Error) 
 impl From<toml::de::Error> for TrustError { fn from(e: toml::de::Error) -> Self { TrustError::Toml(e) } }
 impl From<ed25519_dalek::SignatureError> for TrustError { fn from(e: ed25519_dalek::SignatureError) -> Self { TrustError::Dalek(e) } }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct IssuersToml {
-    issuers: std::collections::BTreeMap<String, String>,
+    issuers: BTreeMap<String, String>,
+    #[serde(default)]
+    schemas: BTreeMap<String, String>, // issuer -> schema name, e.g., "standard-v1"
 }
 
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     pub issuers: HashMap<String, VerifyingKey>,
+    pub schemas: HashMap<String, String>,
 }
 
 impl TrustStore {
-    /// Load `trust/issuers.toml` from a directory.
     pub fn load_from_dir<P: AsRef<Path>>(dir: P) -> Result<Self, TrustError> {
         let mut p = PathBuf::from(dir.as_ref());
         p.push("issuers.toml");
@@ -51,29 +52,26 @@ impl TrustStore {
         let mut map = HashMap::new();
         for (iss, hexstr) in parsed.issuers.into_iter() {
             let key_bytes = hex_to_bytes(&hexstr).map_err(|_| TrustError::BadKeyHex(iss.clone()))?;
-            if key_bytes.len() != 32 {
-                return Err(TrustError::BadKeyLen(key_bytes.len()));
-            }
-            // Borrow the slice for conversion to avoid moving `key_bytes`.
+            if key_bytes.len() != 32 { return Err(TrustError::BadKeyLen(key_bytes.len())); }
             let arr: [u8; 32] = <[u8; 32]>::try_from(key_bytes.as_slice())
                 .map_err(|_| TrustError::BadKeyLen(key_bytes.len()))?;
             let vk = VerifyingKey::from_bytes(&arr)?;
             map.insert(iss, vk);
         }
-        Ok(Self { issuers: map })
+        Ok(Self {
+            issuers: map,
+            schemas: parsed.schemas.into_iter().collect(),
+        })
     }
 
     pub fn get(&self, issuer: &str) -> Option<&VerifyingKey> {
         self.issuers.get(issuer)
     }
 
-    /// Build a trust store in-memory with a single issuer (handy for tests).
-    pub fn from_single(issuer_id: &str, vk: ed25519_dalek::VerifyingKey) -> Self {
-        let mut m = std::collections::HashMap::new();
-        m.insert(issuer_id.to_string(), vk);
-        Self { issuers: m }
+    /// Returns Some(schema_name) if configured for this issuer.
+    pub fn schema_for(&self, issuer: &str) -> Option<&str> {
+        self.schemas.get(issuer).map(|s| s.as_str())
     }
-    
 }
 
 // ---- helpers

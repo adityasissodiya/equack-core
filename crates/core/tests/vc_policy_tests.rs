@@ -5,15 +5,24 @@ use ecac_core::op::{Op, Payload};
 use ecac_core::policy::{build_auth_epochs_with, derive_action_and_tags, is_permitted_at_pos};
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
+use std::collections::HashMap;
+use ed25519_dalek::VerifyingKey;
 
 mod util;
 use util::make_credential_and_grant;
+
+// Minimal helper for tests: create a TrustStore with exactly one issuer.
+fn trust_from_single(issuer_id: &str, vk: VerifyingKey) -> TrustStore {
+    let mut issuers = HashMap::new();
+    issuers.insert(issuer_id.to_string(), vk);
+    TrustStore { issuers, schemas: HashMap::new() }
+}
 
 #[test]
 fn vc_valid_allows() {
     let (issuer_sk, issuer_vk) = generate_keypair();
     let issuer_id = "oem-issuer-1";
-    let trust = TrustStore::from_single(issuer_id, issuer_vk.clone());
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
     let mut status = StatusCache::empty();
 
     let (admin_sk, admin_vk) = generate_keypair();
@@ -68,7 +77,7 @@ fn vc_valid_allows() {
 fn vc_status_revoked_denies() {
     let (issuer_sk, issuer_vk) = generate_keypair();
     let issuer_id = "oem-issuer-1";
-    let trust = TrustStore::from_single(issuer_id, issuer_vk.clone());
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
     // list-0 bit 0 set -> revoked
     let mut status = StatusCache::from_map(vec![("list-0".to_string(), vec![0b0000_0001])]);
 
@@ -126,7 +135,7 @@ fn vc_expired_denies() {
 
     let (issuer_sk, issuer_vk) = generate_keypair();
     let issuer_id = "oem-issuer-1";
-    let trust = TrustStore::from_single(issuer_id, issuer_vk.clone());
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
     let mut status = StatusCache::empty();
 
     let (admin_sk, admin_vk) = generate_keypair();
@@ -167,7 +176,7 @@ fn vc_not_yet_valid_denies() {
 
     let (issuer_sk, issuer_vk) = generate_keypair();
     let issuer_id = "oem-issuer-1";
-    let trust = TrustStore::from_single(issuer_id, issuer_vk.clone());
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
     let mut status = StatusCache::empty();
 
     let (admin_sk, admin_vk) = generate_keypair();
@@ -211,7 +220,7 @@ fn vc_unknown_issuer_denies() {
 
     // TrustStore has some other issuer/key
     let (_trusted_sk, trusted_vk) = generate_keypair();
-    let trust = TrustStore::from_single("trusted-issuer", trusted_vk.clone());
+    let trust = trust_from_single("trusted-issuer", trusted_vk.clone());
     let mut status = StatusCache::empty();
 
     let (admin_sk, admin_vk) = generate_keypair();
@@ -251,7 +260,7 @@ fn vc_hash_mismatch_denies() {
     // Trusted issuer
     let (issuer_sk, issuer_vk) = generate_keypair();
     let issuer_id = "oem-issuer-1";
-    let trust = TrustStore::from_single(issuer_id, issuer_vk.clone());
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
     let mut status = StatusCache::empty();
 
     let (admin_sk, admin_vk) = generate_keypair();
@@ -318,3 +327,107 @@ fn vc_hash_mismatch_denies() {
     let topo_like_pos = 1_000_000usize;
     assert!(!is_permitted_at_pos(&idx, &user_pk, action, &tags, topo_like_pos, Hlc::new(nbf + 1, 3)));
 }
+
+#[test]
+fn vc_scope_disjoint_set_add_denies() {
+    // issuer/admin/user
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
+    let mut status = StatusCache::empty();
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    // VC scope only {"hv"}; write tries "set+:o:s:e" (tag "mech") → deny
+    let nbf = 10_000u64; let exp = 20_000u64;
+    let (cred, grant) = make_credential_and_grant(
+        &issuer_sk, issuer_id, user_pk, "editor", &["hv"], nbf, exp, &admin_sk, admin_pk);
+
+    let add_mech = Op::new(vec![grant.op_id], Hlc::new(nbf + 1, 1), user_pk,
+        Payload::Data { key: "set+:o:s:e".into(), value: b"E".to_vec() }, &user_sk);
+
+    let mut dag = Dag::new();
+    dag.insert(cred.clone()); dag.insert(grant.clone()); dag.insert(add_mech.clone());
+
+    let topo_like_pos = 1_000usize;
+    let idx = {
+        let ids = vec![cred.op_id, grant.op_id, add_mech.op_id];
+        build_auth_epochs_with(&dag, &ids, &trust, &mut status)
+    };
+
+    let (action, _o, _f, _e, tags) = derive_action_and_tags("set+:o:s:e").unwrap();
+    assert!(!is_permitted_at_pos(&idx, &user_pk, action, &tags, topo_like_pos, Hlc::new(nbf + 1, 1)));
+}
+
+#[test]
+fn vc_scope_mech_allows_set_add_and_rem() {
+    // issuer/admin/user
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
+    let mut status = StatusCache::empty();
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    // VC scope only {"mech"}; both set+ and set- on o.s:e should be allowed.
+    let nbf = 10_000u64; let exp = 20_000u64;
+    let (cred, grant) = make_credential_and_grant(
+        &issuer_sk, issuer_id, user_pk, "editor", &["mech"], nbf, exp, &admin_sk, admin_pk);
+
+    let add = Op::new(vec![grant.op_id], Hlc::new(nbf + 1, 2), user_pk,
+        Payload::Data { key: "set+:o:s:e".into(), value: b"VAL".to_vec() }, &user_sk);
+    let rem = Op::new(vec![grant.op_id], Hlc::new(nbf + 2, 2), user_pk,
+        Payload::Data { key: "set-:o:s:e".into(), value: b"VAL".to_vec() }, &user_sk);
+
+    let mut dag = Dag::new();
+    dag.insert(cred.clone()); dag.insert(grant.clone()); dag.insert(add.clone()); dag.insert(rem.clone());
+
+    let ids = vec![cred.op_id, grant.op_id, add.op_id, rem.op_id];
+    let idx = build_auth_epochs_with(&dag, &ids, &trust, &mut status);
+
+    // Both actions permitted at their positions
+    let (a_add, _o, _f, _e, tags_add) = derive_action_and_tags("set+:o:s:e").unwrap();
+    assert!(is_permitted_at_pos(&idx, &user_pk, a_add, &tags_add, 2, Hlc::new(nbf + 1, 2)));
+    let (a_rem, _o2, _f2, _e2, tags_rem) = derive_action_and_tags("set-:o:s:e").unwrap();
+    assert!(is_permitted_at_pos(&idx, &user_pk, a_rem, &tags_rem, 3, Hlc::new(nbf + 2, 2)));
+}
+
+#[test]
+fn vc_empty_scope_denies_everything() {
+    // issuer/admin/user
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
+    let mut status = StatusCache::empty();
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    // Empty scope: []
+    let nbf = 10_000u64; let exp = 20_000u64;
+    let (cred, grant) = make_credential_and_grant(
+        &issuer_sk, issuer_id, user_pk, "editor", &[], nbf, exp, &admin_sk, admin_pk);
+
+    let w1 = Op::new(vec![grant.op_id], Hlc::new(nbf + 1, 7), user_pk,
+        Payload::Data { key: "mv:o:x".into(), value: b"X".to_vec() }, &user_sk);
+    let w2 = Op::new(vec![grant.op_id], Hlc::new(nbf + 2, 7), user_pk,
+        Payload::Data { key: "set+:o:s:e".into(), value: b"E".to_vec() }, &user_sk);
+
+    let mut dag = Dag::new();
+    dag.insert(cred.clone()); dag.insert(grant.clone()); dag.insert(w1.clone()); dag.insert(w2.clone());
+
+    let ids = vec![cred.op_id, grant.op_id, w1.op_id, w2.op_id];
+    let idx = build_auth_epochs_with(&dag, &ids, &trust, &mut status);
+
+    let (a1, _o, _f, _e, t1) = derive_action_and_tags("mv:o:x").unwrap();
+    assert!(!is_permitted_at_pos(&idx, &user_pk, a1, &t1, 2, Hlc::new(nbf + 1, 7)));
+
+    let (a2, _o2, _f2, _e2, t2) = derive_action_and_tags("set+:o:s:e").unwrap();
+    assert!(!is_permitted_at_pos(&idx, &user_pk, a2, &t2, 3, Hlc::new(nbf + 2, 7)));
+}
+

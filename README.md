@@ -269,3 +269,38 @@ ECAC shows that **availability and eventual consistency** can coexist with **for
 **Tag target:** `v1.0-paper` — reproducible, policy-correct, verifiable.
 
 ---
+
+## Fixtures & Quick Demo (M4)
+
+We ship tiny helpers to create deterministic test credentials and ops locally (no network):
+
+```bash
+# 1) Keys and trust
+ISSUER_SK_HEX=$(openssl rand -hex 32)
+ADMIN_SK_HEX=$(openssl rand -hex 32)
+SUBJECT_SK_HEX=$(openssl rand -hex 32)
+
+mkdir -p trust/status fixtures out
+# Pin issuer VK in trust:
+cargo run -p ecac-cli --example make_jwt -- "$ISSUER_SK_HEX" fixtures/example.jwt
+# Copy printed issuer_vk_hex into trust/issuers.toml:
+cat > trust/issuers.toml <<EOF
+[issuers]
+oem-issuer-1 = "<PASTE_issuer_vk_hex>"
+EOF
+
+# 2) Verify VC and inspect claims/hash
+cargo run -p ecac-cli -- vc-verify fixtures/example.jwt
+
+# 3) Attach to log as ops (Credential + Grant)
+cargo run -p ecac-cli -- vc-attach fixtures/example.jwt "$ISSUER_SK_HEX" "$ADMIN_SK_HEX" out/
+
+# 4) Create a write op signed by the SUBJECT (the make_jwt_subject example also exists)
+cargo run -p ecac-cli --example make_write -- "$SUBJECT_SK_HEX" 15000 mv:o:x OK out/write.op.cbor
+
+# 5) Replay (allowed when status bit is clear)
+cargo run -p ecac-cli --example vc_replay -- out/cred.op.cbor out/grant.op.cbor out/write.op.cbor
+
+# 6) Flip status bit to revoke, then rerun (denied)
+cargo run -p ecac-cli -- vc-status-set list-0 1 1
+cargo run -p ecac-cli --example vc_replay -- out/cred.op.cbor out/grant.op.cbor out/write.op.cbor
