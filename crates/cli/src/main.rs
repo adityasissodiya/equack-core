@@ -44,10 +44,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use ecac_core::crypto::PublicKeyBytes;
 use ecac_core::dag::Dag;
-use ecac_core::op::Op;
+use ecac_core::hlc::Hlc;
+use ecac_core::op::{Op, OpHeader, OpId, Payload};
 use ecac_core::replay::replay_full;
 use ecac_core::state::FieldValue;
+use serde::Deserialize;
 
 /// CLI definition
 #[derive(Parser)]
@@ -55,6 +58,27 @@ use ecac_core::state::FieldValue;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Deserialize)]
+struct OpFlatCompat {
+    #[serde(default)]
+    parents: Vec<OpId>,
+    #[serde(default = "default_hlc")]
+    hlc: Hlc,
+    author_pk: PublicKeyBytes,
+    payload: Payload,
+    sig: Vec<u8>,
+    op_id: [u8; 32],
+}
+
+#[inline]
+fn default_hlc() -> Hlc {
+    Hlc {
+        physical_ms: 0,
+        logical: 0,
+        node_id: 0,
+    }
 }
 
 #[derive(Subcommand)]
@@ -112,35 +136,59 @@ enum Cmd {
         /// Value to set: 1/0/true/false/on/off
         value: String,
     },
-    
+
+    /// Append op(s) from CBOR file or directory into a RocksDB store
+    OpAppend {
+        /// Path to RocksDB directory (created if missing)
+        #[arg(long, short)]
+        db: PathBuf,
+        /// A .cbor file or a directory containing *.cbor (or *.op.cbor) files
+        input: PathBuf,
+    },
+    /// Deterministic replay from a RocksDB store (equals `replay <ops.cbor>`)
+    ReplayFromStore {
+        #[arg(long, short)]
+        db: PathBuf,
+    },
+    /// Create a checkpoint of current materialized state
+    CheckpointCreate {
+        #[arg(long, short)]
+        db: PathBuf,
+    },
+    /// Show latest checkpoint (if any)
+    CheckpointList {
+        #[arg(long, short)]
+        db: PathBuf,
+    },
+    /// Load a checkpoint and print deterministic JSON
+    CheckpointLoad {
+        #[arg(long, short)]
+        db: PathBuf,
+        id: u64,
+    },
+    /// Run integrity checks over the store
+    VerifyStore {
+        #[arg(long, short)]
+        db: PathBuf,
+    },
 }
 
-// fn main() -> anyhow::Result<()> {
-//     let cli = Cli::parse();
-//     match cli.cmd {
-//         Cmd::Replay { ops } => cmd_replay(ops)?,
-//         Cmd::Project { ops, obj, field } => cmd_project(ops, obj, field)?,
-//         Cmd::Simulate { scenario } => simulate::cmd_simulate(Some(scenario.as_str()))?,
-//         Cmd::VcVerify { vc } => commands::cmd_vc_verify(vc.as_os_str().to_str().unwrap())?,
-//         Cmd::VcAttach { vc, issuer_sk_hex, admin_sk_hex, out_dir } => {
-//             let out = out_dir
-//                 .as_ref()
-//                 .and_then(|p| p.as_os_str().to_str())
-//                 .or_else(|| Some(".")) // default "."
-//                 .unwrap();
-//             commands::cmd_vc_attach(
-//                 vc.as_os_str().to_str().unwrap(),
-//                 &issuer_sk_hex,
-//                 &admin_sk_hex,
-//                 Some(out),
-//             )?;
-//         }
-//         Cmd::VcStatusSet { list_id, index, value } => {
-//             commands::cmd_vc_status_set(&list_id, index, value)?;
-//         }
-//     }
-//     Ok(())
-// }
+fn decode_op_compat(bytes: &[u8]) -> anyhow::Result<Op> {
+    if let Ok(op) = serde_cbor::from_slice::<Op>(bytes) {
+        return Ok(op);
+    }
+    let f: OpFlatCompat = serde_cbor::from_slice(bytes)?;
+    Ok(Op {
+        header: OpHeader {
+            parents: f.parents,
+            hlc: f.hlc,
+            author_pk: f.author_pk,
+            payload: f.payload,
+        },
+        sig: f.sig,
+        op_id: f.op_id,
+    })
+}
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -149,7 +197,12 @@ fn main() -> anyhow::Result<()> {
         Cmd::Project { ops, obj, field } => cmd_project(ops, obj, field)?,
         Cmd::Simulate { scenario } => simulate::cmd_simulate(Some(scenario.as_str()))?,
         Cmd::VcVerify { vc } => commands::cmd_vc_verify(vc.as_os_str().to_str().unwrap())?,
-        Cmd::VcAttach { vc, issuer_sk_hex, admin_sk_hex, out_dir } => {
+        Cmd::VcAttach {
+            vc,
+            issuer_sk_hex,
+            admin_sk_hex,
+            out_dir,
+        } => {
             let out = out_dir
                 .as_ref()
                 .and_then(|p| p.as_os_str().to_str())
@@ -161,14 +214,94 @@ fn main() -> anyhow::Result<()> {
                 Some(out),
             )?;
         }
-        Cmd::VcStatusSet { list_id, index, value } => {
+        Cmd::VcStatusSet {
+            list_id,
+            index,
+            value,
+        } => {
             let v = parse_bool_flag(&value)?;
             commands::cmd_vc_status_set(&list_id, index, v)?;
+        }
+        Cmd::OpAppend { db, input } => {
+            use ecac_store::Store;
+            let store = Store::open(&db, Default::default())?;
+            let mut files = Vec::new();
+            if input.is_dir() {
+                for ent in fs::read_dir(&input)? {
+                    let p = ent?.path();
+                    if let Some(ext) = p.extension() {
+                        if ext == "cbor" {
+                            files.push(p);
+                        }
+                    }
+                }
+                files.sort();
+            } else {
+                files.push(input);
+            }
+
+            for f in files {
+                // Use the same tolerant reader as Replay/Project (handles Vec<Op>, single Op, and flat)
+                let ops = read_ops_cbor(&f)?;
+                for op in ops {
+                    let bytes = ecac_core::serialize::canonical_cbor(&op);
+                    let id = store.put_op_cbor(&bytes)?;
+                    eprintln!("appended {}", hex32(&id));
+                }
+            }
+        }
+
+        Cmd::ReplayFromStore { db } => {
+            use ecac_store::Store;
+            let store = Store::open(&db, Default::default())?;
+            let ids = store.topo_ids()?;
+            let cbor = store.load_ops_cbor(&ids)?;
+            let mut ops = Vec::with_capacity(cbor.len());
+            for b in cbor {
+                ops.push(decode_op_compat(&b)?);
+            }
+            let (state, digest) = replay_over_ops(&ops);
+            println!("{}", state.to_deterministic_json_string());
+            println!("digest={}", hex32(&digest));
+        }
+        Cmd::CheckpointCreate { db } => {
+            use ecac_store::Store;
+            let store = Store::open(&db, Default::default())?;
+            let ids = store.topo_ids()?;
+            let cbor = store.load_ops_cbor(&ids)?;
+            let ops: Vec<Op> = cbor
+                .into_iter()
+                .map(|b| serde_cbor::from_slice::<Op>(&b))
+                .collect::<Result<_, _>>()?;
+            let (state, _d) = replay_over_ops(&ops);
+            let id = store.checkpoint_create(&state, ids.len() as u64)?;
+            println!("{id}");
+        }
+        Cmd::CheckpointList { db } => {
+            use ecac_store::Store;
+            let store = Store::open(&db, Default::default())?;
+            if let Some((id, topo)) = store.checkpoint_latest()? {
+                println!("latest: {} @ topo_idx={}", id, topo);
+            } else {
+                println!("(no checkpoints)");
+            }
+        }
+        Cmd::CheckpointLoad { db, id } => {
+            use ecac_store::Store;
+            let store = Store::open(&db, Default::default())?;
+            let (state, topo_idx) = store.checkpoint_load(id)?;
+            println!("{}", state.to_deterministic_json_string());
+            eprintln!("checkpoint_topo_idx={}", topo_idx);
+        }
+        Cmd::VerifyStore { db } => {
+            use ecac_store::Store;
+            let store = Store::open(&db, Default::default())?;
+            store.verify_integrity()?;
+            println!("OK");
         }
     }
     Ok(())
 }
-
 
 fn cmd_replay(path: PathBuf) -> anyhow::Result<()> {
     let ops = read_ops_cbor(&path)?;
@@ -188,7 +321,10 @@ fn cmd_project(path: PathBuf, obj: String, field: String) -> anyhow::Result<()> 
         return Ok(());
     };
     let Some(fv) = fields.get(&field) else {
-        println!(r#"{{"error":"field not found","obj":"{}","field":"{}"}}"#, obj, field);
+        println!(
+            r#"{{"error":"field not found","obj":"{}","field":"{}"}}"#,
+            obj, field
+        );
         return Ok(());
     };
 
@@ -202,7 +338,13 @@ fn cmd_project(path: PathBuf, obj: String, field: String) -> anyhow::Result<()> 
                 .into_iter()
                 .map(|v| (blake3_hash32(&v), v))
                 .collect::<Vec<_>>();
-            winners.sort_by(|a, b| if a.0 != b.0 { a.0.cmp(&b.0) } else { a.1.cmp(&b.1) });
+            winners.sort_by(|a, b| {
+                if a.0 != b.0 {
+                    a.0.cmp(&b.0)
+                } else {
+                    a.1.cmp(&b.1)
+                }
+            });
 
             print!(
                 r#"{{"type":"mv","project":{},"winners":["#,
@@ -256,6 +398,41 @@ fn read_ops_cbor(path: &PathBuf) -> anyhow::Result<Vec<Op>> {
     if let Ok(op) = serde_cbor::from_slice::<Op>(&data) {
         return Ok(vec![op]);
     }
+    // ---- Compatibility: accept legacy *flat* ops (no header wrapper).
+    // Older artifacts had fields at the top level:
+    // { parents?, hlc?, author_pk, payload, sig, op_id }
+
+    // Try Vec<OpFlatCompat>
+    if let Ok(vf) = serde_cbor::from_slice::<Vec<OpFlatCompat>>(&data) {
+        let out = vf
+            .into_iter()
+            .map(|f| Op {
+                header: ecac_core::op::OpHeader {
+                    parents: f.parents,
+                    hlc: f.hlc,
+                    author_pk: f.author_pk,
+                    payload: f.payload,
+                },
+                sig: f.sig,
+                op_id: f.op_id,
+            })
+            .collect();
+        return Ok(out);
+    }
+    // Try single OpFlatCompat
+    if let Ok(f) = serde_cbor::from_slice::<OpFlatCompat>(&data) {
+        let op = Op {
+            header: ecac_core::op::OpHeader {
+                parents: f.parents,
+                hlc: f.hlc,
+                author_pk: f.author_pk,
+                payload: f.payload,
+            },
+            sig: f.sig,
+            op_id: f.op_id,
+        };
+        return Ok(vec![op]);
+    }
     anyhow::bail!("{}: not a CBOR Vec<Op> or Op", path.display())
 }
 
@@ -286,7 +463,7 @@ fn blake3_hash32(v: &[u8]) -> [u8; 32] {
 
 fn parse_bool_flag(s: &str) -> anyhow::Result<bool> {
     match s.to_ascii_lowercase().as_str() {
-        "1" | "true" | "on"  => Ok(true),
+        "1" | "true" | "on" => Ok(true),
         "0" | "false" | "off" => Ok(false),
         other => anyhow::bail!("invalid value '{other}'; expected one of: 1,0,true,false,on,off"),
     }

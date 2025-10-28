@@ -95,7 +95,7 @@ pub fn verify_vc(
     if let Some(schema) = trust.schema_for(iss) {
         match schema {
             "standard-v1" => { /* already enforced by required field parsing below */ }
-            other => { return Err(VcError::BadJson); } // unknown schema label (future guard)
+            _other => { return Err(VcError::BadJson); } // unknown schema label (future guard)
         }
     }
     let jti = payload.get("jti").and_then(|v| v.as_str()).ok_or(VcError::MissingField("jti"))?;

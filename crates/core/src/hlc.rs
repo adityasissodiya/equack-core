@@ -45,6 +45,13 @@ impl Hlc {
     }
 }
 
+impl Default for Hlc {
+        fn default() -> Self {
+            // Safe legacy default for CBOR missing `hlc` (pre-M2 files).
+            Hlc { physical_ms: 0, logical: 0, node_id: 0 }
+        }
+    }
+
 impl Ord for Hlc {
     fn cmp(&self, other: &Self) -> Ordering {
         (self.physical_ms, self.logical, self.node_id).cmp(&(other.physical_ms, other.logical, other.node_id))

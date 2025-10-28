@@ -27,7 +27,11 @@ pub enum CredentialFormat {
 /// The part we hash & sign (no sig/op_id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpHeader {
+/// Some older/externally-produced CBOR may omit `parents` when empty.
+/// Accept that by defaulting to [] on deserialization (serialization unchanged).
     pub parents: Vec<OpId>,
+/// Older CBOR may omit `hlc`; accept and default to zero to keep legacy files readable.
+    #[serde(default)]
     pub hlc: Hlc,
     pub author_pk: PublicKeyBytes,
     pub payload: Payload,
