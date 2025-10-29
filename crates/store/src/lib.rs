@@ -20,6 +20,7 @@ use ecac_core::state::State;
 use getrandom::getrandom;
 //use ecac_core::op::OpHeader;
 //use ed25519_dalek::Signature;
+use ecac_core::{vc::verify_vc, status::StatusCache, trust::TrustStore};
 
 type Db = DBWithThreadMode<MultiThreaded>;
 
@@ -66,6 +67,21 @@ struct CheckpointBlob {
     state_digest: [u8; 32],
     state_cbor: Vec<u8>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct VerifiedVcPersist {
+    cred_id: String,
+    issuer: String,
+    subject_pk: [u8; 32],
+    role: String,
+    scope: Vec<String>,           // same order you stored in CLI
+    nbf_ms: u64,
+    exp_ms: u64,
+    status_list_id: Option<String>,
+    status_index: Option<u32>,
+    cred_hash: [u8; 32],
+}
+
 
 #[inline]
 fn default_hlc() -> Hlc {
@@ -195,11 +211,21 @@ impl Store {
             Some(_) => anyhow::bail!("unknown schema_version; expected {}", SCHEMA),
         }
         // One-time DB UUID for audit/debug (hex-encoded 128-bit)
-        if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
-            let mut id = [0u8; 16];
-            getrandom(&mut id)?;
-            this.put_meta_once("db_uuid", hex::encode(id).as_bytes())?;
-        }
+        // if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
+        //     let mut id = [0u8; 16];
+        //     getrandom(&mut id)?;
+        //     this.put_meta_once("db_uuid", hex::encode(id).as_bytes())?;
+        // }
+        // After schema guard in `open`:
+if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
+    let mut id = [0u8; 16];
+    // cryptographically-strong random id
+    getrandom(&mut id).context("entropy for db_uuid")?;
+    let mut b = WriteBatch::default();
+    b.put_cf(&this.cf(CF_META), b"db_uuid", &id);
+    this.db.write_opt(b, &this.write_opts())?;
+}
+
         // First boot (or after crash) adoption pass to finalize any now-satisfied orphans
         this.adopt_ready()?;
         Ok(this)
@@ -232,6 +258,15 @@ impl Store {
         Ok(self.db.get_cf(&self.cf(CF_OPS), op_id)?)
     }
 
+    pub fn db_uuid(&self) -> Result<[u8;16]> {
+        let raw = self.db
+            .get_cf(&self.cf(CF_META), b"db_uuid")?
+            .ok_or_else(|| anyhow!("missing db_uuid"))?;
+        let mut id = [0u8;16];
+        anyhow::ensure!(raw.len() == 16, "db_uuid must be 16 bytes");
+        id.copy_from_slice(&raw);
+        Ok(id)
+    }
     /// Store an op given its exact canonical CBOR bytes.
 /// Validates: op_id = H(OP_HASH_DOMAIN || canonical_cbor(header)), signature under author_pk.
 pub fn put_op_cbor(&self, op_cbor: &[u8]) -> Result<[u8;32]> {
@@ -553,6 +588,84 @@ if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
             topo.len() == ops_count && ops_count == edges_count,
             "topo/ops/edges mismatch"
         );
+
+        // ---- VC cache parity (only if ./trust exists; otherwise silently skip) ----
+let trust = match TrustStore::load_from_dir("./trust") {
+    Ok(t) => Some(t),
+    Err(_) => None, // If trust dir is absent, skip parity check.
+};
+
+if let Some(trust) = trust {
+    let mut status = StatusCache::load_from_dir("./trust/status");
+
+    // First, for every vc_raw entry, recompute verified and compare to vc_verified
+    let mut raw_keys: BTreeSet<[u8; 32]> = BTreeSet::new();
+    let it_raw = self.db.iterator_cf(&self.cf(CF_VC_RAW), IteratorMode::Start);
+    for kv in it_raw {
+        let (k, v) = kv?;
+        if k.len() != 32 {
+            continue;
+        }
+        let mut cred_hash = [0u8; 32];
+        cred_hash.copy_from_slice(&k);
+
+        raw_keys.insert(cred_hash);
+
+        let verified = verify_vc(&v, &trust, &mut status)
+            .map_err(|e| anyhow!("vc_raw failed to verify for {}: {:?}", hex::encode(k.as_ref()), e))?;
+
+        let persist = VerifiedVcPersist {
+            cred_id: verified.cred_id.clone(),
+            issuer: verified.issuer.clone(),
+            subject_pk: verified.subject_pk,
+            role: verified.role.clone(),
+            // IMPORTANT: keep iteration order identical to CLI storage.
+            scope: verified.scope_tags.iter().cloned().collect::<Vec<_>>(),
+            nbf_ms: verified.nbf_ms,
+            exp_ms: verified.exp_ms,
+            status_list_id: verified.status_list_id.clone(),
+            status_index: verified.status_index,
+            cred_hash: verified.cred_hash,
+        };
+        let expect = serde_cbor::to_vec(&persist)?;
+
+        match self.db.get_cf(&self.cf(CF_VC_VERIFIED), &cred_hash)? {
+            Some(stored) if stored == expect => {}
+            Some(_) => {
+                return Err(anyhow!(
+                    "vc_verified mismatch for {}",
+                    hex::encode(k.as_ref())
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "missing vc_verified for {}",
+                    hex::encode(k.as_ref())
+                ));
+            }
+        }
+    }
+
+    // Second, ensure there are no extra vc_verified entries without a corresponding vc_raw
+    let it_verified = self.db.iterator_cf(&self.cf(CF_VC_VERIFIED), IteratorMode::Start);
+    for kv in it_verified {
+        let (k, _v) = kv?;
+        if k.len() != 32 {
+            continue;
+        }
+        let mut ch = [0u8; 32];
+        ch.copy_from_slice(&k);
+        if !raw_keys.contains(&ch) {
+            return Err(anyhow!(
+                "vc_verified without vc_raw for {}",
+                hex::encode(k.as_ref())
+            ));
+        }
+    }
+}
+// ---- end VC parity ----
+
+
         Ok(())
     }
 
