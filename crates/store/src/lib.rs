@@ -17,6 +17,7 @@ use ecac_core::hlc::Hlc;
 use ecac_core::op::{Op, OpId, Payload};
 use ecac_core::serialize::canonical_cbor;
 use ecac_core::state::State;
+use getrandom::getrandom;
 //use ecac_core::op::OpHeader;
 //use ed25519_dalek::Signature;
 
@@ -193,6 +194,12 @@ impl Store {
             }
             Some(_) => anyhow::bail!("unknown schema_version; expected {}", SCHEMA),
         }
+        // One-time DB UUID for audit/debug (hex-encoded 128-bit)
+        if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
+            let mut id = [0u8; 16];
+            getrandom(&mut id)?;
+            this.put_meta_once("db_uuid", hex::encode(id).as_bytes())?;
+        }
         // First boot (or after crash) adoption pass to finalize any now-satisfied orphans
         this.adopt_ready()?;
         Ok(this)
@@ -293,6 +300,14 @@ pub fn put_op_cbor(&self, op_cbor: &[u8]) -> Result<[u8;32]> {
     b.put_cf(&self.cf(CF_BY_AUTHOR), k, []);
 
     self.db.write_opt(b, &self.write_opts())?;
+    
+// DEV crash-inject: die immediately after a committed write
+if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
+    // abort() does not run destructors; good enough to simulate a crash
+    std::process::abort();
+}
+
+
     Ok(op.op_id)
 }
 
@@ -394,6 +409,26 @@ pub fn put_op_cbor(&self, op_cbor: &[u8]) -> Result<[u8;32]> {
         Ok(out)
     }
 
+    // crates/store/src/lib.rs -> impl Store { ... }
+    /// Persist the highest topo index we've fully applied.
+    pub fn set_topo_watermark(&self, v: u64) -> Result<()> {
+        let mut b = WriteBatch::default();
+        b.put_cf(&self.cf(CF_META), b"topo_watermark", &v.to_be_bytes());
+        self.db.write_opt(b, &self.write_opts())?;
+        Ok(())
+    }
+
+    /// Read the current topo watermark (if any).
+    pub fn get_topo_watermark(&self) -> Result<Option<u64>> {
+        if let Some(b) = self.db.get_cf(&self.cf(CF_META), b"topo_watermark")? {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&b);
+            Ok(Some(u64::from_be_bytes(a)))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn load_ops_cbor(&self, ids: &[[u8; 32]]) -> Result<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
@@ -493,6 +528,16 @@ pub fn put_op_cbor(&self, op_cbor: &[u8]) -> Result<[u8;32]> {
                 return Err(anyhow!("edge without op {}", hex::encode(k.as_ref())));
             }
             let e: EdgeVal = serde_cbor::from_slice(&v)?;
+
+            // NEW: check edges.parents exactly matches the op's parents
+            let op_bytes = self.db.get_cf(&self.cf(CF_OPS), k.as_ref())?
+                .ok_or_else(|| anyhow!("missing op {} while verifying edges", hex::encode(k.as_ref())))?;
+            let op: Op = serde_cbor::from_slice(&op_bytes)?;
+            if e.parents != op.header.parents {
+                return Err(anyhow!("edges parents mismatch for {}", hex::encode(k.as_ref())));
+            }
+            // NEW
+
             for p in &e.parents {
                 if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
                     missing_parent += 1;
