@@ -149,6 +149,9 @@ enum Cmd {
     ReplayFromStore {
         #[arg(long, short)]
         db: PathBuf,
+        /// If set, show latest checkpoint then (for now) do a full replay (incremental will replace this).
+        #[arg(long)]
+        from_checkpoint: bool,
     },
     /// Create a checkpoint of current materialized state
     CheckpointCreate {
@@ -251,9 +254,22 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Cmd::ReplayFromStore { db } => {
+        Cmd::ReplayFromStore {
+            db,
+            from_checkpoint,
+        } => {
             use ecac_store::Store;
             let store = Store::open(&db, Default::default())?;
+            if from_checkpoint {
+                if let Some((ck_id, _topo)) = store.checkpoint_latest()? {
+                    let (ck_state, topo_idx) = store.checkpoint_load(ck_id)?;
+                    eprintln!("loaded checkpoint {} @ topo_idx={}", ck_id, topo_idx);
+                    println!("{}", ck_state.to_deterministic_json_string());
+                    eprintln!("(incremental apply not wired yet; doing full replay below)");
+                } else {
+                    eprintln!("(no checkpoints)");
+                }
+            }
             let ids = store.topo_ids()?;
             let cbor = store.load_ops_cbor(&ids)?;
             let mut ops = Vec::with_capacity(cbor.len());
