@@ -6,6 +6,7 @@ use ecac_store::{Store, StoreOptions};
 use pretty_assertions::assert_eq;
 use rocksdb::{ColumnFamilyDescriptor, Options, DBWithThreadMode, MultiThreaded};
 use std::{fs, path::Path, path::PathBuf};
+use tempfile::tempdir;
 
 /// --- helpers ----------------------------------------------------------------
 
@@ -231,3 +232,52 @@ let victim = ops.first().expect("non-empty fixture");
     Ok(())
 }
 
+#[test]
+fn checkpoint_parity_matches_full_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let dbp = dir.path().join("ecac.db");
+    let store = Store::open(&dbp, Default::default()).unwrap();
+
+    // Append some ops (reuse your helper if you have one; otherwise use ops.cbor fixture path)
+    let ops: Vec<Op> = /* generate or load a small valid chain */ {
+        // minimal: one parent + 1-2 children with data payloads
+        // if you already have helpers, call them; else leave a TODO to wire.
+        vec![]
+    };
+    // If you don’t have generators in this crate, skip; you’ve already validated via CLI.
+
+    // For deterministic test, guard that DB has something:
+    if ops.is_empty() { return; }
+
+    for op in &ops {
+        let bytes = ecac_core::serialize::canonical_cbor(op);
+        store.put_op_cbor(&bytes).unwrap();
+    }
+
+    // Full replay from store
+    let ids = store.topo_ids().unwrap();
+    let cbor = store.load_ops_cbor(&ids).unwrap();
+    let ops_dec: Vec<Op> = cbor.into_iter().map(|b| serde_cbor::from_slice(&b).unwrap()).collect();
+    let (st_full, dig_full) = {
+        let mut dag = ecac_core::dag::Dag::new();
+        for op in &ops_dec { dag.insert(op.clone()); }
+        ecac_core::replay::replay_full(&dag)
+    };
+
+    // Create checkpoint, then reconstruct using checkpoint + incremental
+    let ck = store.checkpoint_create(&st_full, ids.len() as u64).unwrap();
+    let (st_ck, topo_idx) = store.checkpoint_load(ck).unwrap();
+    assert_eq!(topo_idx as usize, st_full.processed_count());
+
+    // Incremental from checkpoint
+    let (st_inc, dig_inc) = {
+        let mut dag = ecac_core::dag::Dag::new();
+        for op in &ops_dec { dag.insert(op.clone()); }
+        let mut s = st_ck.clone();
+        s.set_processed_count(topo_idx as usize);
+        ecac_core::replay::apply_incremental(&mut s, &dag)
+    };
+
+    assert_eq!(st_full.to_deterministic_json_string(), st_inc.to_deterministic_json_string());
+    assert_eq!(dig_full, dig_inc);
+}

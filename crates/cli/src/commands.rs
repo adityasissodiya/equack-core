@@ -12,6 +12,9 @@ use ecac_core::serialize::canonical_cbor;
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
+use std::path::Path;
+use ecac_store::Store;
+use serde::{Serialize, Deserialize};
 
 fn hex_nibble(b: u8) -> Result<u8> {
     match b {
@@ -45,6 +48,21 @@ fn to_hex32(arr: &[u8; 32]) -> String {
     s
 }
 
+#[derive(Serialize, Deserialize)]
+struct PersistVerifiedVc {
+    cred_id: String,
+    issuer: String,
+    subject_pk: [u8; 32],
+    role: String,
+    scope_tags: Vec<String>,
+    nbf_ms: u64,
+    exp_ms: u64,
+    status_list_id: Option<String>, // <-- was String
+    status_index: Option<u32>,      // <-- was u32
+    cred_hash: [u8; 32],
+}
+
+
 pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
     let compact = fs::read(vc_path)?;
     // By convention, look in ./trust and ./trust/status
@@ -54,6 +72,46 @@ pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
 
     let v = verify_vc(&compact, &trust, &mut status)
         .map_err(|e| anyhow!("VC verify failed: {:?}", e))?;
+
+//         // Persist VC caches (M5: avoid re-verification on boot)
+// {
+//     // Allow override via env; falls back to ".ecac.db"
+//     let db_dir = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+//     let store = Store::open(Path::new(&db_dir), Default::default())?;
+
+//     // Raw compact JWT bytes
+//     store.persist_vc_raw(v.cred_hash, &compact)?;
+
+//     // Verified struct, as CBOR
+//     let verified_cbor = serde_cbor::to_vec(&v)?;
+//     store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
+// }
+
+    // ---- Persist VC caches (optional but sensible) ----
+    // DB path via env ECAC_DB or default ".ecac.db"
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // 1) Raw compact JWT bytes
+    store.persist_vc_raw(v.cred_hash, &compact)?;
+
+    // 2) Slim, stable, serde-friendly verified snapshot
+    let pv = PersistVerifiedVc {
+        cred_id: v.cred_id.clone(),
+        issuer: v.issuer.clone(),
+        subject_pk: v.subject_pk,
+        role: v.role.clone(),
+        scope_tags: v.scope_tags.iter().cloned().collect(),
+        nbf_ms: v.nbf_ms,
+        exp_ms: v.exp_ms,
+        status_list_id: v.status_list_id.clone(), // now matches Option<String>
+        status_index: v.status_index,             // now matches Option<u32>
+        cred_hash: v.cred_hash,
+    };
+        
+    let verified_cbor = serde_cbor::to_vec(&pv)?;
+    store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
+    // ---------------------------------------------------
 
     let out = json!({
         "cred_id": v.cred_id,

@@ -254,32 +254,39 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Cmd::ReplayFromStore {
-            db,
-            from_checkpoint,
-        } => {
+        Cmd::ReplayFromStore { db, from_checkpoint } => {
             use ecac_store::Store;
             let store = Store::open(&db, Default::default())?;
-            if from_checkpoint {
-                if let Some((ck_id, _topo)) = store.checkpoint_latest()? {
-                    let (ck_state, topo_idx) = store.checkpoint_load(ck_id)?;
-                    eprintln!("loaded checkpoint {} @ topo_idx={}", ck_id, topo_idx);
-                    println!("{}", ck_state.to_deterministic_json_string());
-                    eprintln!("(incremental apply not wired yet; doing full replay below)");
-                } else {
-                    eprintln!("(no checkpoints)");
-                }
-            }
+        
+            // 1) Load all ops in topo order
             let ids = store.topo_ids()?;
             let cbor = store.load_ops_cbor(&ids)?;
             let mut ops = Vec::with_capacity(cbor.len());
-            for b in cbor {
-                ops.push(decode_op_compat(&b)?);
-            }
-            let (state, digest) = replay_over_ops(&ops);
+            for b in cbor { ops.push(decode_op_compat(&b)?); }
+        
+            // 2) Optional checkpoint fast-path, only if the flag was provided
+            let state_opt = if from_checkpoint {
+                if let Some((ck_id, _topo)) = store.checkpoint_latest()? {
+                    let (mut s, saved_topo) = store.checkpoint_load(ck_id)?;
+                    s.set_processed_count(saved_topo as usize);
+                    if s.processed_count() > ops.len() {
+                        s.set_processed_count(ops.len());
+                    }
+                    Some(s)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        
+            // 3) Full DAG view + incremental apply if we had a checkpoint
+            let (state, digest) = replay_over_ops_with_state(state_opt, &ops);
             println!("{}", state.to_deterministic_json_string());
             println!("digest={}", hex32(&digest));
         }
+        
+
         Cmd::CheckpointCreate { db } => {
             use ecac_store::Store;
             let store = Store::open(&db, Default::default())?;
@@ -402,6 +409,23 @@ fn replay_over_ops(ops: &[Op]) -> (ecac_core::state::State, [u8; 32]) {
     }
     replay_full(&dag)
 }
+
+fn replay_over_ops_with_state(mut st: Option<ecac_core::state::State>, ops: &[Op]) -> (ecac_core::state::State, [u8;32]) {
+    // Build full DAG so policy epochs and HB checks see complete history
+    let mut dag = Dag::new();
+    for op in ops {
+        dag.insert(op.clone());
+    }
+    match st {
+        Some(mut s) => {
+            // IMPORTANT: apply_incremental will skip prefix based on s.processed_count()
+            let (_s2, digest) = ecac_core::replay::apply_incremental(&mut s, &dag);
+            (s, digest)
+        }
+        None => ecac_core::replay::replay_full(&dag),
+    }
+}
+
 
 /// Read a CBOR file containing either Vec<Op> or a single Op.
 fn read_ops_cbor(path: &PathBuf) -> anyhow::Result<Vec<Op>> {
