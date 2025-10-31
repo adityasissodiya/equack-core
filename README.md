@@ -1,306 +1,267 @@
-# ECAC Prototype — Eventually Consistent Access Control
+# ECAC — Eventually Consistent Access Control
 
-A **Rust-based, verifiable prototype** implementing the *Eventually Consistent Access Control (ECAC)* model.
-It demonstrates how **policy-correct state** can be achieved in a distributed, offline-first system using **CRDT replication**, **verifiable credentials**, and a **deterministic deny-wins replay**.
+**Deterministic deny‑wins replay with CRDTs, verifiable credentials, and tamper‑evident audit — built for offline, multi‑stakeholder systems.**
 
-This repo contains the core runtime, audit system, crypto plumbing, and reproducible evaluation setup used in the paper *“Eventually Consistent Access Control for Multi-Stakeholder Remanufacturing”*.
+***
 
----
+## ✨ What is ECAC?
 
-## 🧩 Core Philosophy
+ECAC is a **blockchain‑free** model and prototype for **access control with revocation** in **offline‑first** environments. It solves a hard problem: *how to keep working while disconnected, and still end up in a policy‑correct state once devices sync back up.*
 
-* All actions—data updates, grants, revocations—are **signed and hash-linked events** in a causal DAG.
-* Every node maintains a **local log** and can work offline using its **best local knowledge**.
-* When nodes sync, a deterministic **replay** with a **deny-wins** rule ensures:
+**Key idea:** we **replay** all signed operations (writes, grants, revokes) in a fixed, deterministic order. During replay, a **deny‑wins** rule removes any effects that weren’t authorized. This guarantees that all replicas eventually converge to the **same, policy‑correct** state.
 
-  * **Convergence:** all replicas end in the same state.
-  * **Policy safety:** unauthorized ops are retroactively removed.
-* Security and correctness are prioritized over throughput.
-  Every component is deterministic, auditable, and reproducible.
+***
 
----
+## 🧩 Core Principles
 
-## ⚙️ Architecture Overview
+*   **Everything is an event**: each action is a signed, hash‑linked event in a causal DAG (parents‑first).
+*   **Work offline, reconcile later**: nodes apply local knowledge; when they sync, **deterministic replay** fixes the final state.
+*   **Deny‑wins**: if there’s doubt about authorization at a point in time, the operation is **skipped** during replay.
+*   **Audit by construction**: the audit trail is signed and hash‑linked; an independent verifier can re‑run replay and check it matches.
+*   **Security over throughput**: correctness and verifiability come first.
 
-```
-crates/
- ├── core/        # Ops, DAG, CRDTs, replay engine
- ├── policy/      # Authorization epochs & deny-wins filtering
- ├── crypto/      # Signatures, hashes, encryption
- ├── store/       # RocksDB persistence + checkpoints
- ├── net/         # libp2p gossip sync
- ├── vc/          # Verifiable Credential handling (TrustView)
- ├── audit/       # Tamper-evident audit trail
- ├── metrics/     # Bench harness + metrics exporter
- ├── cli/         # Command-line driver & scenarios
- └── ui/          # (optional) local-first viewer
-docs/
- ├── protocol.md
- ├── policy-model.md
- ├── evaluation-plan.md
- ├── audit.md
- └── paper/
-scripts/
- ├── reproduce.sh
- ├── verify_golden.sh
- └── plot.py
-```
+***
 
----
+## 🏗️ Repository Layout
 
-## 🧠 Model Summary
+    crates/
+     ├── core/        # Ops, DAG, CRDTs, replay engine
+     ├── policy/      # Authorization epochs & deny-wins filtering (Cedar semantics)
+     ├── crypto/      # Signatures (Ed25519), hashing (BLAKE3), AEAD (XChaCha20-Poly1305)
+     ├── store/       # RocksDB persistence + checkpoints
+     ├── net/         # libp2p Gossipsub sync + Noise transport
+     ├── vc/          # Verifiable Credential handling + status lists (TrustView)
+     ├── audit/       # Tamper-evident audit trail and verifier
+     ├── metrics/     # Bench harness + metrics exporter
+     ├── cli/         # Command-line tool and scenarios
+     └── ui/          # (optional) local-first viewer
+    docs/
+     ├── protocol.md
+     ├── policy-model.md
+     ├── evaluation-plan.md
+     ├── audit.md
+     └── paper/       # Overleaf-ready LaTeX skeleton (ecac.tex, ecac.bib)
+    scripts/
+     ├── reproduce.sh
+     ├── verify_golden.sh
+     └── plot.py
 
-Each node maintains a **log of signed events**:
+> **Implementation status:** finished up to **M5** (core CRDT + replay + policy epochs + VCs + persistent store). The rest is scaffolded.
 
-```
+***
+
+## 🧠 Model in One Page
+
+### Event format
+
+```json
 {
-  op_id: blake3(canonical_bytes),
-  parents: [OpId],
-  hlc: HybridLogicalClock,
-  author: PublicKey,
-  payload: {type, data...},
-  sig: Ed25519Signature
+  "op_id": "blake3(canonical_bytes)",
+  "parents": ["OpId", "..."],
+  "hlc": "HybridLogicalClock",
+  "author": "PublicKey",
+  "payload": { "type": "...", "data": { /* CRDT update, Grant, Revoke, ... */ } },
+  "sig": "Ed25519Signature"
 }
 ```
 
-### Deterministic Replay
+### Deterministic replay (deny‑wins)
 
-1. Topologically sort the DAG (parents-first; tie: `(hlc, op_id)`).
-2. For each op:
+1.  **Order** events **topologically** (parents-first; tie-break by `(hlc, op_id)`).
+2.  For each event:
+    *   If the **author** is not authorized for `(action, resource)` **at that HLC** → **skip** (deny‑wins).
+    *   Else, apply its **CRDT effect** (e.g., OR‑Set, MV‑Register).
+3.  All replicas that see the same event set reach **identical state**.
 
-   * If `author` lacks valid permission for `(action, resource, hlc)` → skip (`deny-wins`).
-   * Otherwise, apply the op’s CRDT effect (MVReg, ORSet, etc.).
-3. Merge and apply across replicas → identical state.
+### Authorization epochs
 
----
+*   Grants and revocations build **time intervals** of validity for each `(principal, action, resource)`.
+*   Epochs are computed from **VCs** (Verifiable Credentials), **issuer keys**, and **status lists** (revocations), all carried **in‑band** as signed events.
+
+***
 
 ## 🔒 Cryptography & Trust
 
-* **Signatures:** Ed25519 (via `ed25519-dalek`)
-* **Hashing:** BLAKE3 (fast, collision-resistant)
-* **Encryption:** XChaCha20-Poly1305 for confidential tags (per-tag keys, rotated on revoke)
-* **Credentials:** JWT-VCs (W3C Verifiable Credentials)
-* **TrustView:** issuer keys + status lists are distributed **in-band** through signed ops
-* **Audit chain:** every decision (applied/skipped/synced) logged and signed by node key
+*   **Signatures:** Ed25519 (`ed25519-dalek`)
+*   **Hashing:** BLAKE3
+*   **Confidential fields:** XChaCha20‑Poly1305 (per‑tag keys)
+*   **Credentials:** W3C **VCs** (JWT‑VC style)
+*   **TrustView:** issuer keys + status lists shared **in‑band** through events
+*   **Audit:** every decision (applied/skipped/sync/checkpoint) is **signed, hash‑linked**, and independently verifiable
 
----
+***
 
-## 🧮 Policy & Authorization
+## 📜 Policy Semantics (Cedar)
 
-* Policies expressed via **AWS Cedar** (deny-overrides semantics).
-* Grants and revocations form **authorization epochs** (intervals of validity).
-* During replay:
+*   Policies use **AWS Cedar** deny‑overrides semantics.
+*   During replay, ECAC evaluates Cedar policies **at the event’s HLC** with the current TrustView and epoch index.
+*   **Revocations beat grants** when concurrent → **deny‑wins** makes policy safer by default.
 
-  * Ops outside any valid epoch are skipped deterministically.
-  * Revocations override concurrent writes (`deny-wins`).
-* Supports scoped tags for fine-grained step-level control (RBAC/ABAC hybrid).
+***
 
----
+## 📦 Storage & Recovery
 
-## 📦 Storage & Persistence
+*   **RocksDB** with column families (ops, edges, keys, audit, checkpoints).
+*   **Append‑only** writes with `sync=true` for crash consistency.
+*   Deterministic **checkpoints** + **replay parity** → same bytes after re‑ingest.
+*   Audit logs are **tamper‑evident** (hash‑linked + signature chain).
 
-* **RocksDB** backend with separate column families for ops, edges, keys, audit, and checkpoints.
-* **Append-only** writes with `sync=true` for crash consistency.
-* Deterministic **checkpoints** and **replay parity** tests ensure idempotent recovery.
-* **Audit logs** hash-linked and signed, providing offline verifiable integrity.
+***
 
----
+## 🌐 Replication (no blockchain)
 
-## 🌐 Networking & Replication
+*   **libp2p Gossipsub** for anti‑entropy; **Noise** for transport security.
+*   **Parent‑first fetch** ensures causal completeness.
+*   Nodes exchange only **signed / encrypted ops**, not raw state.
 
-* **libp2p Gossipsub** for anti-entropy gossip; **Noise** for secure transport.
-* Static peers; no DHT in prototype.
-* **Causal completeness:** parent-first fetch and dedup guarantee consistency.
-* Nodes exchange only **encrypted or signed ops**, never plaintext state.
+***
 
----
+## 🧾 Audit & Verification
 
-## 📊 Metrics & Evaluation
+*   Audit stream records: `IngestedOp`, `AppliedOp`, `SkippedOp{reason}`, `SyncEvent`, `Checkpoint`.
+*   The **audit verifier** replays the DAG and checks the audit matches the deterministic outcome (detects tampering, omissions, or divergent decisions).
 
-Implements a deterministic **bench harness** (`cli bench`) with reproducible scenarios:
+***
 
-| Scenario         | Purpose                                      |
-| ---------------- | -------------------------------------------- |
-| `hb-chain`       | Baseline causal replay                       |
-| `concurrent`     | MVReg/ORSet concurrency                      |
-| `offline-revoke` | Offline edit + concurrent revoke (deny-wins) |
-| `partition-3`    | Partition/heal convergence (gossip sync)     |
+## 🔑 Confidential Read Control
 
-Metrics exported as CSV + JSONL:
+*   Confidential fields stored as:
+    ```json
+    { "tag": "...", "key_version": N, "nonce": "...", "aead_tag": "...", "ciphertext": "..." }
+    ```
+*   Only holders of `KeyGrant{tag, version}` can decrypt.
+*   **KeyRotate** bumps the version → revoked users cannot read future data (**forward secrecy**).
+*   Non‑authorized readers see consistent `<redacted>` placeholders.
 
-```
-ops_total, ops_applied, ops_skipped_policy, replay_ms, convergence_ms
-```
+***
 
-All results in `/docs/eval/out/` are **bit-for-bit reproducible** via `scripts/reproduce.sh`.
+## ✅ What ECAC Guarantees
 
----
+1.  **Convergence**: same events → same final state across replicas.
+2.  **Policy Safety**: unauthorized effects are removed by replay.
+3.  **Determinism**: given the same DAG, replay is a pure function.
+4.  **Audit Integrity**: audit stream equals the replay’s semantic trace.
+5.  **Forward Secrecy**: after key rotation, old readers can’t decrypt new data.
 
-## 🧾 Audit & Observability
+***
 
-* **Audit trail** = signed, hash-linked stream of:
+## ⚠️ Assumptions, Non‑Claims, and Pitfalls
 
-  * `IngestedOp`, `AppliedOp`, `SkippedOp{reason}`, `SyncEvent`, `Checkpoint`
-* **Verifier** (`cli audit-verify`) replays ops and ensures audit matches deterministic outcome.
-* Detects tampering, missing entries, or divergent replay decisions.
-* **Tracing:** structured logs tagged with op_id, author, and reason.
+**Assumptions**
 
----
+*   Crypto primitives (Ed25519, BLAKE3, XChaCha20‑Poly1305) are secure.
+*   Eventual delivery; crash-consistent storage; HLC monotonicity per node.
+*   Deterministic tie‑break `(hlc, op_id)` is faithfully implemented.
 
-## 🔑 Read Control & Confidential Data
+**Non‑claims**
 
-* Fields tagged as confidential are stored as `EncV1`:
+*   Not chasing maximum throughput.
+*   We do **not** prevent **pre‑sync** use of stale permissions while offline; we **do** ensure policy‑correct **final** state after sync.
+*   Not anonymous authorization; identities are tied to VCs.
 
-  ```
-  {tag, key_version, nonce, aead_tag, ciphertext}
-  ```
-* Only users with a valid `KeyGrant{tag, version}` (VC-backed) can decrypt.
-* Key rotation (`KeyRotate`) provides **forward secrecy**.
-* Non-authorized readers see deterministic `<redacted>` placeholders.
+**Pitfalls to watch**
 
----
+*   **Revocation latency** is bounded by delivery time of status lists (offline nodes may act on stale knowledge temporarily).
+*   **Issuer key compromise** detection depends on revocation propagation.
+*   **Schema evolution** (VCs, policy attributes) needs versioning and migration rules.
 
-## 🧱 Trust Distribution (In-Band)
+***
 
-* Issuer keys and revocation lists are shared through ops:
+## 📊 Evaluation Plan (what exists + what’s coming)
 
-  * `IssuerKey`, `IssuerKeyRevoke`, `StatusListChunk`
-* The **TrustView** builder reconstructs current valid keys and revocations deterministically.
-* No filesystem or network trust roots required; fully self-contained.
+*   **Property‑based tests**: random DAGs; check convergence + policy safety.
+*   **Fuzzing**: replay ordering, DAG merge, epoch edges.
+*   **Crash recovery**: partial writes → identical replay after restart.
+*   **Audit parity**: verifier must match replay decisions (and flag tampering).
+*   **Scenarios (S1–S6)**:
+    *   S1: Offline partition + late revocation
+    *   S2: Multi‑issuer disagreement → status list reconciliation
+    *   S3: Key rotation under concurrent writes
+    *   S4: Crash during checkpoint
+    *   S5: Adversarial reordering/duplication
+    *   S6: Scale‑out anti‑entropy sync
 
----
+**Metrics**
 
-## 🧪 Verification & Testing
+*   Convergence rate; revocation enforcement latency; replay determinism (byte‑identical); audit detection rate; confidentiality coverage; costs (ms/op, bytes/op), availability during partitions.
 
-* **Property-based:** random DAGs → invariant check (convergence + policy safety)
-* **Model checking:** TLA+/Apalache spec for replay invariants
-* **Fuzzing:** `cargo-fuzz` on DAG merge and replay
-* **Crash recovery tests:** partial write → consistent replay
-* **Audit parity:** replay output vs audit log cross-verified
+***
 
----
+## 🏭 Industrial Context: RemaNet & EU Data Spaces
 
-## 🧰 Build & Reproducibility
+*   **Principals**: OEMs, remanufacturers, logistics, auditors.
+*   **Capabilities/Resources**: repair steps, test results, device histories.
+*   **VCs**: capability credentials issued by OEMs/Notified Bodies; status lists shared as events.
+*   **Policies**: Cedar rules define who can do what, at which step, with what evidence.
+*   **Compliance**: export audit as evidence bundles; **deterministic re‑verification** supports dispute resolution.
 
-* Pinned Rust toolchain (via `rust-toolchain.toml`)
-* Deterministic Docker/Nix build environments
-* `make repro` → clean build + deterministic benchmark run + artifact tarball
-* `scripts/verify_golden.sh` compares new run vs golden outputs (hash match)
-* CI (`.github/workflows/repro.yml`) enforces reproducibility, `cargo audit`, SBOM
+***
 
----
+## 🧱 Roadmap (Milestones)
 
-## 🧱 Milestones Summary
+| Milestone | Summary                                             |
+| --------- | --------------------------------------------------- |
+| **M1–M2** | CRDT core + signed op DAG + deterministic replay    |
+| **M3**    | Authorization epochs + deny‑wins                    |
+| **M4–M5** | Verifiable credentials + durable RocksDB store      |
+| **M6**    | Gossip sync + causal completeness                   |
+| **M7**    | Bench harness + metrics                             |
+| **M8**    | Tamper‑evident audit log & verifier                 |
+| **M9**    | Confidential read control + key rotation            |
+| **M10**   | In‑band issuer trust & revocation lists             |
+| **M11**   | Reproducible builds (CI, SBOM, golden artifacts)    |
+| **M12**   | Paper docs + evaluation summary + artifact manifest |
 
-| M#        | Result                                                         |
-| --------- | -------------------------------------------------------------- |
-| **M1–M2** | Core CRDT + signed op DAG + deterministic replay               |
-| **M3**    | Authorization epochs + deny-wins policy filter                 |
-| **M4–M5** | Verifiable credentials + durable RocksDB store                 |
-| **M6**    | Gossip sync + causal completeness                              |
-| **M7**    | Bench harness + metrics export                                 |
-| **M8**    | Tamper-evident audit log                                       |
-| **M9**    | Confidential read-control (encryption & key rotation)          |
-| **M10**   | In-band issuer trust & revocation lists                        |
-| **M11**   | Reproducible build pipeline (CI, SBOM, golden artifacts)       |
-| **M12**   | Paper-ready docs, evaluation summary, reproducibility manifest |
+> Current: **M5 complete**; subsequent items have scaffolding and placeholders.
 
----
+***
 
-## 🧠 Core Invariants
+## 🤝 Contributing
 
-1. **Convergence:** Replicas with the same events produce identical state.
-2. **Policy Safety:** Final state contains no effects of unauthorized ops.
-3. **Determinism:** Given the same DAG, replay produces byte-identical output.
-4. **Audit Integrity:** Hash-linked audit chain verifies end-to-end.
-5. **Forward Secrecy:** Revoked users can’t decrypt new encrypted data.
+1.  Open an issue describing the bug/feature with a **minimal repro**.
+2.  Add tests (property‑based when possible).
+3.  Keep changes **deterministic** (no time‑dependent branching in core).
+4.  Run the full verification suite before submitting a PR.
 
----
+***
 
-## 🚀 Reproduce the Paper Artifacts
+## 🔍 FAQ
 
-```bash
-# 1. Build inside Docker/Nix
-make image && make repro
+**Q: Why not just use a blockchain?**  
+A: We need **offline operation**, predictable latency, and low overhead in OT environments. ECAC gives **auditability and policy‑correct convergence** without the cost or coordination model of a ledger.
 
-# 2. Verify artifacts
-scripts/verify_golden.sh
+**Q: Can nodes “cheat” while offline?**  
+A: They can act on stale credentials **locally**, but when syncing, **deny‑wins replay** removes any unauthorized effects. The audit will also show those decisions.
 
-# 3. Check audit integrity
-cli audit-verify
+**Q: How do you handle clock skew?**  
+A: We use **Hybrid Logical Clocks** and a deterministic tie-break `(hlc, op_id)`. Minor skew doesn’t break determinism.
 
-# 4. Dump trust and metrics
-cli trust-dump
-```
+**Q: What about data confidentiality?**  
+A: Sensitive fields are **encrypted** with per‑tag keys. **KeyRotate** enforces **forward secrecy**; non‑holders always see `<redacted>`.
 
-Results are written to:
+***
 
-```
-docs/eval/out/
-  hb-chain-42.csv
-  offline-revoke-42.csv
-  audit.jsonl
-  trustview.json
-  SHA256SUMS
-```
+## 📦 Reproducibility
 
----
+*   **Deterministic builds** (Rust, locked deps); **SBOM** planned.
+*   **Golden outputs**: `scripts/verify_golden.sh` checks byte‑level replay parity.
+*   **Audit verifier** replays store state and cross‑checks audit.
 
-## 🧾 Licensing & Integrity
+***
 
-* License: MIT/Apache 2.0 dual license.
-* No unsafe code except vetted crypto crates.
-* Each release includes:
+## 📚 References (informal pointers)
 
-  * `sbom.json`
-  * `cosign.sig`
-  * `ecac-artifacts-<gitsha>.tar.gz`
+*   CRDTs for eventual consistency; deterministic, parent‑first replay.
+*   W3C **Verifiable Credentials** (status lists, multi‑issuer).
+*   Cedar policy **deny‑overrides** semantics.
+*   Tamper‑evident logs + independent re‑verification (no blockchain required).
 
----
+*(Formal citations live in `docs/paper/ecac.bib`.)*
 
-## 🧩 Why Rust and Why ECAC
+***
 
-Rust provides predictable execution, verifiable memory safety, and reproducible builds—exactly what correctness-driven distributed systems need.
-ECAC shows that **availability and eventual consistency** can coexist with **formal access-control guarantees**, which most industry systems still lack.
+## 📝 License
 
----
+TBD (e.g., Apache‑2.0 or MIT). Recommend a permissive license to encourage adoption and external verification.
 
-**Status:** Architecture frozen, implementation in progress.
-**Tag target:** `v1.0-paper` — reproducible, policy-correct, verifiable.
-
----
-
-## Fixtures & Quick Demo (M4)
-
-We ship tiny helpers to create deterministic test credentials and ops locally (no network):
-
-```bash
-# 1) Keys and trust
-ISSUER_SK_HEX=$(openssl rand -hex 32)
-ADMIN_SK_HEX=$(openssl rand -hex 32)
-SUBJECT_SK_HEX=$(openssl rand -hex 32)
-
-mkdir -p trust/status fixtures out
-# Pin issuer VK in trust:
-cargo run -p ecac-cli --example make_jwt -- "$ISSUER_SK_HEX" fixtures/example.jwt
-# Copy printed issuer_vk_hex into trust/issuers.toml:
-cat > trust/issuers.toml <<EOF
-[issuers]
-oem-issuer-1 = "<PASTE_issuer_vk_hex>"
-EOF
-
-# 2) Verify VC and inspect claims/hash
-cargo run -p ecac-cli -- vc-verify fixtures/example.jwt
-
-# 3) Attach to log as ops (Credential + Grant)
-cargo run -p ecac-cli -- vc-attach fixtures/example.jwt "$ISSUER_SK_HEX" "$ADMIN_SK_HEX" out/
-
-# 4) Create a write op signed by the SUBJECT (the make_jwt_subject example also exists)
-cargo run -p ecac-cli --example make_write -- "$SUBJECT_SK_HEX" 15000 mv:o:x OK out/write.op.cbor
-
-# 5) Replay (allowed when status bit is clear)
-cargo run -p ecac-cli --example vc_replay -- out/cred.op.cbor out/grant.op.cbor out/write.op.cbor
-
-# 6) Flip status bit to revoke, then rerun (denied)
-cargo run -p ecac-cli -- vc-status-set list-0 1 1
-cargo run -p ecac-cli --example vc_replay -- out/cred.op.cbor out/grant.op.cbor out/write.op.cbor
+***

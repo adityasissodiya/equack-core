@@ -1,7 +1,6 @@
+use libp2p::gossipsub::{self, IdentTopic as Topic, MessageAuthenticity, MessageId, ValidationMode};
+use std::time::Duration;
 use blake3;
-use libp2p::gossipsub::{
-    self, IdentTopic as Topic, MessageAuthenticity, MessageId, ValidationMode,
-};
 use libp2p::identity;
 
 use crate::serializer::{from_cbor_signed_announce, to_cbor_signed_announce};
@@ -20,13 +19,15 @@ pub fn build_gossipsub(local_key: &identity::Keypair) -> gossipsub::Behaviour {
         MessageId::new(h.as_bytes())
     };
 
-    let cfg = gossipsub::ConfigBuilder::default()
-        .validate_messages() // needed to get subscribed handler events
-        .validation_mode(ValidationMode::Permissive) // we self-verify SignedAnnounce anyway
-        .message_id_fn(message_id_fn)
-        .max_transmit_size(64 * 1024)
-        .build()
-        .expect("gossipsub config");
+        let cfg = gossipsub::ConfigBuilder::default()
+            .validate_messages()
+            .validation_mode(ValidationMode::Permissive)
+            .message_id_fn(message_id_fn)
+            .flood_publish(true)                        // <- allow publish even if not in mesh
+            .heartbeat_interval(Duration::from_millis(200)) // <- speed convergence for tests
+            .max_transmit_size(64 * 1024)
+            .build()
+            .expect("gossipsub config");
 
     gossipsub::Behaviour::new(MessageAuthenticity::Signed(local_key.clone()), cfg)
         .expect("gossipsub")

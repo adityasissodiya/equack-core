@@ -3,6 +3,11 @@ name = "ecac-net"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Opt-in: use plaintext security instead of Noise (handy for flaky local tests)
+insecure-plain = ["libp2p/plaintext"]
+default = []
+
 [dependencies]
 anyhow = "1"
 thiserror = "1"
@@ -17,11 +22,12 @@ async-trait = "0.1"
 # Core types (OpId, HLC, etc.)
 ecac-core = { path = "../core" }
 libp2p = { version = "0.54.1", default-features = false, features = [
-  "tcp", "dns", "tokio", "noise", "yamux",
-  "gossipsub", "request-response", "identify", "macros"   # <- macros for #[derive(NetworkBehaviour)]
+  "tcp", "dns", "tokio", "noise", "yamux",  "plaintext",
+  "gossipsub", "request-response", "identify", "macros", "ping"   # <- macros for #[derive(NetworkBehaviour)]
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }  # <- add sync,time
 
 [dev-dependencies]
 rand = "0.8"
-
+env_logger = "0.11"
+log = "0.4"
