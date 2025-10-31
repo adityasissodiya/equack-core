@@ -21,6 +21,7 @@ use getrandom::getrandom;
 //use ecac_core::op::OpHeader;
 //use ed25519_dalek::Signature;
 use ecac_core::{vc::verify_vc, status::StatusCache, trust::TrustStore};
+use ecac_core::crypto::hash_bytes;
 
 type Db = DBWithThreadMode<MultiThreaded>;
 
@@ -258,6 +259,80 @@ if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
         Ok(self.db.get_cf(&self.cf(CF_OPS), op_id)?)
     }
 
+    /// Alias for has_op: do we already have this op?
+    pub fn contains(&self, id: &OpId) -> Result<bool> {
+        self.has_op(id)
+    }
+
+    /// Return up to K head op_ids (tips) among nodes whose parents are present.
+    /// Heads are sorted by (hlc_ms, hlc_logical, hlc_node, op_id) DESC, then truncated to K.
+    pub fn heads(&self, k: usize) -> Result<Vec<OpId>> {
+        let it = self.db.iterator_cf(&self.cf(CF_EDGES), IteratorMode::Start);
+
+        // Nodes whose parents are present; and each node's metadata
+        let mut present_nodes: BTreeSet<OpId> = BTreeSet::new();
+        let mut is_parent_of: BTreeSet<OpId> = BTreeSet::new();
+        let mut meta: BTreeMap<OpId, (u64, u32, u32)> = BTreeMap::new(); // id -> (ms, logical, node)
+
+        for kv in it {
+            let (k, v) = kv?;
+            if k.len() != 32 { continue; }
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&k);
+            let e: EdgeVal = serde_cbor::from_slice(&v)?;
+
+            // Only consider nodes whose parents all exist in OPS (activated)
+            let mut missing = false;
+            for p in &e.parents {
+                if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
+                    missing = true; break;
+                }
+            }
+            if missing { continue; }
+
+            present_nodes.insert(id);
+            for p in &e.parents {
+                is_parent_of.insert(*p);
+            }
+            meta.insert(id, (e.hlc_ms, e.hlc_logical, e.hlc_node));
+        }
+
+        // Heads = present_nodes \ is_parent_of
+        let mut heads: Vec<(u64, u32, u32, OpId)> = Vec::new();
+        for id in present_nodes {
+            if !is_parent_of.contains(&id) {
+                let (ms, lo, node) = *meta.get(&id).unwrap_or(&(0,0,0));
+                heads.push((ms, lo, node, id));
+            }
+        }
+
+        // Sort DESC by (ms, lo, node, id) so "latest" heads appear first
+        heads.sort_by(|a, b| b.cmp(a));
+        heads.truncate(k);
+        Ok(heads.into_iter().map(|(_,_,_,id)| id).collect())
+    }
+
+    /// Tiny 16-bit bloom over the most-recent `n` topo ops (parent-first order).
+    /// Bits are little-endian (bit0 = LSB of byte0). 3 indices from blake3(op_id).
+    pub fn recent_bloom(&self, n: usize) -> Result<[u8; 2]> {
+        let ids = self.topo_ids()?;
+        let take = n.min(ids.len());
+        let mut bloom: [u8; 2] = [0, 0];
+        for id in ids.iter().rev().take(take) {
+            let h = hash_bytes(id);
+            // 3 mixed 16-bit lanes -> indices in [0, 15]
+            let i0 = (u16::from_le_bytes([h[0], h[1]]) % 16) as u8;
+            let i1 = (u16::from_le_bytes([h[2], h[3]]) % 16) as u8;
+            let i2 = (u16::from_le_bytes([h[4], h[5]]) % 16) as u8;
+            for i in [i0, i1, i2] {
+                let byte = (i / 8) as usize;
+                let bit = i % 8;
+                bloom[byte] |= 1u8 << bit; // little-endian bit order
+            }
+        }
+        Ok(bloom)
+    }
+
     pub fn db_uuid(&self) -> Result<[u8;16]> {
         let raw = self.db
             .get_cf(&self.cf(CF_META), b"db_uuid")?
@@ -341,8 +416,6 @@ if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
     // abort() does not run destructors; good enough to simulate a crash
     std::process::abort();
 }
-
-
     Ok(op.op_id)
 }
 

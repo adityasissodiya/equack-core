@@ -1,5 +1,84 @@
-#![allow(dead_code)]
+use async_trait::async_trait;
+use libp2p::{
+    request_response::{self, Behaviour as RrBehaviour, Config as RrConfig, ProtocolSupport},
+    StreamProtocol,
+};
+use std::{io, iter};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Phase 0: placeholder module; real implementation lands in Phase 3.
-/// Will host FetchMissing request/response and streaming of canonical op bytes.
-pub struct Rpc;
+use crate::serializer::{from_cbor_fetch, from_cbor_frame, to_cbor_fetch, to_cbor_frame};
+use crate::types::{FetchMissing, RpcFrame};
+
+/// /ecac/fetch/1
+const FETCH_PROTO: StreamProtocol = StreamProtocol::new("/ecac/fetch/1");
+
+#[derive(Clone, Default)]
+pub struct FetchCodec;
+
+#[async_trait]
+impl request_response::Codec for FetchCodec {
+    type Protocol = StreamProtocol;
+    type Request = FetchMissing;
+    type Response = RpcFrame;
+
+    async fn read_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        io.read_to_end(&mut buf).await?;
+        from_cbor_fetch(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        io.read_to_end(&mut buf).await?;
+        from_cbor_frame(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let bytes = to_cbor_fetch(&req);
+        io.write_all(&bytes).await?;
+        io.close().await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        resp: Self::Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let bytes = to_cbor_frame(&resp);
+        io.write_all(&bytes).await?;
+        io.close().await
+    }
+}
+
+/// Build a RequestResponse behaviour for `/ecac/fetch/1`.
+pub fn build_fetch_behaviour() -> RrBehaviour<FetchCodec> {
+    let protocols = iter::once((FETCH_PROTO.clone(), ProtocolSupport::Full));
+    let cfg = RrConfig::default();
+    RrBehaviour::<FetchCodec>::new(protocols, cfg)
+}
