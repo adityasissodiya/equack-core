@@ -3,11 +3,12 @@ use anyhow::Result;
 use ::futures::StreamExt;
 use std::collections::HashSet;
 use libp2p::ping::{Behaviour as PingBehaviour, Config as PingConfig, Event as PingEvent};
+use libp2p::identify::{Behaviour as IdentifyBehaviour, Config as IdentifyConfig, Event as IdentifyEvent};
 use libp2p::{
     gossipsub::{self, IdentTopic as Topic, Event as GossipsubEvent},
     request_response::{
         self, Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
-        ResponseChannel, Behaviour as RrBehaviour,
+        ResponseChannel, Behaviour as RrBehaviour, OutboundFailure as RrOutboundFailure,
     },
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, identity, Swarm, PeerId, Multiaddr,
@@ -30,7 +31,8 @@ use crate::types::{FetchMissing, RpcFrame, SignedAnnounce};
 pub struct ComposedBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub fetch: RrBehaviour<crate::rpc::FetchCodec>,
-    pub ping: PingBehaviour,    
+    pub ping: PingBehaviour,
+    pub identify: IdentifyBehaviour,    
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -39,6 +41,7 @@ pub enum ComposedEvent {
     Gossipsub(gossipsub::Event),
     Fetch(request_response::Event<FetchMissing, RpcFrame>),
     Ping(PingEvent),
+    Identify(IdentifyEvent),
 }
 
 impl From<gossipsub::Event> for ComposedEvent {
@@ -50,27 +53,42 @@ impl From<request_response::Event<FetchMissing, RpcFrame>> for ComposedEvent {
 impl From<PingEvent> for ComposedEvent {
     fn from(e: PingEvent) -> Self { ComposedEvent::Ping(e) }
 }
+impl From<IdentifyEvent> for ComposedEvent {
+        fn from(e: IdentifyEvent) -> Self { ComposedEvent::Identify(e) }
+    }
 
 /// High-level node wrapper used by CLI/daemon.
 pub struct Node {
     swarm: Swarm<ComposedBehaviour>,
     pub peer_id: PeerId,
     pub announce_topic: Topic,
+
     // Outgoing events for upper layers
     pub announces_rx: mpsc::UnboundedReceiver<(PeerId, SignedAnnounce)>,
     pub rpc_req_rx: mpsc::UnboundedReceiver<(PeerId, ResponseChannel<RpcFrame>, FetchMissing)>,
+    /// Client-side: frames from responses we receive (peer, req_id, frame)
+    pub rr_resp_rx: mpsc::UnboundedReceiver<(PeerId, OutboundRequestId, RpcFrame)>,
+    /// Client-side: outbound RR failures (peer, req_id, reason)
+    pub rr_out_fail_rx: mpsc::UnboundedReceiver<(Option<PeerId>, OutboundRequestId, RrOutboundFailure)>,
     // listen address surfaced for tests / callers
     pub listen_addr_rx: mpsc::UnboundedReceiver<Multiaddr>,
+
     // internal senders owned by the Node; poll_once() uses these
     ann_tx: mpsc::UnboundedSender<(PeerId, SignedAnnounce)>,
     rpc_tx: mpsc::UnboundedSender<(PeerId, ResponseChannel<RpcFrame>, FetchMissing)>,
+    rr_resp_tx: mpsc::UnboundedSender<(PeerId, OutboundRequestId, RpcFrame)>,
+    rr_out_fail_tx: mpsc::UnboundedSender<(Option<PeerId>, OutboundRequestId, RrOutboundFailure)>,
     listen_tx: mpsc::UnboundedSender<Multiaddr>,
+
     // track currently connected peers so tests can gate on it
     connected: HashSet<PeerId>,
+
     // (future) surface if you want; currently unused
-    conn_evt_tx: mpsc::UnboundedSender<SwarmEvent<ComposedEvent>>,
+    _conn_evt_tx: mpsc::UnboundedSender<SwarmEvent<ComposedEvent>>,
     pub conn_evt_rx: mpsc::UnboundedReceiver<SwarmEvent<ComposedEvent>>,
 }
+
+
 
 impl Node {
     pub fn new(project_id: &str) -> anyhow::Result<Self> {
@@ -105,7 +123,12 @@ impl Node {
         let gossipsub = build_gossipsub(&local_key);
         let fetch = crate::rpc::build_fetch_behaviour();
         let ping = PingBehaviour::new(PingConfig::new());  // defaults are fine
-        let behaviour = ComposedBehaviour { gossipsub, fetch, ping };
+        //let behaviour = ComposedBehaviour { gossipsub, fetch, ping };
+        let identify = IdentifyBehaviour::new(
+                        IdentifyConfig::new("/ecac/1.0.0".into(), local_key.public())
+                            .with_agent_version("ecac-net/0.1.0".into())
+                    );
+        let behaviour = ComposedBehaviour { gossipsub, fetch, ping, identify };
 
         // Swarm config for tokio
         let cfg = libp2p::swarm::Config::with_tokio_executor();
@@ -118,8 +141,13 @@ impl Node {
         // Channels
         let (ann_tx, ann_rx) = mpsc::unbounded_channel();
         let (rpc_tx, rpc_rx) = mpsc::unbounded_channel();
+                // Mirror libp2p::request_response::OutboundFailure { peer: Option<PeerId>, ... }
+        let (rr_out_fail_tx, rr_out_fail_rx) =
+            mpsc::unbounded_channel::<(Option<PeerId>, OutboundRequestId, RrOutboundFailure)>();
+        let (rr_resp_tx, rr_resp_rx) = mpsc::unbounded_channel::<(PeerId, OutboundRequestId, RpcFrame)>();
         let (listen_tx, listen_rx) = mpsc::unbounded_channel();
         let (conn_evt_tx, conn_evt_rx) = mpsc::unbounded_channel();
+        //let (rr_resp_tx, rr_resp_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             swarm,
@@ -127,12 +155,16 @@ impl Node {
             announce_topic: topic,
             announces_rx: ann_rx,
             rpc_req_rx: rpc_rx,
+            rr_out_fail_rx,
+            rr_resp_rx,
             listen_addr_rx: listen_rx,
             ann_tx,
             rpc_tx,
+            rr_out_fail_tx,
+            rr_resp_tx,
             listen_tx,
             connected: HashSet::new(),
-            conn_evt_tx,
+            _conn_evt_tx: conn_evt_tx,
             conn_evt_rx,
         })
     }
@@ -148,8 +180,9 @@ impl Node {
     
         // Canonical dial: target the PeerId and provide the address explicitly.
         use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-        let opts = DialOpts::peer_id(peer)
-            .condition(PeerCondition::Always)      // force a dial even if swarm thinks it's connected/backing off
+                let opts = DialOpts::peer_id(peer)
+            // In prod you probably don't want two connections; NotDialing prevents dup dials
+            .condition(PeerCondition::NotDialing)
             .addresses(vec![addr.clone()])         // supply the concrete addr we just learned
             .build();
     
@@ -157,15 +190,10 @@ impl Node {
         Swarm::dial(&mut self.swarm, opts)
             .map_err(|e| anyhow::anyhow!("peer-id dial failed for {peer}: {e:?}"))?;
     
-        // Fallback: also try dialing the full /p2p multiaddr (best-effort; ignore error).
-        let mut addr_with_p2p = addr.clone();
-        addr_with_p2p.push(libp2p::multiaddr::Protocol::P2p(peer.into()));
-        let _ = Swarm::dial(&mut self.swarm, addr_with_p2p.clone());
-    
-        eprintln!(
-            "[{:?}] dialing peer {} (addr book includes {}, also tried {})",
-            self.peer_id, peer, addr, addr_with_p2p
-        );
+                eprintln!(
+                    "[{:?}] dialing peer {} (addr book includes {})",
+                    self.peer_id, peer, addr
+                    );
         Ok(())
     }
       
@@ -205,6 +233,8 @@ impl Node {
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                 self.connected.insert(peer_id);
                 eprintln!("[{:?}] connection established via {:?}", self.peer_id, endpoint);
+                // Make gossip robust in tests: treat all connected peers as explicit.
+                self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                 Ok(true)
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
@@ -227,7 +257,12 @@ impl Node {
             SwarmEvent::Behaviour(ComposedEvent::Ping(_ev)) => {
                 eprintln!("[{:?}] ping: {:?}", self.peer_id, _ev);
                 Ok(true)
-            }         
+            }
+                        SwarmEvent::Behaviour(ComposedEvent::Identify(ev)) => {
+                                // Useful breadcrumbs: learned/confirmed observed addrs, protocols, agent, etc.
+                                eprintln!("[{:?}] identify: {:?}", self.peer_id, ev);
+                                Ok(true)
+                            }         
 
             // ---- listen addresses -------------------------------------------------------------
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -279,9 +314,10 @@ impl Node {
                                 eprintln!("[{:?}] <- RR Request from {:?}", self.peer_id, peer);
                                 let _ = self.rpc_tx.send((peer, channel, request));
                             }
-                            RequestResponseMessage::Response { .. } => {
-                                eprintln!("[{:?}] <- RR Response from {:?}", self.peer_id, peer);
-                            }
+                                                    RequestResponseMessage::Response { request_id, response } => {
+                                                    eprintln!("[{:?}] <- RR Response from {:?}", self.peer_id, peer);
+                                                                let _ = self.rr_resp_tx.send((peer, request_id, response));
+                                            }
                         }
                     }
                     RequestResponseEvent::OutboundFailure { peer, request_id, error } => {
@@ -289,6 +325,8 @@ impl Node {
                             "[{:?}] RR OutboundFailure to {:?} (req {:?}): {:?}",
                             self.peer_id, peer, request_id, error
                         );
+                                                // Surface to upper layers/tests.
+                                                let _ = self.rr_out_fail_tx.send((Some(peer), request_id, error));
                     }
                     RequestResponseEvent::InboundFailure  { peer, request_id, error } => {
                         eprintln!(
@@ -306,13 +344,14 @@ impl Node {
                 Ok(true)
             }   
 
-                    // ---- everything else (make these visible) -----------------------------------------
-                    other => {
-                        // Show noisy lifecycle to see *why* we’re not establishing:
-                        // Dialing, IncomingConnection, PendingConnection*, etc.
-                        eprintln!("[{:?}] swarm event: {:?}", self.peer_id, other);
-                        Ok(false)
-                    }
+                        // ---- everything else (forward + log) ----------------------------------------------
+                        other => {
+                // We own `other`; avoid Clone by formatting before sending.
+                let dbg = format!("{:?}", &other);
+                let _ = self._conn_evt_tx.send(other);
+                eprintln!("[{:?}] swarm event: {}", self.peer_id, dbg);
+                            Ok(false)
+                        }
         }
     }
 

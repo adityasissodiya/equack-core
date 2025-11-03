@@ -2,8 +2,8 @@
 use std::time::Duration;
 use libp2p::Multiaddr;
 use anyhow::Result;
-use tokio::time::{timeout, sleep};
-
+//use tokio::time::{timeout, sleep};
+use tokio::time::timeout;
 use ecac_net::transport::Node;
 use ecac_net::types::{FetchMissing, RpcFrame};
 
@@ -89,14 +89,67 @@ async fn two_peer_gossip_and_fetch() -> Result<()> {
 
     assert!(got_req.is_ok(), "timed out waiting for RR request at server side");
 
-    // Flush a few more events to settle the pipe
-    for _ in 0..20 {
-        tokio::select! {
-            r = a.poll_once() => { let _ = r?; }
-            r = b.poll_once() => { let _ = r?; }
-            _ = sleep(Duration::from_millis(10)) => {}
-        }
-    }
+        // Now assert A actually got the response frame.
+        let got_resp = timeout(Duration::from_secs(3), async {
+            loop {
+                let _ = a.poll_once().await?;
+                let _ = b.poll_once().await?;
+                if let Ok((peer, _req_id, frame)) = a.rr_resp_rx.try_recv() {
+                    assert_eq!(peer, b.peer_id, "response should come from B");
+                    match frame {
+                        RpcFrame::OpBytes(bytes) => {
+                            assert_eq!(bytes, vec![1,2,3]);
+                            break Ok::<_, anyhow::Error>(());
+                        }
+                        other => panic!("unexpected frame: {:?}", other),
+                    }
+                }
+            }
+        }).await;
+        assert!(got_resp.is_ok(), "timed out waiting for RR response at client side");
+
+        // Negative path: send a request to a random peer with no known addresses; expect OutboundFailure.
+    let bogus_peer = {
+            let kp = libp2p::identity::Keypair::generate_ed25519();
+            libp2p::PeerId::from(kp.public())
+        };
+        let _rid2 = a.send_fetch(bogus_peer, FetchMissing { want: vec![] });
+    
+                // Drive both swarms; after each tick, try to drain the failure channels.
+                // Using try_recv avoids aliasing &mut borrows of `a`/`b` in `tokio::select!`.
+                let got_fail = timeout(Duration::from_secs(5), async {
+                    loop {
+                        tokio::select! {
+                            r = a.poll_once() => { r?; }
+                            r = b.poll_once() => { r?; }
+                        }
+                        if let Ok((peer, _req_id, err)) = a.rr_out_fail_rx.try_recv() {
+                            assert_eq!(peer, Some(bogus_peer),
+                                "failure should pertain to the bogus peer we requested");
+                            assert!(matches!(err,
+                                libp2p::request_response::OutboundFailure::DialFailure
+                                | libp2p::request_response::OutboundFailure::UnsupportedProtocols
+                                | libp2p::request_response::OutboundFailure::ConnectionClosed
+                                | libp2p::request_response::OutboundFailure::Timeout
+                            ), "unexpected outbound failure: {:?}", err);
+                            break Ok::<_, anyhow::Error>(());
+                        }
+                        if let Ok((peer, _req_id, err)) = b.rr_out_fail_rx.try_recv() {
+                            // Defensive: if the bogus request were ever sent from B by mistake,
+                            // don't hang—still validate and break.
+                            assert_eq!(peer, Some(bogus_peer),
+                                "failure should pertain to the bogus peer we requested");
+                            assert!(matches!(err,
+                                libp2p::request_response::OutboundFailure::DialFailure
+                                | libp2p::request_response::OutboundFailure::UnsupportedProtocols
+                                | libp2p::request_response::OutboundFailure::ConnectionClosed
+                                | libp2p::request_response::OutboundFailure::Timeout
+                            ), "unexpected outbound failure: {:?}", err);
+                            break Ok::<_, anyhow::Error>(());
+                        }
+                    }
+                }).await;
+        assert!(got_fail.is_ok(), "timed out waiting for RR outbound failure on bogus peer");
 
     Ok(())
 }
