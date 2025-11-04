@@ -1,4 +1,11 @@
-use libp2p::gossipsub::{self, IdentTopic as Topic, MessageAuthenticity, MessageId, ValidationMode};
+use libp2p::gossipsub::{
+    self,
+    IdentTopic as Topic,
+    MessageAuthenticity,
+    MessageId,
+    TopicHash,
+    ValidationMode,
+};
 use std::time::Duration;
 use blake3;
 use libp2p::identity;
@@ -19,15 +26,15 @@ pub fn build_gossipsub(local_key: &identity::Keypair) -> gossipsub::Behaviour {
         MessageId::new(h.as_bytes())
     };
 
-        let cfg = gossipsub::ConfigBuilder::default()
-            .validate_messages()
-            .validation_mode(ValidationMode::Permissive)
-            .message_id_fn(message_id_fn)
-            .flood_publish(true)                        // <- allow publish even if not in mesh
-            .heartbeat_interval(Duration::from_millis(200)) // <- speed convergence for tests
-            .max_transmit_size(64 * 1024)
-            .build()
-            .expect("gossipsub config");
+    let cfg = gossipsub::ConfigBuilder::default()
+        .validate_messages()
+        .validation_mode(ValidationMode::Permissive)
+        .message_id_fn(message_id_fn)
+        .flood_publish(true)                             // allow publish even if not in mesh
+        .heartbeat_interval(Duration::from_millis(200))  // speed convergence for tests
+        .max_transmit_size(64 * 1024)
+        .build()
+        .expect("gossipsub config");
 
     gossipsub::Behaviour::new(MessageAuthenticity::Signed(local_key.clone()), cfg)
         .expect("gossipsub")
@@ -40,10 +47,78 @@ pub fn publish_announce(
     sa: &SignedAnnounce,
 ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
     let bytes = to_cbor_signed_announce(sa);
-    gs.publish(topic.clone(), bytes)
+    let byte_len = bytes.len();
+    let msg_id = gs.publish(topic.clone(), bytes)?;
+    log::trace!(
+        "gossipsub PUBLISH -> {} (heads={}, topo={}, bytes={})",
+        topic.hash().to_string(),
+        sa.announce.head_ids.len(),
+        sa.announce.topo_watermark,
+        byte_len
+    );
+    Ok(msg_id)
 }
 
 /// Attempt to parse a received message payload into a SignedAnnounce.
 pub fn parse_announce(data: &[u8]) -> Option<SignedAnnounce> {
-    from_cbor_signed_announce(data).ok()
+    match from_cbor_signed_announce(data).ok() {
+        Some(sa) => {
+            log::trace!(
+                "gossipsub PARSE announce heads={} topo={} bytes={}",
+                sa.announce.head_ids.len(),
+                sa.announce.topo_watermark,
+                data.len()
+            );
+            Some(sa)
+        }
+        None => None,
+    }
+}
+
+/// Subscribe to the announce topic (idempotent).
+pub fn subscribe_announce(
+    gs: &mut gossipsub::Behaviour,
+    topic: &Topic,
+) -> Result<(), gossipsub::SubscriptionError> {
+    match gs.subscribe(topic) {
+        Ok(true) => {
+            log::trace!("gossipsub SUBSCRIBED -> {}", topic.hash().to_string());
+            Ok(())
+        }
+        Ok(false) => Ok(()), // already subscribed
+        Err(e) => Err(e),
+    }
+}
+
+/// Does a received message belong to *this* announce topic?
+#[inline]
+pub fn topic_matches_announce(topic: &Topic, incoming: &TopicHash) -> bool {
+    topic.hash() == *incoming
+}
+
+/// Convenience: if a gossipsub message is for our announce topic, decode it.
+pub fn parse_announce_if_for_topic(
+    topic: &Topic,
+    incoming_topic: &TopicHash,
+    data: &[u8],
+) -> Option<SignedAnnounce> {
+    if topic_matches_announce(topic, incoming_topic) {
+        parse_announce(data)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_string_is_stable() {
+        let t = announce_topic("proj");
+        assert_eq!(
+            t.hash().to_string(),
+            Topic::new("ecac/v1/proj/announce").hash().to_string()
+        );
+    }
 }

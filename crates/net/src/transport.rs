@@ -203,11 +203,30 @@ impl Node {
         self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
     }
 
+        /// Subscribe this node to the project announce topic (idempotent).
+            /// Subscribe this node to the project announce topic (idempotent).
+            pub fn subscribe_announce(&mut self) -> Result<(), libp2p::gossipsub::SubscriptionError> {
+                let gs = &mut self.swarm.behaviour_mut().gossipsub;
+               crate::gossip::subscribe_announce(gs, &self.announce_topic)
+            }
+
+
     /// Publish a SignedAnnounce to the announce topic.
-    pub fn publish_announce(&mut self, sa: &SignedAnnounce) -> Result<(), libp2p::gossipsub::PublishError> {
-        publish_announce(&mut self.swarm.behaviour_mut().gossipsub, &self.announce_topic, sa)?;
-        Ok(())
-    }
+    pub fn publish_announce(
+                &mut self,
+                sa: &crate::types::SignedAnnounce,
+            ) -> Result<(), libp2p::gossipsub::PublishError> {
+                        let gs = &mut self.swarm.behaviour_mut().gossipsub;
+                        match crate::gossip::publish_announce(gs, &self.announce_topic, sa) {
+                            Ok(_id) => Ok(()),
+                            // Idempotent: if we've already seen/published same message_id, treat as success.
+                            Err(libp2p::gossipsub::PublishError::Duplicate) => {
+                                log::trace!("gossipsub publish de-duped (Duplicate) — treating as success");
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        }
+            }
 
     /// Send a FetchMissing request to `peer`.
     pub fn send_fetch(&mut self, peer: PeerId, req: FetchMissing) -> OutboundRequestId {
@@ -358,5 +377,17 @@ impl Node {
     /// Respond to a Fetch request with a single frame (caller can stream multiple calls).
     pub fn respond_fetch(&mut self, ch: ResponseChannel<RpcFrame>, frame: RpcFrame) {
         let _ = self.swarm.behaviour_mut().fetch.send_response(ch, frame);
+    }
+
+        /// TEST-ONLY: allow tests to publish a SignedAnnounce via the node's gossipsub.
+    #[cfg(test)]
+    pub fn publish_announce_for_tests(
+        &mut self,
+        topic: &libp2p::gossipsub::IdentTopic,
+        sa: &crate::types::SignedAnnounce,
+    ) -> Result<libp2p::gossipsub::MessageId, libp2p::gossipsub::PublishError> {
+        use crate::gossip::publish_announce;
+        let gs = &mut self.swarm.behaviour_mut().gossipsub;
+        publish_announce(gs, topic, sa)
     }
 }

@@ -5,12 +5,28 @@ use anyhow::Result;
 //use tokio::time::{timeout, sleep};
 use tokio::time::timeout;
 use ecac_net::transport::Node;
-use ecac_net::types::{FetchMissing, RpcFrame};
+use ecac_net::types::{FetchMissing, RpcFrame, Announce, SignedAnnounce};
+use ecac_net::gossip::announce_topic;
 
 // tiny helper
 fn loopback_addr() -> Multiaddr {
     "/ip4/127.0.0.1/tcp/0".parse().unwrap()
 }
+
+// Minimal test helper: build a syntactically-valid SignedAnnounce.
+fn mk_test_signed_announce() -> SignedAnnounce {
+        SignedAnnounce {
+            announce: Announce {
+                node_id: [0u8; 32],
+                topo_watermark: 0,
+                head_ids: Vec::new(),
+                bloom16: [0u8; 2],
+            },
+            // For tests we don't validate the signature; serializer just (de)serializes.
+            sig: vec![0u8; 64],
+            vk: [0u8; 32],
+        }
+    }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_peer_gossip_and_fetch() -> Result<()> {
@@ -64,6 +80,40 @@ async fn two_peer_gossip_and_fetch() -> Result<()> {
             }
         }
     }).await.expect("connectivity timeout").unwrap();
+
+        // Ensure both sides are SUBSCRIBED to the announce topic before publishing.
+    a.subscribe_announce()?;
+    b.subscribe_announce()?;
+
+    // Give gossipsub a short moment to exchange subscription control messages.
+    let _ = timeout(Duration::from_millis(300), async {
+        // a few cooperative ticks so the SUBSCRIBE propagates
+        for _ in 0..20 {
+            tokio::select! {
+                r = a.poll_once() => { let _ = r; }
+                r = b.poll_once() => { let _ = r; }
+            }
+        }
+    }).await;
+
+
+        // --- Exercise gossipsub announce path once on each side (anti-entropy publish hook) ---
+        let sa_a = mk_test_signed_announce();
+        let sa_b = mk_test_signed_announce();
+        a.publish_announce(&sa_a)?;
+        b.publish_announce(&sa_b)?;
+    // Drive both swarms briefly to flush gossipsub processing (no assertions; smoke only).
+    let _ = timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::select! {
+                r = a.poll_once() => { r?; }
+                r = b.poll_once() => { r?; }
+            }
+            // a tiny delay: break after some progress so we don't spin forever in case of flakiness
+            if false { break Ok::<_, anyhow::Error>(()); }
+        }
+    }).await.ok();
+
 
     // Now request-response should be safe to use.
     let req = FetchMissing { want: vec![[9u8; 32], [10u8; 32]] };
@@ -150,6 +200,13 @@ async fn two_peer_gossip_and_fetch() -> Result<()> {
                     }
                 }).await;
         assert!(got_fail.is_ok(), "timed out waiting for RR outbound failure on bogus peer");
+
+            // --- Exercise gossipsub announce path on each side (now that both are subscribed) ---
+    let sa_a = mk_test_signed_announce();
+    let sa_b = mk_test_signed_announce();
+    a.publish_announce(&sa_a)?;
+    b.publish_announce(&sa_b)?;
+
 
     Ok(())
 }

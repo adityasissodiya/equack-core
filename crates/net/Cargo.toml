@@ -27,6 +27,7 @@ libp2p = { version = "0.54.1", default-features = false, features = [
   "gossipsub", "request-response", "identify", "macros", "ping"   # <- macros for #[derive(NetworkBehaviour)]
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }  # <- add sync,time
+log = "0.4"
 
 [dev-dependencies]
 rand = "0.8"
