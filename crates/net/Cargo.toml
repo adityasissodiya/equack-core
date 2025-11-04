@@ -21,6 +21,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["pkcs8"] 
 async-trait = "0.1"
 # Core types (OpId, HLC, etc.)
 ecac-core = { path = "../core" }
+ecac-store = { path = "../store" }
 libp2p = { version = "0.54.1", default-features = false, features = [
   "tcp", "dns", "tokio", "noise", "yamux",  "plaintext",
   "gossipsub", "request-response", "identify", "macros", "ping"   # <- macros for #[derive(NetworkBehaviour)]
