@@ -79,7 +79,9 @@ impl request_response::Codec for FetchCodec {
 /// Build a RequestResponse behaviour for `/ecac/fetch/1`.
 pub fn build_fetch_behaviour() -> RrBehaviour<FetchCodec> {
     let protocols = iter::once((FETCH_PROTO.clone(), ProtocolSupport::Full));
-    // Use the non-deprecated builder; no keep-alive knob in this API.
-    let cfg = RrConfig::default().with_request_timeout(Duration::from_secs(5));
+        // Bump the request timeout; RR itself has no keep-alive knob in this API.
+    // (Connection idle keep-alive is controlled via swarm::Config, not here.)
+    let cfg = RrConfig::default()
+        .with_request_timeout(Duration::from_secs(30));
     RrBehaviour::<FetchCodec>::new(protocols, cfg)
 }
