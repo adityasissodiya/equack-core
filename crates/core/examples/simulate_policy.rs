@@ -20,13 +20,16 @@ use ecac_core::policy::{build_auth_epochs_with, derive_action_and_tags, is_permi
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
-use std::collections::HashMap;
 use ed25519_dalek::VerifyingKey;
+use std::collections::HashMap;
 
 fn trust_from_single(issuer_id: &str, vk: VerifyingKey) -> TrustStore {
     let mut issuers = HashMap::new();
     issuers.insert(issuer_id.to_string(), vk);
-    TrustStore { issuers, schemas: HashMap::new() }
+    TrustStore {
+        issuers,
+        schemas: HashMap::new(),
+    }
 }
 
 fn main() {
@@ -85,11 +88,12 @@ fn main() {
         nbf,
         &trust,
         &mut status_ok,
-        /*verify_hint=*/true,
+        /*verify_hint=*/ true,
     );
 
     // Case B: REVOKED → denied (bit 1 set)
-    let mut status_revoked = StatusCache::from_map(vec![(status_list_id.to_string(), vec![0b0000_0010])]);
+    let mut status_revoked =
+        StatusCache::from_map(vec![(status_list_id.to_string(), vec![0b0000_0010])]);
     run_case(
         "B: revoked → denied",
         cred_id,
@@ -103,7 +107,7 @@ fn main() {
         nbf,
         &trust,
         &mut status_revoked,
-        /*verify_hint=*/false, // don't panic if verify fails; epochs will handle it
+        /*verify_hint=*/ false, // don't panic if verify fails; epochs will handle it
     );
 }
 
@@ -156,7 +160,10 @@ fn run_case(
         vec![grant_op.op_id],
         Hlc::new(nbf + 1, 7),
         user_pk,
-        Payload::Data { key: "mv:o:x".into(), value: b"OK".to_vec() },
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"OK".to_vec(),
+        },
         user_sk,
     );
 
@@ -174,7 +181,11 @@ fn run_case(
 
     println!("\n== {label} ==");
     println!("order={:?}", topo.iter().map(hex32).collect::<Vec<_>>());
-    println!("write {} → {}", hex32(&write_op.op_id), if allowed { "ALLOWED" } else { "DENIED" });
+    println!(
+        "write {} → {}",
+        hex32(&write_op.op_id),
+        if allowed { "ALLOWED" } else { "DENIED" }
+    );
 }
 
 fn hex32(arr: &[u8; 32]) -> String {

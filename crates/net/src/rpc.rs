@@ -1,10 +1,10 @@
 use async_trait::async_trait;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::{
     request_response::{self, Behaviour as RrBehaviour, Config as RrConfig, ProtocolSupport},
     StreamProtocol,
 };
 use std::{io, iter, time::Duration};
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::serializer::{from_cbor_fetch, from_cbor_frame, to_cbor_fetch, to_cbor_frame};
 use crate::types::{FetchMissing, RpcFrame};
@@ -21,11 +21,7 @@ impl request_response::Codec for FetchCodec {
     type Request = FetchMissing;
     type Response = RpcFrame;
 
-    async fn read_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-    ) -> io::Result<Self::Request>
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -79,9 +75,8 @@ impl request_response::Codec for FetchCodec {
 /// Build a RequestResponse behaviour for `/ecac/fetch/1`.
 pub fn build_fetch_behaviour() -> RrBehaviour<FetchCodec> {
     let protocols = iter::once((FETCH_PROTO.clone(), ProtocolSupport::Full));
-        // Bump the request timeout; RR itself has no keep-alive knob in this API.
+    // Bump the request timeout; RR itself has no keep-alive knob in this API.
     // (Connection idle keep-alive is controlled via swarm::Config, not here.)
-    let cfg = RrConfig::default()
-        .with_request_timeout(Duration::from_secs(30));
+    let cfg = RrConfig::default().with_request_timeout(Duration::from_secs(30));
     RrBehaviour::<FetchCodec>::new(protocols, cfg)
 }

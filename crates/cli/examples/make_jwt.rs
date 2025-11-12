@@ -15,16 +15,23 @@ fn hex_nibble(b: u8) -> Result<u8, String> {
 }
 fn parse_sk_hex(hex: &str) -> Result<SigningKey, String> {
     let s = hex.trim();
-    if s.len() != 64 { return Err("need 64 hex chars for ed25519 SK".into()); }
+    if s.len() != 64 {
+        return Err("need 64 hex chars for ed25519 SK".into());
+    }
     let b = s.as_bytes();
     let mut key = [0u8; 32];
-    for i in 0..32 { key[i] = (hex_nibble(b[2*i])? << 4) | hex_nibble(b[2*i+1])?; }
+    for i in 0..32 {
+        key[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
+    }
     Ok(SigningKey::from_bytes(&key))
 }
-fn to_hex32(arr: &[u8;32]) -> String {
-    const HEX: &[u8;16] = b"0123456789abcdef";
+fn to_hex32(arr: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(64);
-    for &b in arr { s.push(HEX[(b>>4) as usize] as char); s.push(HEX[(b&0x0f) as usize] as char); }
+    for &b in arr {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
     s
 }
 
@@ -62,7 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
     let compact = format!("{signing_input}.{sig_b64}");
 
-    fs::create_dir_all(std::path::Path::new(out_path).parent().unwrap_or_else(|| ".".as_ref()))?;
+    fs::create_dir_all(
+        std::path::Path::new(out_path)
+            .parent()
+            .unwrap_or_else(|| ".".as_ref()),
+    )?;
     fs::write(out_path, compact.as_bytes())?;
 
     // Print info to wire up trust store

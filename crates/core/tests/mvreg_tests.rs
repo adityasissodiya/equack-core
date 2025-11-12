@@ -1,8 +1,8 @@
 use ecac_core::crdt::MVReg;
+use ecac_core::crypto::{generate_keypair, vk_to_bytes};
 use ecac_core::dag::Dag;
 use ecac_core::hlc::Hlc;
 use ecac_core::op::{Op, Payload};
-use ecac_core::crypto::{generate_keypair, vk_to_bytes};
 
 /// Build a DAG with two MV writes a -> b (HB), ensure b overwrites a.
 #[test]
@@ -10,8 +10,26 @@ fn mvreg_hb_overwrite() {
     let (sk, vk) = generate_keypair();
     let pk = vk_to_bytes(&vk);
 
-    let a = Op::new(vec![], Hlc::new(10, 1), pk, Payload::Data { key: "mv:o:x".into(), value: b"A".to_vec() }, &sk);
-    let b = Op::new(vec![a.op_id], Hlc::new(11, 1), pk, Payload::Data { key: "mv:o:x".into(), value: b"B".to_vec() }, &sk);
+    let a = Op::new(
+        vec![],
+        Hlc::new(10, 1),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"A".to_vec(),
+        },
+        &sk,
+    );
+    let b = Op::new(
+        vec![a.op_id],
+        Hlc::new(11, 1),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"B".to_vec(),
+        },
+        &sk,
+    );
 
     let mut dag = Dag::new();
     dag.insert(b.clone());
@@ -25,10 +43,16 @@ fn mvreg_hb_overwrite() {
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         while let Some(cur) = stack.pop() {
-            if &cur == x { return true; }
-            if !seen.insert(cur) { continue; }
+            if &cur == x {
+                return true;
+            }
+            if !seen.insert(cur) {
+                continue;
+            }
             let op = dag.get(&cur).unwrap();
-            for p in &op.header.parents { stack.push(*p); }
+            for p in &op.header.parents {
+                stack.push(*p);
+            }
         }
         false
     };
@@ -47,8 +71,26 @@ fn mvreg_concurrent() {
     let (sk, vk) = generate_keypair();
     let pk = vk_to_bytes(&vk);
 
-    let a = Op::new(vec![], Hlc::new(10, 1), pk, Payload::Data { key: "mv:o:x".into(), value: b"A".to_vec() }, &sk);
-    let b = Op::new(vec![], Hlc::new(10, 2), pk, Payload::Data { key: "mv:o:x".into(), value: b"B".to_vec() }, &sk);
+    let a = Op::new(
+        vec![],
+        Hlc::new(10, 1),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"A".to_vec(),
+        },
+        &sk,
+    );
+    let b = Op::new(
+        vec![],
+        Hlc::new(10, 2),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"B".to_vec(),
+        },
+        &sk,
+    );
 
     let mut dag = Dag::new();
     dag.insert(a.clone());
@@ -60,10 +102,16 @@ fn mvreg_concurrent() {
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         while let Some(cur) = stack.pop() {
-            if &cur == x { return true; }
-            if !seen.insert(cur) { continue; }
+            if &cur == x {
+                return true;
+            }
+            if !seen.insert(cur) {
+                continue;
+            }
             let op = dag.get(&cur).unwrap();
-            for p in &op.header.parents { stack.push(*p); }
+            for p in &op.header.parents {
+                stack.push(*p);
+            }
         }
         false
     };

@@ -77,33 +77,71 @@ pub fn verify_vc(
         (Some(h), Some(p), Some(s)) => (h, p, s),
         _ => return Err(VcError::BadFormat),
     };
-    if parts.next().is_some() { return Err(VcError::BadFormat); }
+    if parts.next().is_some() {
+        return Err(VcError::BadFormat);
+    }
 
-    let header_bytes = URL_SAFE_NO_PAD.decode(h_b64.as_bytes()).map_err(|_| VcError::BadBase64)?;
-    let payload_bytes = URL_SAFE_NO_PAD.decode(p_b64.as_bytes()).map_err(|_| VcError::BadBase64)?;
-    let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64.as_bytes()).map_err(|_| VcError::BadBase64)?;
-    if sig_bytes.len() != 64 { return Err(VcError::BadSig); }
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(h_b64.as_bytes())
+        .map_err(|_| VcError::BadBase64)?;
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(p_b64.as_bytes())
+        .map_err(|_| VcError::BadBase64)?;
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(sig_b64.as_bytes())
+        .map_err(|_| VcError::BadBase64)?;
+    if sig_bytes.len() != 64 {
+        return Err(VcError::BadSig);
+    }
 
     let header: Value = serde_json::from_slice(&header_bytes).map_err(|_| VcError::BadJson)?;
     let payload: Value = serde_json::from_slice(&payload_bytes).map_err(|_| VcError::BadJson)?;
 
-    let alg = header.get("alg").and_then(|v| v.as_str()).ok_or(VcError::MissingField("alg"))?;
-    if alg != "EdDSA" { return Err(VcError::BadAlg); }
+    let alg = header
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("alg"))?;
+    if alg != "EdDSA" {
+        return Err(VcError::BadAlg);
+    }
 
     // required claims
-    let iss = payload.get("iss").and_then(|v| v.as_str()).ok_or(VcError::MissingField("iss"))?;
+    let iss = payload
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("iss"))?;
     if let Some(schema) = trust.schema_for(iss) {
         match schema {
             "standard-v1" => { /* already enforced by required field parsing below */ }
-            _other => { return Err(VcError::BadJson); } // unknown schema label (future guard)
+            _other => {
+                return Err(VcError::BadJson);
+            } // unknown schema label (future guard)
         }
     }
-    let jti = payload.get("jti").and_then(|v| v.as_str()).ok_or(VcError::MissingField("jti"))?;
-    let role = payload.get("role").and_then(|v| v.as_str()).ok_or(VcError::MissingField("role"))?;
-    let sub_pk_hex = payload.get("sub_pk").and_then(|v| v.as_str()).ok_or(VcError::MissingField("sub_pk"))?;
-    let nbf = payload.get("nbf").and_then(|v| v.as_u64()).ok_or(VcError::MissingField("nbf"))?;
-    let exp = payload.get("exp").and_then(|v| v.as_u64()).ok_or(VcError::MissingField("exp"))?;
-    let scope = payload.get("scope").and_then(|v| v.as_array()).ok_or(VcError::MissingField("scope"))?;
+    let jti = payload
+        .get("jti")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("jti"))?;
+    let role = payload
+        .get("role")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("role"))?;
+    let sub_pk_hex = payload
+        .get("sub_pk")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("sub_pk"))?;
+    let nbf = payload
+        .get("nbf")
+        .and_then(|v| v.as_u64())
+        .ok_or(VcError::MissingField("nbf"))?;
+    let exp = payload
+        .get("exp")
+        .and_then(|v| v.as_u64())
+        .ok_or(VcError::MissingField("exp"))?;
+    let scope = payload
+        .get("scope")
+        .and_then(|v| v.as_array())
+        .ok_or(VcError::MissingField("scope"))?;
 
     let mut scope_tags: BTreeSet<String> = BTreeSet::new();
     for t in scope {
@@ -112,30 +150,44 @@ pub fn verify_vc(
     }
 
     // issuer key
-    let vk: &VerifyingKey = trust.get(iss).ok_or_else(|| VcError::UnknownIssuer(iss.to_string()))?;
+    let vk: &VerifyingKey = trust
+        .get(iss)
+        .ok_or_else(|| VcError::UnknownIssuer(iss.to_string()))?;
 
     // signature over "header.payload"
     let signing_input = [h_b64.as_bytes(), b".", p_b64.as_bytes()].concat();
     let sig = Signature::from_slice(&sig_bytes).map_err(|_| VcError::BadSig)?;
-    vk.verify_strict(&signing_input, &sig).map_err(|_| VcError::BadSig)?;
+    vk.verify_strict(&signing_input, &sig)
+        .map_err(|_| VcError::BadSig)?;
 
     // parse subject_pk
     let subject_pk = {
         let hex = sub_pk_hex.trim();
-        if hex.len() != 64 { return Err(VcError::BadKeyHex); }
+        if hex.len() != 64 {
+            return Err(VcError::BadKeyHex);
+        }
         let mut out = [0u8; 32];
         for i in 0..32 {
-            out[i] = (hex_nibble(hex.as_bytes()[2*i])? << 4) | hex_nibble(hex.as_bytes()[2*i+1])?;
+            out[i] =
+                (hex_nibble(hex.as_bytes()[2 * i])? << 4) | hex_nibble(hex.as_bytes()[2 * i + 1])?;
         }
         out
     };
 
     // optional status
     let (status_id, status_index) = if let Some(st) = payload.get("status") {
-        let id = st.get("id").and_then(|v| v.as_str()).ok_or(VcError::BadJson)?;
-        let idx = st.get("index").and_then(|v| v.as_u64()).ok_or(VcError::BadJson)?;
+        let id = st
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(VcError::BadJson)?;
+        let idx = st
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .ok_or(VcError::BadJson)?;
         let revoked = status.is_revoked(id, idx as u32);
-        if revoked { return Err(VcError::Revoked); }
+        if revoked {
+            return Err(VcError::Revoked);
+        }
         (Some(id.to_string()), Some(idx as u32))
     } else {
         (None, None)

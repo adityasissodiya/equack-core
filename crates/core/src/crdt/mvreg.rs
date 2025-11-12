@@ -27,7 +27,9 @@ pub struct MVReg {
 
 impl MVReg {
     pub fn new() -> Self {
-        Self { winners: BTreeMap::new() }
+        Self {
+            winners: BTreeMap::new(),
+        }
     }
 
     /// Apply a put tagged by `op_id` with `value`, removing any prior winners
@@ -63,7 +65,7 @@ impl MVReg {
     /// Deterministic projection for UI/tests: choose the value with the smallest
     /// blake3 hash, tie-breaking by raw bytes.
     pub fn project(&self) -> Option<Vec<u8>> {
-        let mut best: Option<( [u8; 32], Vec<u8> )> = None;
+        let mut best: Option<([u8; 32], Vec<u8>)> = None;
         for v in self.winners.values() {
             let mut hasher = Hasher::new();
             hasher.update(v);

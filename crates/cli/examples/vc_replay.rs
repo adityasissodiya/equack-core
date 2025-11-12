@@ -8,17 +8,21 @@ use ecac_core::trust::TrustStore;
 
 fn read_ops(path: &str) -> anyhow::Result<Vec<Op>> {
     let bytes = fs::read(path)?;
-    if let Ok(v) = serde_cbor::from_slice::<Vec<Op>>(&bytes) { return Ok(v); }
-    if let Ok(op) = serde_cbor::from_slice::<Op>(&bytes) { return Ok(vec![op]); }
+    if let Ok(v) = serde_cbor::from_slice::<Vec<Op>>(&bytes) {
+        return Ok(v);
+    }
+    if let Ok(op) = serde_cbor::from_slice::<Op>(&bytes) {
+        return Ok(vec![op]);
+    }
     anyhow::bail!("{}: not a CBOR Vec<Op> or Op", path);
 }
 
-fn hex32(arr: &[u8;32]) -> String {
-    const HEX: &[u8;16] = b"0123456789abcdef";
+fn hex32(arr: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(64);
     for &b in arr {
-        s.push(HEX[(b>>4) as usize] as char);
-        s.push(HEX[(b&0x0f) as usize] as char);
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
 }
@@ -48,15 +52,24 @@ fn main() -> anyhow::Result<()> {
     let mut status = StatusCache::load_from_dir("./trust/status");
     let idx = build_auth_epochs_with(&dag, &order, &trust, &mut status);
 
-    println!("order=[{}]", order.iter().map(hex32).collect::<Vec<_>>().join(","));
+    println!(
+        "order=[{}]",
+        order.iter().map(hex32).collect::<Vec<_>>().join(",")
+    );
 
     // Walk data ops and decide allow/deny at their position.
     for (pos, id) in order.iter().enumerate() {
         let op = dag.get(id).unwrap();
         if let Payload::Data { key, .. } = &op.header.payload {
             if let Some((action, _obj, _field, _elem, tags)) = derive_action_and_tags(key) {
-                let allow = is_permitted_at_pos(&idx, &op.header.author_pk, action, &tags, pos, op.hlc());
-                println!("{}: {} → {}", hex32(id), key, if allow { "ALLOWED" } else { "DENIED" });
+                let allow =
+                    is_permitted_at_pos(&idx, &op.header.author_pk, action, &tags, pos, op.hlc());
+                println!(
+                    "{}: {} → {}",
+                    hex32(id),
+                    key,
+                    if allow { "ALLOWED" } else { "DENIED" }
+                );
             }
         }
     }

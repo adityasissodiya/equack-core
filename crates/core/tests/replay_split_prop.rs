@@ -7,8 +7,8 @@ use ecac_core::hlc::Hlc;
 use ecac_core::op::{Op, Payload};
 use ecac_core::replay::{apply_incremental, replay_full};
 use proptest::prelude::*;
-use rand::{rngs::StdRng, Rng, SeedableRng};
 use rand::seq::SliceRandom;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 fn make_random_ops(seed: u64, n: usize) -> Vec<Op> {
     let (sk, vk) = generate_keypair();
@@ -26,7 +26,7 @@ fn make_random_ops(seed: u64, n: usize) -> Vec<Op> {
             _ => ("set-:o:s:e".to_string(), vec![]),
         };
 
-        let chosen_parents: Vec<[u8;32]> = if ops.is_empty() {
+        let chosen_parents: Vec<[u8; 32]> = if ops.is_empty() {
             vec![]
         } else {
             // Choose up to 2 random parents from existing ops.

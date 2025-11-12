@@ -7,9 +7,9 @@ use crate::op::{Op, OpId};
 
 #[derive(Default)]
 pub struct Dag {
-    nodes: HashMap<OpId, Op>,               // activated ops
-    children: HashMap<OpId, Vec<OpId>>,     // parent -> children (activated)
-    pending: HashMap<OpId, Pending>,        // ops waiting for parents
+    nodes: HashMap<OpId, Op>,                  // activated ops
+    children: HashMap<OpId, Vec<OpId>>,        // parent -> children (activated)
+    pending: HashMap<OpId, Pending>,           // ops waiting for parents
     wait_index: HashMap<OpId, BTreeSet<OpId>>, // missing_parent -> children
 }
 
@@ -20,10 +20,18 @@ struct Pending {
 }
 
 impl Dag {
-    pub fn new() -> Self { Self::default() }
-    pub fn len(&self) -> usize { self.nodes.len() }
-    pub fn is_empty(&self) -> bool { self.nodes.is_empty() }
-    pub fn get(&self, id: &OpId) -> Option<&Op> { self.nodes.get(id) }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+    pub fn get(&self, id: &OpId) -> Option<&Op> {
+        self.nodes.get(id)
+    }
 
     pub fn insert(&mut self, op: Op) {
         let id = op.op_id;
@@ -48,7 +56,9 @@ impl Dag {
 
     fn activate(&mut self, op: Op) {
         let id = op.op_id;
-        if self.nodes.contains_key(&id) { return; }
+        if self.nodes.contains_key(&id) {
+            return;
+        }
 
         for p in &op.header.parents {
             self.children.entry(*p).or_default().push(id);
@@ -64,7 +74,9 @@ impl Dag {
                         for parent in &pend.op.header.parents {
                             if let Some(s) = self.wait_index.get_mut(parent) {
                                 s.remove(&child_id);
-                                if s.is_empty() { self.wait_index.remove(parent); }
+                                if s.is_empty() {
+                                    self.wait_index.remove(parent);
+                                }
                             }
                         }
                         let child_op = pend.op;
@@ -83,7 +95,9 @@ impl Dag {
         for (id, op) in &self.nodes {
             let mut deg = 0usize;
             for p in &op.header.parents {
-                if self.nodes.contains_key(p) { deg += 1; }
+                if self.nodes.contains_key(p) {
+                    deg += 1;
+                }
             }
             indegree.insert(*id, deg);
         }
@@ -133,15 +147,33 @@ mod tests {
         let (sk, vk) = generate_keypair();
         let pk = vk_to_bytes(&vk);
 
-        let parent = Op::new(vec![], Hlc::new(10, 1), pk, Payload::Data { key: "k".into(), value: b"p".to_vec() }, &sk);
-        let child  = Op::new(vec![parent.op_id], Hlc::new(11, 1), pk, Payload::Data { key: "k".into(), value: b"c".to_vec() }, &sk);
+        let parent = Op::new(
+            vec![],
+            Hlc::new(10, 1),
+            pk,
+            Payload::Data {
+                key: "k".into(),
+                value: b"p".to_vec(),
+            },
+            &sk,
+        );
+        let child = Op::new(
+            vec![parent.op_id],
+            Hlc::new(11, 1),
+            pk,
+            Payload::Data {
+                key: "k".into(),
+                value: b"c".to_vec(),
+            },
+            &sk,
+        );
 
         let mut dag = Dag::new();
-        dag.insert(child.clone());   // pending
+        dag.insert(child.clone()); // pending
         assert_eq!(dag.len(), 0);
         assert!(dag.topo_sort().is_empty());
 
-        dag.insert(parent.clone());  // activates parent then child
+        dag.insert(parent.clone()); // activates parent then child
         assert_eq!(dag.topo_sort(), vec![parent.op_id, child.op_id]);
     }
 
@@ -150,9 +182,36 @@ mod tests {
         let (sk, vk) = generate_keypair();
         let pk = vk_to_bytes(&vk);
 
-        let a = Op::new(vec![], Hlc::new(10, 1), pk, Payload::Data { key: "k".into(), value: b"a".to_vec() }, &sk);
-        let b = Op::new(vec![], Hlc::new(10, 2), pk, Payload::Data { key: "k".into(), value: b"b".to_vec() }, &sk);
-        let c = Op::new(vec![a.op_id, b.op_id], Hlc::new(12, 1), pk, Payload::Data { key: "k".into(), value: b"c".to_vec() }, &sk);
+        let a = Op::new(
+            vec![],
+            Hlc::new(10, 1),
+            pk,
+            Payload::Data {
+                key: "k".into(),
+                value: b"a".to_vec(),
+            },
+            &sk,
+        );
+        let b = Op::new(
+            vec![],
+            Hlc::new(10, 2),
+            pk,
+            Payload::Data {
+                key: "k".into(),
+                value: b"b".to_vec(),
+            },
+            &sk,
+        );
+        let c = Op::new(
+            vec![a.op_id, b.op_id],
+            Hlc::new(12, 1),
+            pk,
+            Payload::Data {
+                key: "k".into(),
+                value: b"c".to_vec(),
+            },
+            &sk,
+        );
 
         let mut dag = Dag::new();
         dag.insert(c.clone()); // pending on a & b

@@ -26,7 +26,9 @@ pub struct OrElem {
 impl OrElem {
     /// Active tags = adds \ tombstones.
     pub fn active_tags(&self) -> impl Iterator<Item = (&OpId, &Vec<u8>)> {
-        self.adds.iter().filter(move |(tag, _)| !self.tombstones.contains(*tag))
+        self.adds
+            .iter()
+            .filter(move |(tag, _)| !self.tombstones.contains(*tag))
     }
 
     /// True if has any active tag.
@@ -63,7 +65,9 @@ pub struct ORSet {
 
 impl ORSet {
     pub fn new() -> Self {
-        Self { elems: BTreeMap::new() }
+        Self {
+            elems: BTreeMap::new(),
+        }
     }
 
     /// Add an element occurrence tagged by `op_id` with payload `value`.
@@ -94,7 +98,9 @@ impl ORSet {
     /// Enumerate present elements with deterministic projection of value.
     /// Order: lexicographic by elem_key.
     pub fn iter_present(&self) -> impl Iterator<Item = (&String, Vec<u8>)> {
-        self.elems.iter().filter_map(|(k, e)| e.project_value().map(|v| (k, v)))
+        self.elems
+            .iter()
+            .filter_map(|(k, e)| e.project_value().map(|v| (k, v)))
     }
 
     /// Access raw element record (for tests/debugging).
@@ -109,6 +115,9 @@ impl ORSet {
 
     /// Convenience for tests: does an element currently exist (any active tag)?
     pub fn contains_elem(&self, elem_key: &str) -> bool {
-        self.elems.get(elem_key).map(|e| e.is_present()).unwrap_or(false)
+        self.elems
+            .get(elem_key)
+            .map(|e| e.is_present())
+            .unwrap_or(false)
     }
 }

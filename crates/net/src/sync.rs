@@ -69,34 +69,38 @@ impl SyncPlanner {
         if remote_heads.is_empty() {
             return FetchPlan::default();
         }
-    
+
         // 1) Walk back to boundary; collect missing ids and local parent/child edges.
         let mut missing: BTreeSet<OpId> = BTreeSet::new();
         let mut parents_map: HashMap<OpId, Vec<OpId>> = HashMap::new();
         let mut children_map: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    
+
         // Stack carries (node, expand?). expand=false means: visit this node,
         // but DO NOT traverse further to its parents.
         let mut stack: Vec<(OpId, bool)> =
             remote_heads.iter().cloned().map(|h| (h, true)).collect();
         let mut seen: HashSet<OpId> = HashSet::new();
-    
+
         // ----- test-only probes to understand traversal -----
         #[cfg(test)]
         {
-            let heads_dbg = remote_heads.iter().map(_fmt_hex32).collect::<Vec<_>>().join(",");
+            let heads_dbg = remote_heads
+                .iter()
+                .map(_fmt_hex32)
+                .collect::<Vec<_>>()
+                .join(",");
             eprintln!("planner: HEADS   = [{}]", heads_dbg);
             eprintln!(
                 "planner: BLOOM16 = {:08b} {:08b}",
                 local_recent_bloom16[1], local_recent_bloom16[0]
             );
         }
-    
+
         while let Some((id, expand)) = stack.pop() {
             let has_it = have(&id);
             let bloom_here = bloom16_maybe_contains(local_recent_bloom16, &id);
             let is_head = remote_heads.iter().any(|h| h == &id);
-            
+
             // (Test-only diagnostics) compute `include` just for the debug line to avoid
             // the unused variable warning in non-test builds.
             #[cfg(test)]
@@ -104,16 +108,23 @@ impl SyncPlanner {
                 let include_dbg = !has_it && (!bloom_here || is_head);
                 eprintln!(
                     "planner: VISIT id={} head={} have={} bloom_here={} expand_in={}",
-                    _fmt_hex32(&id), is_head, has_it, bloom_here, expand
+                    _fmt_hex32(&id),
+                    is_head,
+                    has_it,
+                    bloom_here,
+                    expand
                 );
                 eprintln!(
                     "planner: DECISION id={} -> include={} (rule: !have && (!bloom || head))",
-                    _fmt_hex32(&id), include_dbg
+                    _fmt_hex32(&id),
+                    include_dbg
                 );
             }
-    
-            if !seen.insert(id) { continue; }
-    
+
+            if !seen.insert(id) {
+                continue;
+            }
+
             // Include unless we already have it or bloom hints it's present locally.
             // Heads are NEVER skipped because of bloom.
             // (test-only) compute the decision just for the debug print to avoid an unused var in release
@@ -122,19 +133,26 @@ impl SyncPlanner {
                 let include_dbg = !has_it && (!bloom_here || is_head);
                 eprintln!(
                     "planner: VISIT id={} head={} have={} bloom_here={} expand_in={}",
-                    _fmt_hex32(&id), is_head, has_it, bloom_here, expand
+                    _fmt_hex32(&id),
+                    is_head,
+                    has_it,
+                    bloom_here,
+                    expand
                 );
                 eprintln!(
                     "planner: DECISION id={} -> include={} (rule: !have && (!bloom || head))",
-                    _fmt_hex32(&id), include_dbg
+                    _fmt_hex32(&id),
+                    include_dbg
                 );
             }
-    
+
             // Wire child->parent edges (needed for indegree). Expansion decision is separate.
             let ps = parents(&id);
             parents_map.insert(id, ps.clone());
-            for p in &ps { children_map.entry(*p).or_default().push(id); }
-    
+            for p in &ps {
+                children_map.entry(*p).or_default().push(id);
+            }
+
             // Expand to parents? Per-parent bound: visit parent `p`, but if bloom says we
             // probably have `p`, don't expand *past* it.
             if expand {
@@ -143,7 +161,7 @@ impl SyncPlanner {
                     stack.push((p, !p_bloom));
                 }
             }
-    
+
             // Debugging: show what's being added to `missing`
             #[cfg(test)]
             {
@@ -151,19 +169,19 @@ impl SyncPlanner {
                     eprintln!("planner: Added id={} to missing", _fmt_hex32(&id));
                 }
             }
-    
+
             // Add to missing if we should (excluding local knowns and bloom hints)
             if !has_it && !bloom_here {
                 missing.insert(id);
             }
         }
-    
+
         if missing.is_empty() {
             #[cfg(test)]
             eprintln!("planner: DONE — missing set empty");
             return FetchPlan::default();
         }
-    
+
         // 2) Layer inside the missing subgraph: indegree over edges restricted to `missing`.
         let mut indeg: HashMap<OpId, usize> = HashMap::with_capacity(missing.len());
         for &id in &missing {
@@ -179,20 +197,20 @@ impl SyncPlanner {
             #[cfg(test)]
             eprintln!("planner: INDEG {} = {}", _fmt_hex32(&id), d);
         }
-    
+
         // 3) Kahn layering: batch all indeg==0 (parents) first, then propagate to children.
         let mut plan = FetchPlan::default();
         let mut ready: BTreeSet<OpId> = indeg
             .iter()
             .filter_map(|(id, d)| if *d == 0 { Some(*id) } else { None })
             .collect();
-    
+
         #[cfg(test)]
         {
             let ready0: Vec<_> = ready.iter().map(|x| _fmt_hex32(x)).collect();
             eprintln!("planner: READY0 = {:?}", ready0);
         }
-    
+
         let mut remaining = missing.len();
         while !ready.is_empty() {
             // Deterministic batch order by OpId bytes.
@@ -210,13 +228,13 @@ impl SyncPlanner {
                 );
             }
             plan.batches.push(batch.clone());
-    
+
             #[cfg(test)]
             {
                 let dbg: Vec<_> = batch.iter().map(|x| _fmt_hex32(x)).collect();
                 eprintln!("planner: BATCH  = {:?}", dbg);
             }
-    
+
             // Prepare next “ready” set.
             let mut next_ready: BTreeSet<OpId> = BTreeSet::new();
             for id in batch {
@@ -242,10 +260,10 @@ impl SyncPlanner {
             }
             ready = next_ready;
         }
-    
+
         // Defensive: if anything was left, the input wasn’t a DAG; we’ll just emit what we had.
         let _ = remaining;
-    
+
         #[cfg(test)]
         {
             let dbg_batches: Vec<Vec<String>> = plan
@@ -255,8 +273,7 @@ impl SyncPlanner {
                 .collect();
             eprintln!("planner: DONE batches = {:?}", dbg_batches);
         }
-    
+
         plan
     }
-    
 }

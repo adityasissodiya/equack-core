@@ -4,7 +4,7 @@ use ecac_core::op::{Op, OpId, Payload};
 use ecac_core::serialize::canonical_cbor;
 use ecac_store::{Store, StoreOptions};
 use pretty_assertions::assert_eq;
-use rocksdb::{ColumnFamilyDescriptor, Options, DBWithThreadMode, MultiThreaded};
+use rocksdb::{ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options};
 use std::{fs, path::Path, path::PathBuf};
 use tempfile::tempdir;
 
@@ -97,8 +97,7 @@ fn open_raw_db(p: &Path) -> DBWithThreadMode<MultiThreaded> {
         ColumnFamilyDescriptor::new("checkpoints", Options::default()),
         ColumnFamilyDescriptor::new("meta", Options::default()),
     ];
-    DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, p, cfs)
-        .expect("open raw db")
+    DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, p, cfs).expect("open raw db")
 }
 
 /// --- tests -------------------------------------------------------------------
@@ -205,23 +204,24 @@ fn integrity_scan_detects_corruption() -> Result<()> {
     // IMPORTANT: close the store so the RocksDB file lock is released
     drop(store);
 
-// flip the last byte of the first op's stored value (this mutates embedded op_id)
-let victim = ops.first().expect("non-empty fixture");
-{
-    let raw = open_raw_db(&dbp);
+    // flip the last byte of the first op's stored value (this mutates embedded op_id)
+    let victim = ops.first().expect("non-empty fixture");
     {
-        // Inner scope so the CF handle drops before `raw`
-        let cf_ops = raw.cf_handle("ops").unwrap();
-        let mut v = raw
-            .get_cf(&cf_ops, &victim.op_id)
-            .expect("read ok")
-            .expect("present");
-        if let Some(last) = v.last_mut() {
-            *last ^= 0x01; // corrupt one byte
-        }
-        raw.put_cf(&cf_ops, &victim.op_id, v).expect("write corrupt");
-    } // cf_ops dropped here
-} // raw dropped here
+        let raw = open_raw_db(&dbp);
+        {
+            // Inner scope so the CF handle drops before `raw`
+            let cf_ops = raw.cf_handle("ops").unwrap();
+            let mut v = raw
+                .get_cf(&cf_ops, &victim.op_id)
+                .expect("read ok")
+                .expect("present");
+            if let Some(last) = v.last_mut() {
+                *last ^= 0x01; // corrupt one byte
+            }
+            raw.put_cf(&cf_ops, &victim.op_id, v)
+                .expect("write corrupt");
+        } // cf_ops dropped here
+    } // raw dropped here
 
     // Re-open store and integrity should now fail
     let store2 = Store::open(&dbp, StoreOptions::default())?;
@@ -247,7 +247,9 @@ fn checkpoint_parity_matches_full_replay() {
     // If you don’t have generators in this crate, skip; you’ve already validated via CLI.
 
     // For deterministic test, guard that DB has something:
-    if ops.is_empty() { return; }
+    if ops.is_empty() {
+        return;
+    }
 
     for op in &ops {
         let bytes = ecac_core::serialize::canonical_cbor(op);
@@ -257,10 +259,15 @@ fn checkpoint_parity_matches_full_replay() {
     // Full replay from store
     let ids = store.topo_ids().unwrap();
     let cbor = store.load_ops_cbor(&ids).unwrap();
-    let ops_dec: Vec<Op> = cbor.into_iter().map(|b| serde_cbor::from_slice(&b).unwrap()).collect();
+    let ops_dec: Vec<Op> = cbor
+        .into_iter()
+        .map(|b| serde_cbor::from_slice(&b).unwrap())
+        .collect();
     let (st_full, dig_full) = {
         let mut dag = ecac_core::dag::Dag::new();
-        for op in &ops_dec { dag.insert(op.clone()); }
+        for op in &ops_dec {
+            dag.insert(op.clone());
+        }
         ecac_core::replay::replay_full(&dag)
     };
 
@@ -272,12 +279,17 @@ fn checkpoint_parity_matches_full_replay() {
     // Incremental from checkpoint
     let (st_inc, dig_inc) = {
         let mut dag = ecac_core::dag::Dag::new();
-        for op in &ops_dec { dag.insert(op.clone()); }
+        for op in &ops_dec {
+            dag.insert(op.clone());
+        }
         let mut s = st_ck.clone();
         s.set_processed_count(topo_idx as usize);
         ecac_core::replay::apply_incremental(&mut s, &dag)
     };
 
-    assert_eq!(st_full.to_deterministic_json_string(), st_inc.to_deterministic_json_string());
+    assert_eq!(
+        st_full.to_deterministic_json_string(),
+        st_inc.to_deterministic_json_string()
+    );
     assert_eq!(dig_full, dig_inc);
 }

@@ -1,12 +1,12 @@
 // crates/net/tests/two_peer.rs
 use anyhow::Result;
 use libp2p::Multiaddr;
-use tokio::time::{timeout, Duration};
 use tokio::task::yield_now;
+use tokio::time::{timeout, Duration};
 
+use ecac_core::op::OpId;
 use ecac_net::transport::Node;
 use ecac_net::types::{FetchMissing, RpcFrame};
-use ecac_core::op::OpId;
 
 // Helper
 fn loopback_addr() -> Multiaddr {
@@ -35,32 +35,38 @@ async fn tick_both(a: &mut Node, b: &mut Node) -> anyhow::Result<bool> {
     Ok(progressed)
 }
 
-
 // Wait until `node.listen_addr_rx` yields an addr, driving both nodes meanwhile.
 async fn get_listen_addr(
     a: &mut Node,
     b: &mut Node,
     which_a: bool,
-    dur: Duration
+    dur: Duration,
 ) -> Result<Multiaddr> {
     timeout(dur, async {
         loop {
             if which_a {
-                if let Ok(addr) = a.listen_addr_rx.try_recv() { return Ok(addr); }
+                if let Ok(addr) = a.listen_addr_rx.try_recv() {
+                    return Ok(addr);
+                }
             } else {
-                if let Ok(addr) = b.listen_addr_rx.try_recv() { return Ok(addr); }
+                if let Ok(addr) = b.listen_addr_rx.try_recv() {
+                    return Ok(addr);
+                }
             }
             let _ = tick_both(a, b).await?;
         }
-    }).await?
+    })
+    .await?
 }
 
 // 1) Transport emits listen addresses
 #[tokio::test(flavor = "multi_thread")]
 async fn emits_listen_addrs() -> Result<()> {
     let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("ecac_net=trace,libp2p_swarm=info")
-    ).is_test(true).try_init();
+        env_logger::Env::default().default_filter_or("ecac_net=trace,libp2p_swarm=info"),
+    )
+    .is_test(true)
+    .try_init();
 
     let mut a = Node::new("proj")?;
     let mut b = Node::new("proj")?;
@@ -80,8 +86,10 @@ async fn emits_listen_addrs() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn connects_two_peers() -> Result<()> {
     let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("ecac_net=trace,libp2p_swarm=info")
-    ).is_test(true).try_init();
+        env_logger::Env::default().default_filter_or("ecac_net=trace,libp2p_swarm=info"),
+    )
+    .is_test(true)
+    .try_init();
 
     let mut a = Node::new("proj")?;
     let mut b = Node::new("proj")?;
@@ -101,7 +109,8 @@ async fn connects_two_peers() -> Result<()> {
                 break Ok::<_, anyhow::Error>(());
             }
         }
-    }).await??;
+    })
+    .await??;
 
     Ok(())
 }
@@ -110,8 +119,11 @@ async fn connects_two_peers() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn rr_fetch_roundtrip_via_channel() -> Result<()> {
     let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("ecac_net=trace,libp2p_request_response=debug,libp2p_swarm=info")
-    ).is_test(true).try_init();
+        env_logger::Env::default()
+            .default_filter_or("ecac_net=trace,libp2p_request_response=debug,libp2p_swarm=info"),
+    )
+    .is_test(true)
+    .try_init();
 
     let mut a = Node::new("proj")?;
     let mut b = Node::new("proj")?;
@@ -131,10 +143,13 @@ async fn rr_fetch_roundtrip_via_channel() -> Result<()> {
                 break Ok::<_, anyhow::Error>(());
             }
         }
-    }).await??;
+    })
+    .await??;
 
     // Client A sends FetchMissing
-    let req = FetchMissing { want: vec![[9u8; 32]] };
+    let req = FetchMissing {
+        want: vec![[9u8; 32]],
+    };
     let _rid = a.send_fetch(b.peer_id, req);
 
     // Server B should get the request via rpc_req_rx; reply with bytes then End
@@ -148,7 +163,8 @@ async fn rr_fetch_roundtrip_via_channel() -> Result<()> {
                 break Ok::<_, anyhow::Error>(());
             }
         }
-    }).await??;
+    })
+    .await??;
 
     // Client A must receive at least the OpBytes
     timeout(Duration::from_secs(10), async {
@@ -168,7 +184,8 @@ async fn rr_fetch_roundtrip_via_channel() -> Result<()> {
                 }
             }
         }
-    }).await??;
+    })
+    .await??;
 
     Ok(())
 }
@@ -177,8 +194,11 @@ async fn rr_fetch_roundtrip_via_channel() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn rr_fetch_with_provider_minimal() -> Result<()> {
     let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("ecac_net=trace,libp2p_request_response=debug,libp2p_swarm=info")
-    ).is_test(true).try_init();
+        env_logger::Env::default()
+            .default_filter_or("ecac_net=trace,libp2p_request_response=debug,libp2p_swarm=info"),
+    )
+    .is_test(true)
+    .try_init();
 
     let mut a = Node::new("proj")?;
     let mut b = Node::new("proj")?;
@@ -198,13 +218,18 @@ async fn rr_fetch_with_provider_minimal() -> Result<()> {
                 break Ok::<_, anyhow::Error>(());
             }
         }
-    }).await??;
+    })
+    .await??;
 
     // Install minimal provider on B: returns bytes only for [9;32]
     let b_pid = b.peer_id;
     b.set_fetch_bytes_provider(move |id: &OpId| {
         eprintln!("[{:?}] provider asked for {:?}", b_pid, id);
-        if *id == [9u8; 32] { Some(vec![0xAA]) } else { None }
+        if *id == [9u8; 32] {
+            Some(vec![0xAA])
+        } else {
+            None
+        }
     });
 
     // A asks for three ids; current provider sends *one* OpBytes for the first match OR End

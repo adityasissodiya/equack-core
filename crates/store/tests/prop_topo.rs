@@ -1,9 +1,9 @@
 #![cfg(feature = "prop-topo")]
 
-use ecac_store::Store;
 use ecac_core::dag::Dag;
 use ecac_core::op::Op;
 use ecac_core::replay::replay_full;
+use ecac_store::Store;
 use proptest::prelude::*;
 use tempfile::TempDir;
 

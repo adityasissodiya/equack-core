@@ -9,13 +9,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn tmpdir() -> PathBuf {
     let mut p = std::env::temp_dir();
     // add nanos + a random byte to avoid collisions even within the same test thread
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let rand = (blake3::hash(&nanos.to_le_bytes()).as_bytes()[0]) as u8;
-    p.push(format!("ecac_store_test_{}_{}_{}", std::process::id(), nanos, rand));
+    p.push(format!(
+        "ecac_store_test_{}_{}_{}",
+        std::process::id(),
+        nanos,
+        rand
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
-
 
 // fn tmpdir() -> PathBuf {
 //     let mut p = std::env::temp_dir();
@@ -33,13 +40,49 @@ fn heads_basic_and_missing_parent_filtered() {
     let pk = vk_to_bytes(&vk);
 
     // a -> b ; c (independent root)
-    let a = Op::new(vec![], Hlc::new(10,1), pk, Payload::Data{key:"k".into(), value:b"a".to_vec()}, &sk);
-    let b = Op::new(vec![a.op_id], Hlc::new(11,1), pk, Payload::Data{key:"k".into(), value:b"b".to_vec()}, &sk);
-    let c = Op::new(vec![], Hlc::new(12,1), pk, Payload::Data{key:"k".into(), value:b"c".to_vec()}, &sk);
+    let a = Op::new(
+        vec![],
+        Hlc::new(10, 1),
+        pk,
+        Payload::Data {
+            key: "k".into(),
+            value: b"a".to_vec(),
+        },
+        &sk,
+    );
+    let b = Op::new(
+        vec![a.op_id],
+        Hlc::new(11, 1),
+        pk,
+        Payload::Data {
+            key: "k".into(),
+            value: b"b".to_vec(),
+        },
+        &sk,
+    );
+    let c = Op::new(
+        vec![],
+        Hlc::new(12, 1),
+        pk,
+        Payload::Data {
+            key: "k".into(),
+            value: b"c".to_vec(),
+        },
+        &sk,
+    );
 
     // orphan d (parent not present)
     let bogus_parent = [0x55u8; 32];
-    let d = Op::new(vec![bogus_parent], Hlc::new(13,1), pk, Payload::Data{key:"k".into(), value:b"d".to_vec()}, &sk);
+    let d = Op::new(
+        vec![bogus_parent],
+        Hlc::new(13, 1),
+        pk,
+        Payload::Data {
+            key: "k".into(),
+            value: b"d".to_vec(),
+        },
+        &sk,
+    );
 
     for op in [&a, &b, &c, &d] {
         let bytes = canonical_cbor(op);
@@ -64,7 +107,16 @@ fn recent_bloom_covers_last_n() {
 
     let mut ids = Vec::new();
     for t in 0..20 {
-        let op = Op::new(vec![], Hlc::new(100 + t, 1), pk, Payload::Data{key:"k".into(), value:vec![t as u8]}, &sk);
+        let op = Op::new(
+            vec![],
+            Hlc::new(100 + t, 1),
+            pk,
+            Payload::Data {
+                key: "k".into(),
+                value: vec![t as u8],
+            },
+            &sk,
+        );
         store.put_op_cbor(&canonical_cbor(&op)).unwrap();
         ids.push(op.op_id);
     }
@@ -82,7 +134,11 @@ fn recent_bloom_covers_last_n() {
         for i in idx {
             let byte = (i / 8) as usize;
             let bit = i % 8;
-            assert!((bloom[byte] & (1u8 << bit)) != 0, "bit {} not set for recent id", i);
+            assert!(
+                (bloom[byte] & (1u8 << bit)) != 0,
+                "bit {} not set for recent id",
+                i
+            );
         }
     }
 }

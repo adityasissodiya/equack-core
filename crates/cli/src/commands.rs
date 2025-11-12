@@ -12,9 +12,9 @@ use ecac_core::serialize::canonical_cbor;
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
-use std::path::Path;
 use ecac_store::Store;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 fn hex_nibble(b: u8) -> Result<u8> {
     match b {
@@ -62,7 +62,6 @@ struct PersistVerifiedVc {
     cred_hash: [u8; 32],
 }
 
-
 pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
     let compact = fs::read(vc_path)?;
     // By convention, look in ./trust and ./trust/status
@@ -73,19 +72,19 @@ pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
     let v = verify_vc(&compact, &trust, &mut status)
         .map_err(|e| anyhow!("VC verify failed: {:?}", e))?;
 
-//         // Persist VC caches (M5: avoid re-verification on boot)
-// {
-//     // Allow override via env; falls back to ".ecac.db"
-//     let db_dir = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
-//     let store = Store::open(Path::new(&db_dir), Default::default())?;
+    //         // Persist VC caches (M5: avoid re-verification on boot)
+    // {
+    //     // Allow override via env; falls back to ".ecac.db"
+    //     let db_dir = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    //     let store = Store::open(Path::new(&db_dir), Default::default())?;
 
-//     // Raw compact JWT bytes
-//     store.persist_vc_raw(v.cred_hash, &compact)?;
+    //     // Raw compact JWT bytes
+    //     store.persist_vc_raw(v.cred_hash, &compact)?;
 
-//     // Verified struct, as CBOR
-//     let verified_cbor = serde_cbor::to_vec(&v)?;
-//     store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
-// }
+    //     // Verified struct, as CBOR
+    //     let verified_cbor = serde_cbor::to_vec(&v)?;
+    //     store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
+    // }
 
     // ---- Persist VC caches (optional but sensible) ----
     // DB path via env ECAC_DB or default ".ecac.db"
@@ -108,7 +107,7 @@ pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
         status_index: v.status_index,             // now matches Option<u32>
         cred_hash: v.cred_hash,
     };
-        
+
     let verified_cbor = serde_cbor::to_vec(&pv)?;
     store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
     // ---------------------------------------------------
@@ -224,7 +223,12 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
     }
 
     fs::write(&dir, &bytes)?;
-    println!("status {}[{}] = {}", list_id, index, if value { 1 } else { 0 });
+    println!(
+        "status {}[{}] = {}",
+        list_id,
+        index,
+        if value { 1 } else { 0 }
+    );
     println!("wrote {}", dir.display());
     Ok(())
 }

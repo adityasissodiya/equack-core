@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use ecac_core::op::OpId;
+use serde::{Deserialize, Serialize};
 
 /// NodeId = blake3(public_key_bytes). 32 bytes.
 pub type NodeId = [u8; 32];
@@ -22,8 +22,8 @@ pub struct Announce {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignedAnnounce {
     pub announce: Announce,
-    pub sig: Vec<u8>,    // 64 bytes; kept Vec for serde friendliness
-    pub vk: [u8; 32],    // sender’s ed25519 verifying key bytes
+    pub sig: Vec<u8>, // 64 bytes; kept Vec for serde friendliness
+    pub vk: [u8; 32], // sender’s ed25519 verifying key bytes
 }
 
 /// Fetch RPC request. Want is a set of candidate missing IDs (frontier tips).

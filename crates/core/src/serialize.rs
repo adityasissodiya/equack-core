@@ -14,7 +14,10 @@ mod tests {
     use serde::Serialize;
 
     #[derive(Serialize)]
-    struct Demo { a: u8, b: u8 }
+    struct Demo {
+        a: u8,
+        b: u8,
+    }
 
     #[test]
     fn identical_inputs_identical_bytes() {

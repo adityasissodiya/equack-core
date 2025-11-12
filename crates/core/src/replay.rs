@@ -33,7 +33,12 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
     // Detect whether any policy events exist; if none, default-allow (M2 compatibility).
     let has_policy = order.iter().any(|id| {
         dag.get(id)
-            .map(|op| matches!(op.header.payload, Payload::Grant { .. } | Payload::Revoke { .. }))
+            .map(|op| {
+                matches!(
+                    op.header.payload,
+                    Payload::Grant { .. } | Payload::Revoke { .. }
+                )
+            })
             .unwrap_or(false)
     });
 
@@ -51,7 +56,9 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
     }
 
     for (pos, id) in order.iter().enumerate().skip(start_pos) {
-        let Some(op) = dag.get(id) else { continue; };
+        let Some(op) = dag.get(id) else {
+            continue;
+        };
         if !op.verify() {
             continue;
         }

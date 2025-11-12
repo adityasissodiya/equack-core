@@ -23,10 +23,26 @@ pub enum TrustError {
     Dalek(ed25519_dalek::SignatureError),
 }
 
-impl From<std::io::Error> for TrustError { fn from(e: std::io::Error) -> Self { TrustError::Io(e) } }
-impl From<std::str::Utf8Error> for TrustError { fn from(e: std::str::Utf8Error) -> Self { TrustError::Utf8(e) } }
-impl From<toml::de::Error> for TrustError { fn from(e: toml::de::Error) -> Self { TrustError::Toml(e) } }
-impl From<ed25519_dalek::SignatureError> for TrustError { fn from(e: ed25519_dalek::SignatureError) -> Self { TrustError::Dalek(e) } }
+impl From<std::io::Error> for TrustError {
+    fn from(e: std::io::Error) -> Self {
+        TrustError::Io(e)
+    }
+}
+impl From<std::str::Utf8Error> for TrustError {
+    fn from(e: std::str::Utf8Error) -> Self {
+        TrustError::Utf8(e)
+    }
+}
+impl From<toml::de::Error> for TrustError {
+    fn from(e: toml::de::Error) -> Self {
+        TrustError::Toml(e)
+    }
+}
+impl From<ed25519_dalek::SignatureError> for TrustError {
+    fn from(e: ed25519_dalek::SignatureError) -> Self {
+        TrustError::Dalek(e)
+    }
+}
 
 #[derive(Deserialize, Default)]
 struct IssuersToml {
@@ -51,8 +67,11 @@ impl TrustStore {
 
         let mut map = HashMap::new();
         for (iss, hexstr) in parsed.issuers.into_iter() {
-            let key_bytes = hex_to_bytes(&hexstr).map_err(|_| TrustError::BadKeyHex(iss.clone()))?;
-            if key_bytes.len() != 32 { return Err(TrustError::BadKeyLen(key_bytes.len())); }
+            let key_bytes =
+                hex_to_bytes(&hexstr).map_err(|_| TrustError::BadKeyHex(iss.clone()))?;
+            if key_bytes.len() != 32 {
+                return Err(TrustError::BadKeyLen(key_bytes.len()));
+            }
             let arr: [u8; 32] = <[u8; 32]>::try_from(key_bytes.as_slice())
                 .map_err(|_| TrustError::BadKeyLen(key_bytes.len()))?;
             let vk = VerifyingKey::from_bytes(&arr)?;
@@ -78,11 +97,13 @@ impl TrustStore {
 
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, ()> {
     let s = s.trim();
-    if s.len() % 2 != 0 { return Err(()); }
-    let mut out = Vec::with_capacity(s.len()/2);
+    if s.len() % 2 != 0 {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
     let b = s.as_bytes();
     for i in (0..s.len()).step_by(2) {
-        out.push(nibble(b[i])? << 4 | nibble(b[i+1])?);
+        out.push(nibble(b[i])? << 4 | nibble(b[i + 1])?);
     }
     Ok(out)
 }

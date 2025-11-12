@@ -20,8 +20,8 @@ use ecac_core::state::State;
 use getrandom::getrandom;
 //use ecac_core::op::OpHeader;
 //use ed25519_dalek::Signature;
-use ecac_core::{vc::verify_vc, status::StatusCache, trust::TrustStore};
 use ecac_core::crypto::hash_bytes;
+use ecac_core::{status::StatusCache, trust::TrustStore, vc::verify_vc};
 
 type Db = DBWithThreadMode<MultiThreaded>;
 
@@ -75,14 +75,13 @@ struct VerifiedVcPersist {
     issuer: String,
     subject_pk: [u8; 32],
     role: String,
-    scope: Vec<String>,           // same order you stored in CLI
+    scope: Vec<String>, // same order you stored in CLI
     nbf_ms: u64,
     exp_ms: u64,
     status_list_id: Option<String>,
     status_index: Option<u32>,
     cred_hash: [u8; 32],
 }
-
 
 #[inline]
 fn default_hlc() -> Hlc {
@@ -148,16 +147,16 @@ impl Store {
             //     continue;
             // }
             // Require all parents in `ops`
-let mut missing = false;
-for p in &op.header.parents {
-    if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
-        missing = true;
-        break;
-    }
-}
-if missing {
-    continue;
-}
+            let mut missing = false;
+            for p in &op.header.parents {
+                if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
+                    missing = true;
+                    break;
+                }
+            }
+            if missing {
+                continue;
+            }
 
             let e = EdgeVal {
                 parents: op.header.parents.clone(),
@@ -218,14 +217,14 @@ impl Store {
         //     this.put_meta_once("db_uuid", hex::encode(id).as_bytes())?;
         // }
         // After schema guard in `open`:
-if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
-    let mut id = [0u8; 16];
-    // cryptographically-strong random id
-    getrandom(&mut id).context("entropy for db_uuid")?;
-    let mut b = WriteBatch::default();
-    b.put_cf(&this.cf(CF_META), b"db_uuid", &id);
-    this.db.write_opt(b, &this.write_opts())?;
-}
+        if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
+            let mut id = [0u8; 16];
+            // cryptographically-strong random id
+            getrandom(&mut id).context("entropy for db_uuid")?;
+            let mut b = WriteBatch::default();
+            b.put_cf(&this.cf(CF_META), b"db_uuid", &id);
+            this.db.write_opt(b, &this.write_opts())?;
+        }
 
         // First boot (or after crash) adoption pass to finalize any now-satisfied orphans
         this.adopt_ready()?;
@@ -276,7 +275,9 @@ if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
 
         for kv in it {
             let (k, v) = kv?;
-            if k.len() != 32 { continue; }
+            if k.len() != 32 {
+                continue;
+            }
             let mut id = [0u8; 32];
             id.copy_from_slice(&k);
             let e: EdgeVal = serde_cbor::from_slice(&v)?;
@@ -285,10 +286,13 @@ if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
             let mut missing = false;
             for p in &e.parents {
                 if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
-                    missing = true; break;
+                    missing = true;
+                    break;
                 }
             }
-            if missing { continue; }
+            if missing {
+                continue;
+            }
 
             present_nodes.insert(id);
             for p in &e.parents {
@@ -301,7 +305,7 @@ if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
         let mut heads: Vec<(u64, u32, u32, OpId)> = Vec::new();
         for id in present_nodes {
             if !is_parent_of.contains(&id) {
-                let (ms, lo, node) = *meta.get(&id).unwrap_or(&(0,0,0));
+                let (ms, lo, node) = *meta.get(&id).unwrap_or(&(0, 0, 0));
                 heads.push((ms, lo, node, id));
             }
         }
@@ -309,7 +313,7 @@ if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
         // Sort DESC by (ms, lo, node, id) so "latest" heads appear first
         heads.sort_by(|a, b| b.cmp(a));
         heads.truncate(k);
-        Ok(heads.into_iter().map(|(_,_,_,id)| id).collect())
+        Ok(heads.into_iter().map(|(_, _, _, id)| id).collect())
     }
 
     /// Tiny 16-bit bloom over the most-recent `n` topo ops (parent-first order).
@@ -333,92 +337,95 @@ if this.db.get_cf(&this.cf(CF_META), b"db_uuid")?.is_none() {
         Ok(bloom)
     }
 
-    pub fn db_uuid(&self) -> Result<[u8;16]> {
-        let raw = self.db
+    pub fn db_uuid(&self) -> Result<[u8; 16]> {
+        let raw = self
+            .db
             .get_cf(&self.cf(CF_META), b"db_uuid")?
             .ok_or_else(|| anyhow!("missing db_uuid"))?;
-        let mut id = [0u8;16];
+        let mut id = [0u8; 16];
         anyhow::ensure!(raw.len() == 16, "db_uuid must be 16 bytes");
         id.copy_from_slice(&raw);
         Ok(id)
     }
     /// Store an op given its exact canonical CBOR bytes.
-/// Validates: op_id = H(OP_HASH_DOMAIN || canonical_cbor(header)), signature under author_pk.
-pub fn put_op_cbor(&self, op_cbor: &[u8]) -> Result<[u8;32]> {
-    // Decode as Op; accept legacy flat encoding for compatibility.
-    let op: Op = match serde_cbor::from_slice::<Op>(op_cbor) {
-        Ok(op) => op,
-        Err(_) => {
-            let f: OpFlatCompat = serde_cbor::from_slice(op_cbor)
-                .map_err(|e| anyhow!("decode Op CBOR: {}", e))?;
-            Op {
-                header: ecac_core::op::OpHeader {
-                    parents: f.parents,
-                    hlc: f.hlc,
-                    author_pk: f.author_pk,
-                    payload: f.payload,
-                },
-                sig: f.sig,
-                op_id: f.op_id,
+    /// Validates: op_id = H(OP_HASH_DOMAIN || canonical_cbor(header)), signature under author_pk.
+    pub fn put_op_cbor(&self, op_cbor: &[u8]) -> Result<[u8; 32]> {
+        // Decode as Op; accept legacy flat encoding for compatibility.
+        let op: Op = match serde_cbor::from_slice::<Op>(op_cbor) {
+            Ok(op) => op,
+            Err(_) => {
+                let f: OpFlatCompat = serde_cbor::from_slice(op_cbor)
+                    .map_err(|e| anyhow!("decode Op CBOR: {}", e))?;
+                Op {
+                    header: ecac_core::op::OpHeader {
+                        parents: f.parents,
+                        hlc: f.hlc,
+                        author_pk: f.author_pk,
+                        payload: f.payload,
+                    },
+                    sig: f.sig,
+                    op_id: f.op_id,
+                }
+            }
+        };
+
+        // Verify id and signature
+        let header_bytes = canonical_cbor(&op.header);
+        let expect = hash_with_domain(OP_HASH_DOMAIN, &header_bytes);
+        if expect != op.op_id {
+            return Err(anyhow!("op_id mismatch (header hash != embedded op_id)"));
+        }
+        if !op.verify() {
+            return Err(anyhow!(
+                "invalid signature for op {}",
+                hex::encode(op.op_id)
+            ));
+        }
+
+        // Parents-present check (no '?' inside an Iterator<bool>!)
+        let mut _all_parents_present = true;
+        for p in &op.header.parents {
+            if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
+                _all_parents_present = false;
+                break;
             }
         }
-    };
 
-    // Verify id and signature
-    let header_bytes = canonical_cbor(&op.header);
-    let expect = hash_with_domain(OP_HASH_DOMAIN, &header_bytes);
-    if expect != op.op_id {
-        return Err(anyhow!("op_id mismatch (header hash != embedded op_id)"));
-    }
-    if !op.verify() {
-        return Err(anyhow!("invalid signature for op {}", hex::encode(op.op_id)));
-    }
+        // (You can use all_parents_present as a hint if you later choose to gate indexes.)
 
-    // Parents-present check (no '?' inside an Iterator<bool>!)
-    let mut _all_parents_present = true;
-    for p in &op.header.parents {
-        if self.db.get_cf(&self.cf(CF_OPS), p)?.is_none() {
-            _all_parents_present = false;
-            break;
+        // Build edges metadata
+        let e = EdgeVal {
+            parents: op.header.parents.clone(),
+            author_pk: op.header.author_pk,
+            hlc_ms: op.header.hlc.physical_ms,
+            hlc_logical: op.header.hlc.logical,
+            hlc_node: op.header.hlc.node_id,
+        };
+        let edges_cbor = serde_cbor::to_vec(&e)?;
+
+        // Atomic batch write
+        let mut b = WriteBatch::default();
+        b.put_cf(&self.cf(CF_OPS), &op.op_id, op_cbor); // store EXACT bytes provided
+        b.put_cf(&self.cf(CF_EDGES), &op.op_id, &edges_cbor);
+
+        // by_author index (kept simple; whether or not parents are present)
+        let mut k = Vec::with_capacity(32 + 8 + 4 + 4 + 32);
+        k.extend_from_slice(&e.author_pk);
+        k.extend_from_slice(&e.hlc_ms.to_be_bytes());
+        k.extend_from_slice(&e.hlc_logical.to_be_bytes());
+        k.extend_from_slice(&e.hlc_node.to_be_bytes());
+        k.extend_from_slice(&op.op_id);
+        b.put_cf(&self.cf(CF_BY_AUTHOR), k, []);
+
+        self.db.write_opt(b, &self.write_opts())?;
+
+        // DEV crash-inject: die immediately after a committed write
+        if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
+            // abort() does not run destructors; good enough to simulate a crash
+            std::process::abort();
         }
+        Ok(op.op_id)
     }
-    
-    // (You can use all_parents_present as a hint if you later choose to gate indexes.)
-
-    // Build edges metadata
-    let e = EdgeVal {
-        parents: op.header.parents.clone(),
-        author_pk: op.header.author_pk,
-        hlc_ms: op.header.hlc.physical_ms,
-        hlc_logical: op.header.hlc.logical,
-        hlc_node: op.header.hlc.node_id,
-    };
-    let edges_cbor = serde_cbor::to_vec(&e)?;
-
-    // Atomic batch write
-    let mut b = WriteBatch::default();
-    b.put_cf(&self.cf(CF_OPS), &op.op_id, op_cbor);      // store EXACT bytes provided
-    b.put_cf(&self.cf(CF_EDGES), &op.op_id, &edges_cbor);
-
-    // by_author index (kept simple; whether or not parents are present)
-    let mut k = Vec::with_capacity(32 + 8 + 4 + 4 + 32);
-    k.extend_from_slice(&e.author_pk);
-    k.extend_from_slice(&e.hlc_ms.to_be_bytes());
-    k.extend_from_slice(&e.hlc_logical.to_be_bytes());
-    k.extend_from_slice(&e.hlc_node.to_be_bytes());
-    k.extend_from_slice(&op.op_id);
-    b.put_cf(&self.cf(CF_BY_AUTHOR), k, []);
-
-    self.db.write_opt(b, &self.write_opts())?;
-    
-// DEV crash-inject: die immediately after a committed write
-if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
-    // abort() does not run destructors; good enough to simulate a crash
-    std::process::abort();
-}
-    Ok(op.op_id)
-}
-
 
     pub fn topo_ids(&self) -> Result<Vec<[u8; 32]>> {
         // Build indegree and children map for all nodes whose parents are present.
@@ -638,11 +645,21 @@ if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
             let e: EdgeVal = serde_cbor::from_slice(&v)?;
 
             // NEW: check edges.parents exactly matches the op's parents
-            let op_bytes = self.db.get_cf(&self.cf(CF_OPS), k.as_ref())?
-                .ok_or_else(|| anyhow!("missing op {} while verifying edges", hex::encode(k.as_ref())))?;
+            let op_bytes = self
+                .db
+                .get_cf(&self.cf(CF_OPS), k.as_ref())?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "missing op {} while verifying edges",
+                        hex::encode(k.as_ref())
+                    )
+                })?;
             let op: Op = serde_cbor::from_slice(&op_bytes)?;
             if e.parents != op.header.parents {
-                return Err(anyhow!("edges parents mismatch for {}", hex::encode(k.as_ref())));
+                return Err(anyhow!(
+                    "edges parents mismatch for {}",
+                    hex::encode(k.as_ref())
+                ));
             }
             // NEW
 
@@ -663,81 +680,89 @@ if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
         );
 
         // ---- VC cache parity (only if ./trust exists; otherwise silently skip) ----
-let trust = match TrustStore::load_from_dir("./trust") {
-    Ok(t) => Some(t),
-    Err(_) => None, // If trust dir is absent, skip parity check.
-};
-
-if let Some(trust) = trust {
-    let mut status = StatusCache::load_from_dir("./trust/status");
-
-    // First, for every vc_raw entry, recompute verified and compare to vc_verified
-    let mut raw_keys: BTreeSet<[u8; 32]> = BTreeSet::new();
-    let it_raw = self.db.iterator_cf(&self.cf(CF_VC_RAW), IteratorMode::Start);
-    for kv in it_raw {
-        let (k, v) = kv?;
-        if k.len() != 32 {
-            continue;
-        }
-        let mut cred_hash = [0u8; 32];
-        cred_hash.copy_from_slice(&k);
-
-        raw_keys.insert(cred_hash);
-
-        let verified = verify_vc(&v, &trust, &mut status)
-            .map_err(|e| anyhow!("vc_raw failed to verify for {}: {:?}", hex::encode(k.as_ref()), e))?;
-
-        let persist = VerifiedVcPersist {
-            cred_id: verified.cred_id.clone(),
-            issuer: verified.issuer.clone(),
-            subject_pk: verified.subject_pk,
-            role: verified.role.clone(),
-            // IMPORTANT: keep iteration order identical to CLI storage.
-            scope: verified.scope_tags.iter().cloned().collect::<Vec<_>>(),
-            nbf_ms: verified.nbf_ms,
-            exp_ms: verified.exp_ms,
-            status_list_id: verified.status_list_id.clone(),
-            status_index: verified.status_index,
-            cred_hash: verified.cred_hash,
+        let trust = match TrustStore::load_from_dir("./trust") {
+            Ok(t) => Some(t),
+            Err(_) => None, // If trust dir is absent, skip parity check.
         };
-        let expect = serde_cbor::to_vec(&persist)?;
 
-        match self.db.get_cf(&self.cf(CF_VC_VERIFIED), &cred_hash)? {
-            Some(stored) if stored == expect => {}
-            Some(_) => {
-                return Err(anyhow!(
-                    "vc_verified mismatch for {}",
-                    hex::encode(k.as_ref())
-                ));
+        if let Some(trust) = trust {
+            let mut status = StatusCache::load_from_dir("./trust/status");
+
+            // First, for every vc_raw entry, recompute verified and compare to vc_verified
+            let mut raw_keys: BTreeSet<[u8; 32]> = BTreeSet::new();
+            let it_raw = self
+                .db
+                .iterator_cf(&self.cf(CF_VC_RAW), IteratorMode::Start);
+            for kv in it_raw {
+                let (k, v) = kv?;
+                if k.len() != 32 {
+                    continue;
+                }
+                let mut cred_hash = [0u8; 32];
+                cred_hash.copy_from_slice(&k);
+
+                raw_keys.insert(cred_hash);
+
+                let verified = verify_vc(&v, &trust, &mut status).map_err(|e| {
+                    anyhow!(
+                        "vc_raw failed to verify for {}: {:?}",
+                        hex::encode(k.as_ref()),
+                        e
+                    )
+                })?;
+
+                let persist = VerifiedVcPersist {
+                    cred_id: verified.cred_id.clone(),
+                    issuer: verified.issuer.clone(),
+                    subject_pk: verified.subject_pk,
+                    role: verified.role.clone(),
+                    // IMPORTANT: keep iteration order identical to CLI storage.
+                    scope: verified.scope_tags.iter().cloned().collect::<Vec<_>>(),
+                    nbf_ms: verified.nbf_ms,
+                    exp_ms: verified.exp_ms,
+                    status_list_id: verified.status_list_id.clone(),
+                    status_index: verified.status_index,
+                    cred_hash: verified.cred_hash,
+                };
+                let expect = serde_cbor::to_vec(&persist)?;
+
+                match self.db.get_cf(&self.cf(CF_VC_VERIFIED), &cred_hash)? {
+                    Some(stored) if stored == expect => {}
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "vc_verified mismatch for {}",
+                            hex::encode(k.as_ref())
+                        ));
+                    }
+                    None => {
+                        return Err(anyhow!(
+                            "missing vc_verified for {}",
+                            hex::encode(k.as_ref())
+                        ));
+                    }
+                }
             }
-            None => {
-                return Err(anyhow!(
-                    "missing vc_verified for {}",
-                    hex::encode(k.as_ref())
-                ));
+
+            // Second, ensure there are no extra vc_verified entries without a corresponding vc_raw
+            let it_verified = self
+                .db
+                .iterator_cf(&self.cf(CF_VC_VERIFIED), IteratorMode::Start);
+            for kv in it_verified {
+                let (k, _v) = kv?;
+                if k.len() != 32 {
+                    continue;
+                }
+                let mut ch = [0u8; 32];
+                ch.copy_from_slice(&k);
+                if !raw_keys.contains(&ch) {
+                    return Err(anyhow!(
+                        "vc_verified without vc_raw for {}",
+                        hex::encode(k.as_ref())
+                    ));
+                }
             }
         }
-    }
-
-    // Second, ensure there are no extra vc_verified entries without a corresponding vc_raw
-    let it_verified = self.db.iterator_cf(&self.cf(CF_VC_VERIFIED), IteratorMode::Start);
-    for kv in it_verified {
-        let (k, _v) = kv?;
-        if k.len() != 32 {
-            continue;
-        }
-        let mut ch = [0u8; 32];
-        ch.copy_from_slice(&k);
-        if !raw_keys.contains(&ch) {
-            return Err(anyhow!(
-                "vc_verified without vc_raw for {}",
-                hex::encode(k.as_ref())
-            ));
-        }
-    }
-}
-// ---- end VC parity ----
-
+        // ---- end VC parity ----
 
         Ok(())
     }

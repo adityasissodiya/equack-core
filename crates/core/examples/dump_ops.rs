@@ -12,12 +12,57 @@ fn main() {
 
     // Same small history from m2_replay:
     // two concurrent MV writes, plus OR-Set add -> remove -> add
-    let a = Op::new(vec![], Hlc::new(10,1), pk, Payload::Data { key: "mv:o:x".into(), value: b"A".to_vec() }, &sk);
-    let b = Op::new(vec![], Hlc::new(10,2), pk, Payload::Data { key: "mv:o:x".into(), value: b"B".to_vec() }, &sk);
+    let a = Op::new(
+        vec![],
+        Hlc::new(10, 1),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"A".to_vec(),
+        },
+        &sk,
+    );
+    let b = Op::new(
+        vec![],
+        Hlc::new(10, 2),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"B".to_vec(),
+        },
+        &sk,
+    );
 
-    let add1 = Op::new(vec![], Hlc::new(11,1), pk, Payload::Data { key: "set+:o:s:e".into(), value: b"v1".to_vec() }, &sk);
-    let rem  = Op::new(vec![add1.op_id], Hlc::new(12,1), pk, Payload::Data { key: "set-:o:s:e".into(), value: vec![] }, &sk);
-    let add2 = Op::new(vec![rem.op_id], Hlc::new(13,1), pk, Payload::Data { key: "set+:o:s:e".into(), value: b"v2".to_vec() }, &sk);
+    let add1 = Op::new(
+        vec![],
+        Hlc::new(11, 1),
+        pk,
+        Payload::Data {
+            key: "set+:o:s:e".into(),
+            value: b"v1".to_vec(),
+        },
+        &sk,
+    );
+    let rem = Op::new(
+        vec![add1.op_id],
+        Hlc::new(12, 1),
+        pk,
+        Payload::Data {
+            key: "set-:o:s:e".into(),
+            value: vec![],
+        },
+        &sk,
+    );
+    let add2 = Op::new(
+        vec![rem.op_id],
+        Hlc::new(13, 1),
+        pk,
+        Payload::Data {
+            key: "set+:o:s:e".into(),
+            value: b"v2".to_vec(),
+        },
+        &sk,
+    );
 
     let ops = vec![a, b, add1, rem, add2];
 

@@ -1,7 +1,7 @@
 //! Minimal crypto helpers for M1: BLAKE3 hashing + Ed25519 signing/verifying.
 
 use blake3;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer, Verifier};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 
 pub type PublicKeyBytes = [u8; 32];
@@ -45,7 +45,9 @@ pub fn vk_to_bytes(vk: &VerifyingKey) -> PublicKeyBytes {
 }
 
 /// Parse VerifyingKey from 32 bytes.
-pub fn vk_from_bytes(bytes: &PublicKeyBytes) -> Result<VerifyingKey, ed25519_dalek::SignatureError> {
+pub fn vk_from_bytes(
+    bytes: &PublicKeyBytes,
+) -> Result<VerifyingKey, ed25519_dalek::SignatureError> {
     VerifyingKey::from_bytes(bytes)
 }
 

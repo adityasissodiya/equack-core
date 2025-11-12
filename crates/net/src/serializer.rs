@@ -1,15 +1,23 @@
 //use anyhow::{anyhow, Result};
 use anyhow::Result;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer, Verifier};
 use ecac_core::serialize::canonical_cbor;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
-use crate::types::{Announce, SignedAnnounce, FetchMissing, RpcFrame};
+use crate::types::{Announce, FetchMissing, RpcFrame, SignedAnnounce};
 
 /// Encode any wire value to canonical CBOR bytes.
-pub fn to_cbor_announce(a: &Announce) -> Vec<u8> { canonical_cbor(a) }
-pub fn to_cbor_signed_announce(sa: &SignedAnnounce) -> Vec<u8> { canonical_cbor(sa) }
-pub fn to_cbor_fetch(req: &FetchMissing) -> Vec<u8> { canonical_cbor(req) }
-pub fn to_cbor_frame(f: &RpcFrame) -> Vec<u8> { canonical_cbor(f) }
+pub fn to_cbor_announce(a: &Announce) -> Vec<u8> {
+    canonical_cbor(a)
+}
+pub fn to_cbor_signed_announce(sa: &SignedAnnounce) -> Vec<u8> {
+    canonical_cbor(sa)
+}
+pub fn to_cbor_fetch(req: &FetchMissing) -> Vec<u8> {
+    canonical_cbor(req)
+}
+pub fn to_cbor_frame(f: &RpcFrame) -> Vec<u8> {
+    canonical_cbor(f)
+}
 
 /// Decode helpers.
 pub fn from_cbor_announce(b: &[u8]) -> Result<Announce> {
@@ -33,13 +41,21 @@ pub fn sign_announce(announce: Announce, sk: &SigningKey) -> SignedAnnounce {
     //let sig = sk.sign(&blake3::hash(&bytes).as_bytes()); // sign a fixed 32-byte digest
     let digest = blake3::hash(&bytes);
     let sig = sk.sign(digest.as_bytes()); // sign the 32-byte digest as bytes
-    SignedAnnounce { announce, sig: sig.to_bytes().to_vec(), vk: vk.to_bytes() }
+    SignedAnnounce {
+        announce,
+        sig: sig.to_bytes().to_vec(),
+        vk: vk.to_bytes(),
+    }
 }
 
 /// Verify a SignedAnnounce: (re-encode announce -> blake3) then ed25519 verify.
 pub fn verify_signed_announce(sa: &SignedAnnounce) -> bool {
-    let Ok(vk) = VerifyingKey::from_bytes(&sa.vk) else { return false; };
-    let Ok(sig) = Signature::from_slice(&sa.sig) else { return false; };
+    let Ok(vk) = VerifyingKey::from_bytes(&sa.vk) else {
+        return false;
+    };
+    let Ok(sig) = Signature::from_slice(&sa.sig) else {
+        return false;
+    };
     let bytes = to_cbor_announce(&sa.announce);
     // let h = *blake3::hash(&bytes).as_bytes();
     // vk.verify(&h, &sig).is_ok()
@@ -50,12 +66,14 @@ pub fn verify_signed_announce(sa: &SignedAnnounce) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Announce, FetchMissing, RpcFrame};
+    use ecac_core::op::OpId;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
-    use crate::types::{Announce, RpcFrame, FetchMissing};
-    use ecac_core::op::OpId;
 
-    fn opid(x: u8) -> OpId { [x; 32] }
+    fn opid(x: u8) -> OpId {
+        [x; 32]
+    }
 
     #[test]
     fn announce_roundtrip_and_verify() {
@@ -79,7 +97,7 @@ mod tests {
 
     #[test]
     fn rpc_frames_roundtrip() {
-        let op = RpcFrame::OpBytes(vec![1,2,3,4]);
+        let op = RpcFrame::OpBytes(vec![1, 2, 3, 4]);
         let end = RpcFrame::End;
 
         let b1 = to_cbor_frame(&op);
@@ -91,7 +109,9 @@ mod tests {
         assert_eq!(op, op2);
         assert_eq!(end, end2);
 
-        let req = FetchMissing { want: vec![opid(9), opid(10)] };
+        let req = FetchMissing {
+            want: vec![opid(9), opid(10)],
+        };
         let rb = to_cbor_fetch(&req);
         let req2 = from_cbor_fetch(&rb).unwrap();
         assert_eq!(req, req2);

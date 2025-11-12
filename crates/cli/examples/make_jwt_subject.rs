@@ -1,8 +1,8 @@
-use std::{env, fs, path::PathBuf};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::json;
+use std::{env, fs, path::PathBuf};
 
 fn hex_nibble(b: u8) -> Result<u8, String> {
     match b {
@@ -14,16 +14,23 @@ fn hex_nibble(b: u8) -> Result<u8, String> {
 }
 fn parse_sk_hex(hex: &str) -> Result<SigningKey, String> {
     let s = hex.trim();
-    if s.len() != 64 { return Err("expected 64 hex chars for ed25519 secret key".into()); }
+    if s.len() != 64 {
+        return Err("expected 64 hex chars for ed25519 secret key".into());
+    }
     let b = s.as_bytes();
     let mut key = [0u8; 32];
-    for i in 0..32 { key[i] = (hex_nibble(b[2*i])? << 4) | hex_nibble(b[2*i+1])?; }
+    for i in 0..32 {
+        key[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
+    }
     Ok(SigningKey::from_bytes(&key))
 }
-fn hex32(arr: &[u8;32]) -> String {
-    const HEX: &[u8;16] = b"0123456789abcdef";
+fn hex32(arr: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(64);
-    for &b in arr { s.push(HEX[(b>>4) as usize] as char); s.push(HEX[(b&0x0f) as usize] as char); }
+    for &b in arr {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
     s
 }
 

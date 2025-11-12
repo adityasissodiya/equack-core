@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
-    self, hash_with_domain, sig_from_slice, vk_from_bytes, OP_HASH_DOMAIN, PublicKeyBytes,
+    self, hash_with_domain, sig_from_slice, vk_from_bytes, PublicKeyBytes, OP_HASH_DOMAIN,
 };
 use crate::hlc::Hlc;
 use crate::serialize::canonical_cbor;
@@ -27,10 +27,10 @@ pub enum CredentialFormat {
 /// The part we hash & sign (no sig/op_id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpHeader {
-/// Some older/externally-produced CBOR may omit `parents` when empty.
-/// Accept that by defaulting to [] on deserialization (serialization unchanged).
+    /// Some older/externally-produced CBOR may omit `parents` when empty.
+    /// Accept that by defaulting to [] on deserialization (serialization unchanged).
     pub parents: Vec<OpId>,
-/// Older CBOR may omit `hlc`; accept and default to zero to keep legacy files readable.
+    /// Older CBOR may omit `hlc`; accept and default to zero to keep legacy files readable.
     #[serde(default)]
     pub hlc: Hlc,
     pub author_pk: PublicKeyBytes,
@@ -82,7 +82,7 @@ pub enum Payload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Op {
     pub header: OpHeader,
-    pub sig: Vec<u8>,   // store as Vec<u8> for serde friendliness
+    pub sig: Vec<u8>, // store as Vec<u8> for serde friendliness
     pub op_id: OpId,
 }
 
@@ -95,7 +95,12 @@ impl Op {
         payload: Payload,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
-        let header = OpHeader { parents, hlc, author_pk: author_vk_bytes, payload };
+        let header = OpHeader {
+            parents,
+            hlc,
+            author_pk: author_vk_bytes,
+            payload,
+        };
         let header_bytes = canonical_cbor(&header);
         let op_id = hash_with_domain(OP_HASH_DOMAIN, &header_bytes);
         let sig = crypto::sign_hash(&op_id, signing_key).to_bytes().to_vec();
@@ -120,8 +125,12 @@ impl Op {
         crypto::verify_hash(&self.op_id, &sig, &vk)
     }
 
-    pub fn author_pk(&self) -> PublicKeyBytes { self.header.author_pk }
-    pub fn hlc(&self) -> Hlc { self.header.hlc }
+    pub fn author_pk(&self) -> PublicKeyBytes {
+        self.header.author_pk
+    }
+    pub fn hlc(&self) -> Hlc {
+        self.header.hlc
+    }
 }
 
 #[cfg(test)]
@@ -134,10 +143,28 @@ mod tests {
         let (sk, vk) = generate_keypair();
         let vk_bytes = vk_to_bytes(&vk);
 
-        let op1 = Op::new(vec![], Hlc::new(100, 1), vk_bytes, Payload::Data { key: "k".into(), value: b"v".to_vec() }, &sk);
+        let op1 = Op::new(
+            vec![],
+            Hlc::new(100, 1),
+            vk_bytes,
+            Payload::Data {
+                key: "k".into(),
+                value: b"v".to_vec(),
+            },
+            &sk,
+        );
         assert!(op1.verify());
 
-        let op2 = Op::new(vec![], Hlc::new(100, 1), vk_bytes, Payload::Data { key: "k".into(), value: b"v".to_vec() }, &sk);
+        let op2 = Op::new(
+            vec![],
+            Hlc::new(100, 1),
+            vk_bytes,
+            Payload::Data {
+                key: "k".into(),
+                value: b"v".to_vec(),
+            },
+            &sk,
+        );
         assert_eq!(op1.op_id, op2.op_id);
 
         // Tamper payload ⇒ verify must fail

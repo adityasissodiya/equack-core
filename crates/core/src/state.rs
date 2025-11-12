@@ -53,7 +53,10 @@ pub struct State {
 
 impl State {
     pub fn new() -> Self {
-        Self { objects: BTreeMap::new(), processed_count: 0 }
+        Self {
+            objects: BTreeMap::new(),
+            processed_count: 0,
+        }
     }
 
     pub fn processed_count(&self) -> usize {
@@ -165,33 +168,56 @@ impl State {
                             .map(|v| {
                                 let mut hasher = Hasher::new();
                                 hasher.update(&v);
-                                let h: [u8;32] = hasher.finalize().into();
+                                let h: [u8; 32] = hasher.finalize().into();
                                 (h, v)
                             })
                             .collect::<Vec<_>>();
                         winners_sorted.sort_by(|a, b| {
-                            if a.0 != b.0 { a.0.cmp(&b.0) } else { a.1.cmp(&b.1) }
+                            if a.0 != b.0 {
+                                a.0.cmp(&b.0)
+                            } else {
+                                a.1.cmp(&b.1)
+                            }
                         });
-                        let winners: Vec<String> = winners_sorted.into_iter().map(|(_, v)| hex(v)).collect();
+                        let winners: Vec<String> =
+                            winners_sorted.into_iter().map(|(_, v)| hex(v)).collect();
 
                         let project = mv.project().map(hex);
-                        let out = MVOut { name: fname, ty: "mv", winners, project };
+                        let out = MVOut {
+                            name: fname,
+                            ty: "mv",
+                            winners,
+                            project,
+                        };
                         fouts.push(serde_json::to_value(out).unwrap());
                     }
                     FieldValue::Set(set) => {
                         let mut elems: Vec<SetElem> = Vec::new();
                         for (ek, v) in set.iter_present() {
-                            elems.push(SetElem { key: ek, value: hex(&v) });
+                            elems.push(SetElem {
+                                key: ek,
+                                value: hex(&v),
+                            });
                         }
-                        let out = SetOut { name: fname, ty: "set", elems };
+                        let out = SetOut {
+                            name: fname,
+                            ty: "set",
+                            elems,
+                        };
                         fouts.push(serde_json::to_value(out).unwrap());
                     }
                 }
             }
-            objects.push(ObjOut { id: obj_id, fields: fouts });
+            objects.push(ObjOut {
+                id: obj_id,
+                fields: fouts,
+            });
         }
 
-        let root = Root { objects, processed_count: self.processed_count };
+        let root = Root {
+            objects,
+            processed_count: self.processed_count,
+        };
         serde_json::to_vec(&root).unwrap()
     }
 

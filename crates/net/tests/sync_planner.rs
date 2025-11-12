@@ -1,7 +1,6 @@
 // crates/net/tests/sync_planner.rs
 use ecac_core::op::OpId;
-use ecac_net::sync::{SyncPlanner, bloom16_maybe_contains};
-
+use ecac_net::sync::{bloom16_maybe_contains, SyncPlanner};
 
 fn hash_indices(id: &OpId) -> [u8; 3] {
     let h = ecac_core::crypto::hash_bytes(id);
@@ -14,12 +13,14 @@ fn hash_indices(id: &OpId) -> [u8; 3] {
 fn set_bloom_bits_for(bloom: &mut [u8; 2], id: &OpId) {
     for i in hash_indices(id) {
         let byte = (i / 8) as usize;
-        let bit  =  i % 8;
+        let bit = i % 8;
         bloom[byte] |= 1u8 << bit;
     }
 }
 
-fn id(x: u8) -> OpId { [x; 32] }
+fn id(x: u8) -> OpId {
+    [x; 32]
+}
 
 #[test]
 fn planner_diff_small_and_parent_first() {
@@ -47,14 +48,17 @@ fn planner_diff_small_and_parent_first() {
     let plan = SyncPlanner::plan_with(&[d], bloom, have, parents);
 
     // Debug logging
-    eprintln!("planner_diff_small_and_parent_first: plan batches: {:?}", plan.batches);
+    eprintln!(
+        "planner_diff_small_and_parent_first: plan batches: {:?}",
+        plan.batches
+    );
 
     // Boundary is A (already present) so we should fetch only [B,C] then [D].
     assert_eq!(plan.batches.len(), 2);
     let mut bc = plan.batches[0].clone();
     bc.sort();
-    assert_eq!(bc, vec![b, c]);              // parents layer
-    assert_eq!(plan.batches[1], vec![d]);    // child
+    assert_eq!(bc, vec![b, c]); // parents layer
+    assert_eq!(plan.batches[1], vec![d]); // child
 }
 
 #[test]
@@ -70,9 +74,7 @@ fn bloom_short_circuit_skips_knowns() {
         let bi = hash_indices(&b);
         let ci = hash_indices(&c);
         let di = hash_indices(&d);
-        let covers = |x: [u8; 3], y: [u8; 3]| -> bool {
-            y.iter().all(|yy| x.contains(yy))
-        };
+        let covers = |x: [u8; 3], y: [u8; 3]| -> bool { y.iter().all(|yy| x.contains(yy)) };
         if !covers(bi, ci) && !covers(bi, di) {
             break;
         }
@@ -81,12 +83,19 @@ fn bloom_short_circuit_skips_knowns() {
         c = id(c[0].wrapping_add(1));
         d = id(d[0].wrapping_add(1));
         tries += 1;
-        assert!(tries < 1000, "failed to find disjoint bloom indices for test");
+        assert!(
+            tries < 1000,
+            "failed to find disjoint bloom indices for test"
+        );
     }
 
     // Parents: D -> [B, C]
     let parents = move |x: &OpId| -> Vec<OpId> {
-        if *x == d { vec![b, c] } else { vec![] }
+        if *x == d {
+            vec![b, c]
+        } else {
+            vec![]
+        }
     };
     let have = |_x: &OpId| false;
 
@@ -106,7 +115,10 @@ fn bloom_short_circuit_skips_knowns() {
     let plan = SyncPlanner::plan_with(&[d], bloom, have, parents);
 
     // Debug logging
-    eprintln!("bloom_short_circuit_skips_knowns: plan batches: {:?}", plan.batches);
+    eprintln!(
+        "bloom_short_circuit_skips_knowns: plan batches: {:?}",
+        plan.batches
+    );
 
     // Because bloom hints B as present, we only fetch C first, then D.
     assert_eq!(plan.batches.len(), 2);

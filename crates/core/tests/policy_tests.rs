@@ -40,7 +40,15 @@ fn grant_allows_then_apply() {
 
     // VC-backed grant for {"hv"}
     let (cred, g) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let w = Op::new(
         vec![],
@@ -80,7 +88,15 @@ fn revoke_denies() {
     let user_pk = vk_to_bytes(&user_vk);
 
     let (cred, g) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let r = revoke(
         user_pk,
@@ -123,7 +139,15 @@ fn regrant_restores() {
     let user_pk = vk_to_bytes(&user_vk);
 
     let (cred1, g1) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let r = revoke(
         user_pk,
@@ -134,7 +158,15 @@ fn regrant_restores() {
         admin_pk,
     );
     let (cred2, g2) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 12, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        12,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let w = Op::new(
         vec![],
@@ -178,7 +210,15 @@ fn scope_mismatch_skips() {
 
     // Grant on {"mech"} but write to tags {"hv"} (mv:o:x)
     let (cred, g) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["mech"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["mech"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let w = Op::new(
         vec![],
@@ -213,7 +253,15 @@ fn overlapping_scope_allows() {
 
     // Grant on {"hv","mech"}; both mv:o:x and set+:o:s:e should be allowed.
     let (cred, g) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv", "mech"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv", "mech"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let w1 = Op::new(
         vec![],
@@ -275,7 +323,15 @@ fn concurrency_grant_vs_op_resolved_by_order() {
 
     // Case A: grant before op by HLC tie-break
     let (cred_a, g_a) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let w_a = Op::new(
         vec![],
@@ -298,7 +354,15 @@ fn concurrency_grant_vs_op_resolved_by_order() {
 
     // Case B: op before grant (reverse HLC) → denied
     let (cred_b, g_b) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 20, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        20,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     let w_b = Op::new(
         vec![],
@@ -317,10 +381,7 @@ fn concurrency_grant_vs_op_resolved_by_order() {
     dag2.insert(g_b);
     let (state_b, _d2) = replay_full(&dag2);
     let present_b = state_b.objects.get("o").and_then(|m| m.get("x")).is_some();
-    assert!(
-        !present_b,
-        "op before grant → denied (not retroactive)"
-    );
+    assert!(!present_b, "op before grant → denied (not retroactive)");
 }
 
 #[test]
@@ -333,7 +394,15 @@ fn revoke_vs_op_concurrent_deny_wins() {
 
     // Grant earlier so user had access.
     let (cred, g) = util::make_credential_and_grant(
-        &admin_sk, "issuer-1", user_pk, "editor", &["hv"], 10, 10_000, &admin_sk, admin_pk,
+        &admin_sk,
+        "issuer-1",
+        user_pk,
+        "editor",
+        &["hv"],
+        10,
+        10_000,
+        &admin_sk,
+        admin_pk,
     );
     // Concurrent revoke/op resolved by total order: if revoke before op, deny.
     let r = revoke(

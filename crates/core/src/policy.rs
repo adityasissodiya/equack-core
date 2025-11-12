@@ -55,15 +55,19 @@ use crate::crypto::{vk_from_bytes, PublicKeyBytes};
 use crate::dag::Dag;
 use crate::hlc::Hlc;
 use crate::op::{OpId, Payload};
-use crate::trust::TrustStore;
 use crate::status::StatusCache;
+use crate::trust::TrustStore;
 use crate::vc::verify_vc;
 
 pub type TagSet = BTreeSet<String>;
 
 /// Actions derived from data ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Action { SetField, SetAdd, SetRem }
+pub enum Action {
+    SetField,
+    SetAdd,
+    SetRem,
+}
 
 /// Permission entry bound to a role.
 #[derive(Debug, Clone)]
@@ -72,34 +76,54 @@ pub struct Permission {
     pub required_tags: TagSet,
 }
 
-fn empty_tags() -> TagSet { TagSet::new() }
+fn empty_tags() -> TagSet {
+    TagSet::new()
+}
 
 /// Role → permissions table (simple “editor”).
 static EDITOR_PERMS: once_cell::sync::Lazy<Vec<Permission>> = once_cell::sync::Lazy::new(|| {
     vec![
-        Permission { action: Action::SetField, required_tags: empty_tags() },
-        Permission { action: Action::SetAdd,   required_tags: empty_tags() },
-        Permission { action: Action::SetRem,   required_tags: empty_tags() },
+        Permission {
+            action: Action::SetField,
+            required_tags: empty_tags(),
+        },
+        Permission {
+            action: Action::SetAdd,
+            required_tags: empty_tags(),
+        },
+        Permission {
+            action: Action::SetRem,
+            required_tags: empty_tags(),
+        },
     ]
 });
 
 fn role_perms(role: &str) -> &'static [Permission] {
-    match role { "editor" => &EDITOR_PERMS, _ => &[] }
+    match role {
+        "editor" => &EDITOR_PERMS,
+        _ => &[],
+    }
 }
 
 /// Static resource tags for (obj,field). Keep deterministic.
 pub fn tags_for(obj: &str, field: &str) -> TagSet {
     let mut t = TagSet::new();
     match (obj, field) {
-        ("o", "x") => { t.insert("hv".to_string()); }
-        ("o", "s") => { t.insert("mech".to_string()); }
+        ("o", "x") => {
+            t.insert("hv".to_string());
+        }
+        ("o", "s") => {
+            t.insert("mech".to_string());
+        }
         _ => {}
     }
     t
 }
 
 /// Parse Data key into (action, obj, field, elem_opt, resource_tags).
-pub fn derive_action_and_tags(key: &str) -> Option<(Action, String, String, Option<String>, TagSet)> {
+pub fn derive_action_and_tags(
+    key: &str,
+) -> Option<(Action, String, String, Option<String>, TagSet)> {
     if let Some(rest) = key.strip_prefix("mv:") {
         let mut it = rest.split(':');
         let obj = it.next()?.to_string();
@@ -130,8 +154,8 @@ pub fn derive_action_and_tags(key: &str) -> Option<(Action, String, String, Opti
 #[derive(Debug, Clone)]
 pub struct Epoch {
     pub scope: TagSet,
-    pub start_pos: usize,        // inclusive
-    pub end_pos: Option<usize>,  // exclusive; None=open
+    pub start_pos: usize,       // inclusive
+    pub end_pos: Option<usize>, // exclusive; None=open
     pub not_before: Option<Hlc>,
     pub not_after: Option<Hlc>,
 }
@@ -193,7 +217,9 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
     let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
 
     for id in topo {
-        let Some(op) = dag.get(id) else { continue; };
+        let Some(op) = dag.get(id) else {
+            continue;
+        };
         if let Payload::Credential { cred_bytes, .. } = &op.header.payload {
             if let Some(vc) = verify_credential_compact_jwt(cred_bytes, op.header.author_pk) {
                 let mut h = Hasher::new();
@@ -208,26 +234,42 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
     let mut idx = EpochIndex::default();
 
     for (pos, id) in topo.iter().enumerate() {
-        let Some(op) = dag.get(id) else { continue; };
+        let Some(op) = dag.get(id) else {
+            continue;
+        };
         match &op.header.payload {
-            Payload::Grant { subject_pk, cred_hash } => {
+            Payload::Grant {
+                subject_pk,
+                cred_hash,
+            } => {
                 if let Some(vc) = vc_index.get(cred_hash) {
                     // Subject must match VC.claims.sub_pk
                     if &vc.subject_pk != subject_pk {
                         continue;
                     }
-                    idx.push_epoch(*subject_pk, vc.role.clone(), Epoch {
-                        scope: vc.scope.clone(),
-                        start_pos: pos,
-                        end_pos: None,
-                        not_before: Some(Hlc::new(vc.nbf_ms, 0)),
-                        not_after: Some(Hlc::new(vc.exp_ms, 0)),
-                    });
+                    idx.push_epoch(
+                        *subject_pk,
+                        vc.role.clone(),
+                        Epoch {
+                            scope: vc.scope.clone(),
+                            start_pos: pos,
+                            end_pos: None,
+                            not_before: Some(Hlc::new(vc.nbf_ms, 0)),
+                            not_after: Some(Hlc::new(vc.exp_ms, 0)),
+                        },
+                    );
                 }
             }
-            Payload::Revoke { subject_pk, role, scope_tags, .. } => {
+            Payload::Revoke {
+                subject_pk,
+                role,
+                scope_tags,
+                ..
+            } => {
                 let mut scope = TagSet::new();
-                for s in scope_tags { scope.insert(s.clone()); }
+                for s in scope_tags {
+                    scope.insert(s.clone());
+                }
                 idx.close_epochs_intersecting_scope(subject_pk, role, &scope, pos);
             }
             _ => {}
@@ -247,23 +289,44 @@ pub fn is_permitted_at_pos(
     at_hlc: Hlc,
 ) -> bool {
     for ((subj, role), epochs) in idx.entries.iter() {
-        if subj != author { continue; }
+        if subj != author {
+            continue;
+        }
         // Role permits action?
         let mut ok = false;
         for p in role_perms(role) {
             if p.action == action && p.required_tags.is_subset(resource_tags) {
-                ok = true; break;
+                ok = true;
+                break;
             }
         }
-        if !ok { continue; }
+        if !ok {
+            continue;
+        }
 
         // Epoch covers pos and intersects scope (and passes HLC guards).
         for ep in epochs {
-            if pos_idx < ep.start_pos { continue; }
-            if let Some(end) = ep.end_pos { if pos_idx >= end { continue; } }
-            if ep.scope.is_disjoint(resource_tags) { continue; }
-            if let Some(nbf) = ep.not_before { if at_hlc < nbf { continue; } }
-            if let Some(naf) = ep.not_after  { if at_hlc >= naf { continue; } }
+            if pos_idx < ep.start_pos {
+                continue;
+            }
+            if let Some(end) = ep.end_pos {
+                if pos_idx >= end {
+                    continue;
+                }
+            }
+            if ep.scope.is_disjoint(resource_tags) {
+                continue;
+            }
+            if let Some(nbf) = ep.not_before {
+                if at_hlc < nbf {
+                    continue;
+                }
+            }
+            if let Some(naf) = ep.not_after {
+                if at_hlc >= naf {
+                    continue;
+                }
+            }
             return true;
         }
     }
@@ -273,7 +336,10 @@ pub fn is_permitted_at_pos(
 // --------------------
 // Helpers (JWT verify)
 
-fn verify_credential_compact_jwt(compact: &[u8], issuer_pk_bytes: PublicKeyBytes) -> Option<VerifiedClaims> {
+fn verify_credential_compact_jwt(
+    compact: &[u8],
+    issuer_pk_bytes: PublicKeyBytes,
+) -> Option<VerifiedClaims> {
     // Split into header.payload.signature
     let s = core::str::from_utf8(compact).ok()?;
     let mut parts = s.split('.');
@@ -281,12 +347,16 @@ fn verify_credential_compact_jwt(compact: &[u8], issuer_pk_bytes: PublicKeyBytes
         (Some(h), Some(p), Some(s)) => (h, p, s),
         _ => return None,
     };
-    if parts.next().is_some() { return None; }
+    if parts.next().is_some() {
+        return None;
+    }
 
     let header_bytes = URL_SAFE_NO_PAD.decode(h_b64.as_bytes()).ok()?;
     let payload_bytes = URL_SAFE_NO_PAD.decode(p_b64.as_bytes()).ok()?;
     let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64.as_bytes()).ok()?;
-    if sig_bytes.len() != 64 { return None; }
+    if sig_bytes.len() != 64 {
+        return None;
+    }
 
     // Parse JSON
     let header: Value = serde_json::from_slice(&header_bytes).ok()?;
@@ -294,7 +364,9 @@ fn verify_credential_compact_jwt(compact: &[u8], issuer_pk_bytes: PublicKeyBytes
 
     // alg must be EdDSA
     let alg = header.get("alg")?.as_str()?;
-    if alg != "EdDSA" { return None; }
+    if alg != "EdDSA" {
+        return None;
+    }
 
     // Verify signature using issuer = author_pk of the Credential op
     let vk = vk_from_bytes(&issuer_pk_bytes).ok()?;
@@ -317,15 +389,23 @@ fn verify_credential_compact_jwt(compact: &[u8], issuer_pk_bytes: PublicKeyBytes
         scope.insert(t.as_str()?.to_string());
     }
 
-    Some(VerifiedClaims { subject_pk, role, scope, nbf_ms, exp_ms })
+    Some(VerifiedClaims {
+        subject_pk,
+        role,
+        scope,
+        nbf_ms,
+        exp_ms,
+    })
 }
 
 fn hex32(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 { return None; }
+    if hex.len() != 64 {
+        return None;
+    }
     let mut out = [0u8; 32];
     let b = hex.as_bytes();
     for i in 0..32 {
-        out[i] = (hex_nibble(b[2*i])? << 4) | hex_nibble(b[2*i + 1])?;
+        out[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
     }
     Some(out)
 }
@@ -346,18 +426,21 @@ pub fn build_auth_epochs_with(
     status: &mut StatusCache,
 ) -> EpochIndex {
     // 1) verify credentials once, index by cred_hash
-    let mut vc_index: BTreeMap<[u8;32], VerifiedClaims> = BTreeMap::new();
+    let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
     for id in topo {
         if let Some(op) = dag.get(id) {
             if let Payload::Credential { cred_bytes, .. } = &op.header.payload {
                 if let Ok(vc) = verify_vc(cred_bytes, trust, status) {
-                    vc_index.insert(vc.cred_hash, VerifiedClaims {
-                        subject_pk: vc.subject_pk,
-                        role: vc.role,
-                        scope: vc.scope_tags,
-                        nbf_ms: vc.nbf_ms,
-                        exp_ms: vc.exp_ms,
-                    });
+                    vc_index.insert(
+                        vc.cred_hash,
+                        VerifiedClaims {
+                            subject_pk: vc.subject_pk,
+                            role: vc.role,
+                            scope: vc.scope_tags,
+                            nbf_ms: vc.nbf_ms,
+                            exp_ms: vc.exp_ms,
+                        },
+                    );
                 }
             }
         }
@@ -366,22 +449,41 @@ pub fn build_auth_epochs_with(
     // 2) build epochs: only Grant{cred_hash} referencing a verified VC counts
     let mut idx = EpochIndex::default();
     for (pos, id) in topo.iter().enumerate() {
-        let Some(op) = dag.get(id) else { continue; };
+        let Some(op) = dag.get(id) else {
+            continue;
+        };
         match &op.header.payload {
-            Payload::Grant { subject_pk, cred_hash } => {
+            Payload::Grant {
+                subject_pk,
+                cred_hash,
+            } => {
                 if let Some(vc) = vc_index.get(cred_hash) {
-                    if &vc.subject_pk != subject_pk { continue; }
-                    idx.push_epoch(*subject_pk, vc.role.clone(), Epoch {
-                        scope: vc.scope.clone(),
-                        start_pos: pos,
-                        end_pos: None,
-                        not_before: Some(Hlc::new(vc.nbf_ms, 0)),
-                        not_after:  Some(Hlc::new(vc.exp_ms, 0)),
-                    });
+                    if &vc.subject_pk != subject_pk {
+                        continue;
+                    }
+                    idx.push_epoch(
+                        *subject_pk,
+                        vc.role.clone(),
+                        Epoch {
+                            scope: vc.scope.clone(),
+                            start_pos: pos,
+                            end_pos: None,
+                            not_before: Some(Hlc::new(vc.nbf_ms, 0)),
+                            not_after: Some(Hlc::new(vc.exp_ms, 0)),
+                        },
+                    );
                 }
             }
-            Payload::Revoke { subject_pk, role, scope_tags, .. } => {
-                let mut s = TagSet::new(); for t in scope_tags { s.insert(t.clone()); }
+            Payload::Revoke {
+                subject_pk,
+                role,
+                scope_tags,
+                ..
+            } => {
+                let mut s = TagSet::new();
+                for t in scope_tags {
+                    s.insert(t.clone());
+                }
                 idx.close_epochs_intersecting_scope(subject_pk, role, &s, pos);
             }
             _ => {}

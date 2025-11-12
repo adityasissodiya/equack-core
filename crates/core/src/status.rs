@@ -12,7 +12,11 @@ pub enum StatusError {
     Io(std::io::Error),
 }
 
-impl From<std::io::Error> for StatusError { fn from(e: std::io::Error) -> Self { StatusError::Io(e) } }
+impl From<std::io::Error> for StatusError {
+    fn from(e: std::io::Error) -> Self {
+        StatusError::Io(e)
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct StatusCache {
@@ -24,7 +28,10 @@ impl StatusCache {
     pub fn load_from_dir<P: AsRef<Path>>(dir: P) -> Self {
         let base = PathBuf::from(dir.as_ref());
         // dir should be `.../trust/status`
-        Self { base_dir: base, cache: HashMap::new() }
+        Self {
+            base_dir: base,
+            cache: HashMap::new(),
+        }
     }
 
     fn load_list(&mut self, list_id: &str) -> Option<&[u8]> {
@@ -43,16 +50,23 @@ impl StatusCache {
 
     /// Little-endian bit check: LSB=bit0.
     pub fn is_revoked(&mut self, list_id: &str, index: u32) -> bool {
-        let Some(bytes) = self.load_list(list_id) else { return false; };
+        let Some(bytes) = self.load_list(list_id) else {
+            return false;
+        };
         let i = index as usize / 8;
         let b = index as usize % 8;
-        if i >= bytes.len() { return false; }
+        if i >= bytes.len() {
+            return false;
+        }
         (bytes[i] & (1u8 << b)) != 0
     }
 
     /// Empty in-memory cache (no revocations).
     pub fn empty() -> Self {
-        Self { base_dir: std::path::PathBuf::new(), cache: std::collections::HashMap::new() }
+        Self {
+            base_dir: std::path::PathBuf::new(),
+            cache: std::collections::HashMap::new(),
+        }
     }
 
     /// Build an in-memory cache from `(list_id, bytes)` pairs (for tests).
@@ -61,6 +75,9 @@ impl StatusCache {
         for (id, bytes) in lists {
             cache.insert(id, bytes);
         }
-        Self { base_dir: std::path::PathBuf::new(), cache }
+        Self {
+            base_dir: std::path::PathBuf::new(),
+            cache,
+        }
     }
 }

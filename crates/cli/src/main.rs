@@ -254,16 +254,21 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Cmd::ReplayFromStore { db, from_checkpoint } => {
+        Cmd::ReplayFromStore {
+            db,
+            from_checkpoint,
+        } => {
             use ecac_store::Store;
             let store = Store::open(&db, Default::default())?;
-        
+
             // 1) Load all ops in topo order
             let ids = store.topo_ids()?;
             let cbor = store.load_ops_cbor(&ids)?;
             let mut ops = Vec::with_capacity(cbor.len());
-            for b in cbor { ops.push(decode_op_compat(&b)?); }
-        
+            for b in cbor {
+                ops.push(decode_op_compat(&b)?);
+            }
+
             // 2) Optional checkpoint fast-path, only if the flag was provided
             let state_opt = if from_checkpoint {
                 if let Some((ck_id, _topo)) = store.checkpoint_latest()? {
@@ -279,13 +284,12 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-        
+
             // 3) Full DAG view + incremental apply if we had a checkpoint
             let (state, digest) = replay_over_ops_with_state(state_opt, &ops);
             println!("{}", state.to_deterministic_json_string());
             println!("digest={}", hex32(&digest));
         }
-        
 
         Cmd::CheckpointCreate { db } => {
             use ecac_store::Store;
@@ -410,7 +414,10 @@ fn replay_over_ops(ops: &[Op]) -> (ecac_core::state::State, [u8; 32]) {
     replay_full(&dag)
 }
 
-fn replay_over_ops_with_state(mut st: Option<ecac_core::state::State>, ops: &[Op]) -> (ecac_core::state::State, [u8;32]) {
+fn replay_over_ops_with_state(
+    mut st: Option<ecac_core::state::State>,
+    ops: &[Op],
+) -> (ecac_core::state::State, [u8; 32]) {
     // Build full DAG so policy epochs and HB checks see complete history
     let mut dag = Dag::new();
     for op in ops {
@@ -425,7 +432,6 @@ fn replay_over_ops_with_state(mut st: Option<ecac_core::state::State>, ops: &[Op
         None => ecac_core::replay::replay_full(&dag),
     }
 }
-
 
 /// Read a CBOR file containing either Vec<Op> or a single Op.
 fn read_ops_cbor(path: &PathBuf) -> anyhow::Result<Vec<Op>> {

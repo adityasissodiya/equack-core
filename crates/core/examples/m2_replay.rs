@@ -13,15 +13,60 @@ fn main() {
     // Build a small history:
     // mv:o:x = "A" ; then concurrent mv:o:x = "B"
     // set+:o:s:e = "v1" ; set-:o:s:e (HB) ; set+:o:s:e = "v2" (HB)
-    let a = Op::new(vec![], Hlc::new(10,1), pk, Payload::Data { key: "mv:o:x".into(), value: b"A".to_vec() }, &sk);
-    let b = Op::new(vec![], Hlc::new(10,2), pk, Payload::Data { key: "mv:o:x".into(), value: b"B".to_vec() }, &sk);
+    let a = Op::new(
+        vec![],
+        Hlc::new(10, 1),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"A".to_vec(),
+        },
+        &sk,
+    );
+    let b = Op::new(
+        vec![],
+        Hlc::new(10, 2),
+        pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"B".to_vec(),
+        },
+        &sk,
+    );
 
-    let add1 = Op::new(vec![], Hlc::new(11,1), pk, Payload::Data { key: "set+:o:s:e".into(), value: b"v1".to_vec() }, &sk);
-    let rem  = Op::new(vec![add1.op_id], Hlc::new(12,1), pk, Payload::Data { key: "set-:o:s:e".into(), value: vec![] }, &sk);
-    let add2 = Op::new(vec![rem.op_id], Hlc::new(13,1), pk, Payload::Data { key: "set+:o:s:e".into(), value: b"v2".to_vec() }, &sk);
+    let add1 = Op::new(
+        vec![],
+        Hlc::new(11, 1),
+        pk,
+        Payload::Data {
+            key: "set+:o:s:e".into(),
+            value: b"v1".to_vec(),
+        },
+        &sk,
+    );
+    let rem = Op::new(
+        vec![add1.op_id],
+        Hlc::new(12, 1),
+        pk,
+        Payload::Data {
+            key: "set-:o:s:e".into(),
+            value: vec![],
+        },
+        &sk,
+    );
+    let add2 = Op::new(
+        vec![rem.op_id],
+        Hlc::new(13, 1),
+        pk,
+        Payload::Data {
+            key: "set+:o:s:e".into(),
+            value: b"v2".to_vec(),
+        },
+        &sk,
+    );
 
     let mut dag = Dag::new();
-    for op in [a,b,add1,rem,add2] {
+    for op in [a, b, add1, rem, add2] {
         dag.insert(op);
     }
 
@@ -30,7 +75,7 @@ fn main() {
     println!("digest={}", hex(&digest));
 }
 
-fn hex(bytes: &[u8;32]) -> String {
+fn hex(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
     for &x in bytes {

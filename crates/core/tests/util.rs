@@ -1,13 +1,13 @@
-use blake3::Hasher;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
+use blake3::Hasher;
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::json;
 
-use ecac_core::hlc::Hlc;
-use ecac_core::op::{Op, Payload};
 use ecac_core::crypto::vk_to_bytes;
-use ecac_core::op::CredentialFormat; // re-exported alias from lib
+use ecac_core::hlc::Hlc;
+use ecac_core::op::CredentialFormat;
+use ecac_core::op::{Op, Payload}; // re-exported alias from lib
 
 /// Build a compact JWT (header.payload.signature) with Ed25519, then the ops:
 ///   1) Credential { cred_id, cred_bytes, format=Jwt }
@@ -72,7 +72,10 @@ pub fn make_credential_and_grant(
         vec![cred_op.op_id],
         Hlc::new(nbf_phys, 2),
         admin_pk_bytes,
-        Payload::Grant { subject_pk, cred_hash },
+        Payload::Grant {
+            subject_pk,
+            cred_hash,
+        },
         admin_sk,
     );
 

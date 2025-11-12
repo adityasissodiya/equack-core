@@ -1,14 +1,10 @@
-use libp2p::gossipsub::{
-    self,
-    IdentTopic as Topic,
-    MessageAuthenticity,
-    MessageId,
-    TopicHash,
-    ValidationMode,
-};
-use std::time::Duration;
 use blake3;
+use hex;
+use libp2p::gossipsub::{
+    self, IdentTopic as Topic, MessageAuthenticity, MessageId, TopicHash, ValidationMode,
+};
 use libp2p::identity;
+use std::time::Duration;
 
 use crate::serializer::{from_cbor_signed_announce, to_cbor_signed_announce};
 use crate::types::SignedAnnounce;
@@ -30,8 +26,8 @@ pub fn build_gossipsub(local_key: &identity::Keypair) -> gossipsub::Behaviour {
         .validate_messages()
         .validation_mode(ValidationMode::Permissive)
         .message_id_fn(message_id_fn)
-        .flood_publish(true)                             // allow publish even if not in mesh
-        .heartbeat_interval(Duration::from_millis(200))  // speed convergence for tests
+        .flood_publish(true) // allow publish even if not in mesh
+        .heartbeat_interval(Duration::from_millis(200)) // speed convergence for tests
         .max_transmit_size(64 * 1024)
         .build()
         .expect("gossipsub config");
@@ -48,9 +44,24 @@ pub fn publish_announce(
 ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
     let bytes = to_cbor_signed_announce(sa);
     let byte_len = bytes.len();
+    // Debug id: blake3(payload) first 8 hex chars
+    let h = blake3::hash(&bytes);
+    let mut h8 = String::new();
+    {
+        use core::fmt::Write;
+        for b in h.as_bytes().iter().take(8) {
+            let _ = write!(&mut h8, "{:02x}", b);
+        }
+    }
+    eprintln!(
+        "[gossip] PUBLISH try topic={} bytes={} blake3[..8]={}",
+        topic.hash().to_string(),
+        byte_len,
+        h8
+    );
     let msg_id = gs.publish(topic.clone(), bytes)?;
-    log::trace!(
-        "gossipsub PUBLISH -> {} (heads={}, topo={}, bytes={})",
+    eprintln!(
+        "[gossip] PUBLISH ok   topic={} (heads={}, topo={}, bytes={})",
         topic.hash().to_string(),
         sa.announce.head_ids.len(),
         sa.announce.topo_watermark,

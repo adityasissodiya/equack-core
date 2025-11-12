@@ -1,7 +1,14 @@
-use ecac_core::{crypto::*, hlc::Hlc, op::{Op, Payload}, dag::Dag};
+use ecac_core::{
+    crypto::*,
+    dag::Dag,
+    hlc::Hlc,
+    op::{Op, Payload},
+};
 use proptest::prelude::*;
 
-fn to_hex(id: &[u8;32]) -> String { id.iter().map(|b| format!("{:02x}", b)).collect() }
+fn to_hex(id: &[u8; 32]) -> String {
+    id.iter().map(|b| format!("{:02x}", b)).collect()
+}
 
 proptest! {
   #[test]
