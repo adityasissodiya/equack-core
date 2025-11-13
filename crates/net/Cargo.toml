@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 # Opt-in: use plaintext security instead of Noise (handy for flaky local tests)
 insecure-plain = ["libp2p/plaintext"]
+net = []                # <— add this so #[cfg(feature="net")] works
 default = []
 
 [dependencies]

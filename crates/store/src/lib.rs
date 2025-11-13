@@ -21,6 +21,8 @@ use getrandom::getrandom;
 //use ecac_core::op::OpHeader;
 //use ed25519_dalek::Signature;
 use ecac_core::crypto::hash_bytes;
+use ecac_core::metrics::METRICS;
+use std::time::Instant;
 use ecac_core::{status::StatusCache, trust::TrustStore, vc::verify_vc};
 
 type Db = DBWithThreadMode<MultiThreaded>;
@@ -171,9 +173,11 @@ impl Store {
             b.put_cf(&self.cf(CF_BY_AUTHOR), k2, []);
             writes += 1;
         }
-        if writes > 0 {
-            self.db.write_opt(b, &self.write_opts())?;
-        }
+                if writes > 0 {
+                        let t0 = Instant::now();
+                        self.db.write_opt(b, &self.write_opts())?;
+                        METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
+                    }
         Ok(())
     }
 }
@@ -246,7 +250,9 @@ impl Store {
         if self.db.get_cf(&self.cf(CF_META), key.as_bytes())?.is_none() {
             let mut b = WriteBatch::default();
             b.put_cf(&self.cf(CF_META), key.as_bytes(), val);
+            let t0 = Instant::now();
             self.db.write_opt(b, &self.write_opts())?;
+            METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
         }
         Ok(())
     }
@@ -417,7 +423,9 @@ impl Store {
         k.extend_from_slice(&op.op_id);
         b.put_cf(&self.cf(CF_BY_AUTHOR), k, []);
 
-        self.db.write_opt(b, &self.write_opts())?;
+        let t0 = Instant::now();
+            self.db.write_opt(b, &self.write_opts())?;
+            METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
 
         // DEV crash-inject: die immediately after a committed write
         if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
@@ -560,13 +568,17 @@ impl Store {
         let mut b = WriteBatch::default();
         b.put_cf(&self.cf(CF_VC_RAW), cred_hash, jwt);
 
+        let t0 = Instant::now();
         self.db.write_opt(b, &self.write_opts())?;
+        METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
         Ok(())
     }
     pub fn persist_vc_verified(&self, cred_hash: [u8; 32], verified_cbor: &[u8]) -> Result<()> {
         let mut b = WriteBatch::default();
         b.put_cf(&self.cf(CF_VC_VERIFIED), cred_hash, verified_cbor);
+                let t0 = Instant::now();
         self.db.write_opt(b, &self.write_opts())?;
+        METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
         Ok(())
     }
 
@@ -586,7 +598,11 @@ impl Store {
             serde_cbor::to_vec(&blob)?,
         );
         b.put_cf(&self.cf(CF_META), b"last_checkpoint_id", &id.to_be_bytes());
+        let t0 = Instant::now();
         self.db.write_opt(b, &self.write_opts())?;
+        let dt = t0.elapsed().as_millis() as u64;
+        METRICS.observe_ms("batch_write_ms", dt);
+        METRICS.observe_ms("checkpoint_create_ms", dt);
         Ok(id)
     }
     pub fn checkpoint_latest(&self) -> Result<Option<(u64, u64)>> {
@@ -601,6 +617,7 @@ impl Store {
         }
     }
     pub fn checkpoint_load(&self, id: u64) -> Result<(State, u64)> {
+        let t0 = Instant::now();
         let b = self
             .db
             .get_cf(&self.cf(CF_CHECKPOINTS), &id.to_be_bytes())?
@@ -612,6 +629,7 @@ impl Store {
             st.digest() == blob.state_digest,
             "checkpoint digest mismatch"
         );
+        METRICS.observe_ms("checkpoint_load_ms", t0.elapsed().as_millis() as u64);
         Ok((st, blob.topo_idx))
     }
 

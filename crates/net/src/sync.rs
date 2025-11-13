@@ -99,6 +99,7 @@ impl SyncPlanner {
         while let Some((id, expand)) = stack.pop() {
             let has_it = have(&id);
             let bloom_here = bloom16_maybe_contains(local_recent_bloom16, &id);
+            #[cfg(test)]
             let is_head = remote_heads.iter().any(|h| h == &id);
 
             // (Test-only diagnostics) compute `include` just for the debug line to avoid

@@ -45,6 +45,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::time::Instant;
+use crate::metrics::METRICS;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use blake3::Hasher;
@@ -213,6 +215,9 @@ struct VerifiedClaims {
 ///   2) When encountering `Grant{cred_hash}`, look up verified claims and open an epoch.
 ///   3) `Revoke` closes open epochs in intersecting scope.
 pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
+    let t0 = Instant::now();
+    let mut epochs_opened: u64 = 0;
+    let mut revocations_seen: u64 = 0;
     // ---- Pass 1: collect verified credentials (cred_hash -> claims)
     let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
 
@@ -258,6 +263,7 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
                             not_after: Some(Hlc::new(vc.exp_ms, 0)),
                         },
                     );
+                    epochs_opened += 1;
                 }
             }
             Payload::Revoke {
@@ -266,6 +272,7 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
                 scope_tags,
                 ..
             } => {
+                revocations_seen += 1;
                 let mut scope = TagSet::new();
                 for s in scope_tags {
                     scope.insert(s.clone());
@@ -275,7 +282,10 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
             _ => {}
         }
     }
-
+    
+        METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
+        if epochs_opened > 0 { METRICS.inc("epochs_total", epochs_opened); }
+        if revocations_seen > 0 { METRICS.inc("revocations_seen", revocations_seen); }
     idx
 }
 
@@ -425,6 +435,9 @@ pub fn build_auth_epochs_with(
     trust: &TrustStore,
     status: &mut StatusCache,
 ) -> EpochIndex {
+    let t0 = Instant::now();
+    let mut epochs_opened: u64 = 0;
+    let mut revocations_seen: u64 = 0;
     // 1) verify credentials once, index by cred_hash
     let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
     for id in topo {
@@ -472,6 +485,7 @@ pub fn build_auth_epochs_with(
                             not_after: Some(Hlc::new(vc.exp_ms, 0)),
                         },
                     );
+                    epochs_opened += 1;
                 }
             }
             Payload::Revoke {
@@ -480,6 +494,7 @@ pub fn build_auth_epochs_with(
                 scope_tags,
                 ..
             } => {
+                revocations_seen += 1;
                 let mut s = TagSet::new();
                 for t in scope_tags {
                     s.insert(t.clone());
@@ -489,5 +504,8 @@ pub fn build_auth_epochs_with(
             _ => {}
         }
     }
+    METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
+    if epochs_opened > 0 { METRICS.inc("epochs_total", epochs_opened); }
+    if revocations_seen > 0 { METRICS.inc("revocations_seen", revocations_seen); }
     idx
 }

@@ -29,6 +29,8 @@ use std::sync::Arc;
 use std::time::Duration; // <-- add this
 use tokio::sync::mpsc;
 use tokio::time::{Interval, MissedTickBehavior};
+#[cfg(feature = "net")]
+use ecac_core::metrics::METRICS;
 
 use crate::gossip::{announce_topic, build_gossipsub, parse_announce, topic_matches_announce};
 use crate::types::{FetchMissing, RpcFrame, SignedAnnounce};
@@ -421,7 +423,7 @@ impl Node {
         }
         let topic = self.announce_topic.clone();
         let gs = &mut self.swarm.behaviour_mut().gossipsub;
-        let before = self.pending_announces.len();
+        let _before = self.pending_announces.len();
         // Retain only those that still can't be sent
         eprintln!(
             "[{:?}] ANN flush start count={}",
@@ -468,8 +470,13 @@ impl Node {
 
     /// Send a FetchMissing request to `peer`.
     pub fn send_fetch(&mut self, peer: PeerId, req: FetchMissing) -> OutboundRequestId {
-        let want_dbg: SmallVec<[String; 4]> =
+        let _want_dbg: SmallVec<[String; 4]> =
             req.want.iter().map(|id| format!("{:?}", id)).collect();
+                    #[cfg(feature = "net")]
+        {
+            // Count each outbound batch (our client currently batches 1 id per request).
+            METRICS.inc("fetch_batches", 1);
+        }
         let rid = self.swarm.behaviour_mut().fetch.send_request(&peer, req);
         //info!(target: "rr/client", ?peer, ?rid, want = ?want_dbg, "send_request");
         rid
@@ -557,8 +564,19 @@ impl Node {
             serde_cbor::from_slice(&bytes).map_err(|e| anyhow::anyhow!("decode op: {e}"))?;
         let id = op.op_id;
 
+                #[cfg(feature = "net")]
+        {
+            // We received an op’s bytes over the network.
+            METRICS.inc("ops_fetched", 1);
+        }
+
         if let Some(have) = &self.have_fn {
             if (have)(&id) {
+                                #[cfg(feature = "net")]
+                {
+                    // We fetched it but already had it locally.
+                    METRICS.inc("ops_duplicates_dropped", 1);
+                }
                 return Ok(());
             }
         }

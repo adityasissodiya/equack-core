@@ -1,5 +1,6 @@
 use blake3;
-use hex;
+#[cfg(feature = "net")]
+use ecac_core::metrics::METRICS;
 use libp2p::gossipsub::{
     self, IdentTopic as Topic, MessageAuthenticity, MessageId, TopicHash, ValidationMode,
 };
@@ -60,6 +61,11 @@ pub fn publish_announce(
         h8
     );
     let msg_id = gs.publish(topic.clone(), bytes)?;
+        #[cfg(feature = "net")]
+    {
+        // Count successfully published announces.
+        METRICS.inc("gossip_announces_sent", 1);
+    }
     eprintln!(
         "[gossip] PUBLISH ok   topic={} (heads={}, topo={}, bytes={})",
         topic.hash().to_string(),
@@ -67,6 +73,10 @@ pub fn publish_announce(
         sa.announce.topo_watermark,
         byte_len
     );
+        #[cfg(feature = "net")]
+    {
+        METRICS.inc("gossip_announces_sent", 1);
+    }
     Ok(msg_id)
 }
 
@@ -74,12 +84,21 @@ pub fn publish_announce(
 pub fn parse_announce(data: &[u8]) -> Option<SignedAnnounce> {
     match from_cbor_signed_announce(data).ok() {
         Some(sa) => {
+                    #[cfg(feature = "net")]
+            {
+               // Count announces we accept/parse.
+                METRICS.inc("gossip_announces_recv", 1);
+            }
             log::trace!(
                 "gossipsub PARSE announce heads={} topo={} bytes={}",
                 sa.announce.head_ids.len(),
                 sa.announce.topo_watermark,
                 data.len()
             );
+            #[cfg(feature = "net")]
+            {
+                METRICS.inc("gossip_announces_recv", 1);
+            }
             Some(sa)
         }
         None => None,

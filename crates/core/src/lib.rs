@@ -12,3 +12,6 @@ pub mod trust;
 pub mod status;
 pub mod vc;
 pub mod policy; // keep after vc/trust/status so it can use them
+
+pub mod metrics; // M7 metrics registry
+

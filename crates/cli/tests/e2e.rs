@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use std::io::Read;
 
 use ecac_core::crypto::{generate_keypair, vk_to_bytes};
 use ecac_core::hlc::Hlc;
@@ -125,57 +127,69 @@ fn make_orset_race() -> Vec<Op> {
     vec![add1, rem_conc, add2, rem_hb]
 }
 
-fn run_replay(path: &PathBuf) -> (String, String) {
-    // Always build+run via cargo; works regardless of bin path.
-    let out = Command::new("cargo")
-        .args([
-            "run",
-            "-p",
-            "ecac-cli",
-            "--quiet",
-            "--",
-            "replay",
-            &path.to_string_lossy(),
-        ])
-        .output()
-        .expect("spawn cargo");
-    assert!(
-        out.status.success(),
-        "run replay: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8(out.stdout).expect("utf8");
-    let mut lines = s.lines();
-    let json = lines.next().unwrap_or("").to_string();
-    let digest_line = lines.next().unwrap_or("").to_string();
-    (json, digest_line)
-}
+fn ecac_cli_bin() -> PathBuf {
+        // Prefer Cargo-provided path if available; fall back to target/debug.
+        if let Some(p) = option_env!("CARGO_BIN_EXE_ecac_cli") {
+            return PathBuf::from(p);
+        }
+        if let Some(p) = option_env!("CARGO_BIN_EXE_ecac-cli") {
+            return PathBuf::from(p);
+        }
+        // Fallback for Unix-like CI; fine for this repo layout.
+        ["target", "debug", if cfg!(windows) { "ecac-cli.exe" } else { "ecac-cli" }]
+            .into_iter()
+            .collect()
+    }
+        
+        fn run_with_timeout(args: &[&str], timeout: Duration) -> (Vec<u8>, Vec<u8>) {
+            let bin = ecac_cli_bin();
+            let mut child = Command::new(bin)
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn ecac-cli");
+        
+            let start = Instant::now();
+            loop {
+                if let Some(_status) = child.try_wait().expect("wait failed") {
+                    let mut out = Vec::new();
+                    let mut err = Vec::new();
+                    if let Some(mut so) = child.stdout.take() { let _ = so.read_to_end(&mut out); }
+                    if let Some(mut se) = child.stderr.take() { let _ = se.read_to_end(&mut err); }
+                    return (out, err);
+                }
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("ecac-cli timed out after {:?} with args {:?}", timeout, args);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        
+        fn run_replay(path: &PathBuf) -> (String, String) {
+            let (out, err) = run_with_timeout(&["replay", &path.to_string_lossy()], Duration::from_secs(10));
+            let s = String::from_utf8(out).expect("utf8 stdout");
+            let es = String::from_utf8_lossy(&err);
+            let mut lines = s.lines();
+            let json = lines.next().unwrap_or("").to_string();
+            let digest_line = lines.next().unwrap_or("").to_string();
+            assert!(!json.is_empty() && !digest_line.is_empty(), "empty output. stderr:\n{es}");
+            (json, digest_line)
+        }
 
-fn run_project(path: &PathBuf, obj: &str, field: &str) -> String {
-    let out = Command::new("cargo")
-        .args([
-            "run",
-            "-p",
-            "ecac-cli",
-            "--quiet",
-            "--",
-            "project",
-            &path.to_string_lossy(),
-            obj,
-            field,
-        ])
-        .output()
-        .expect("spawn cargo");
-    assert!(
-        out.status.success(),
-        "run project: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout)
-        .expect("utf8")
-        .trim()
-        .to_string()
-}
+        fn run_project(path: &PathBuf, obj: &str, field: &str) -> String {
+                let (out, err) = run_with_timeout(
+                    &["project", &path.to_string_lossy(), obj, field],
+                    Duration::from_secs(10),
+                );
+                let s = String::from_utf8(out).expect("utf8 stdout");
+                if s.trim().is_empty() {
+                    panic!("project output empty. stderr:\n{}", String::from_utf8_lossy(&err));
+                }
+                s.trim().to_string()
+            }
 
 #[test]
 fn e2e_permutations_converge_and_project() {

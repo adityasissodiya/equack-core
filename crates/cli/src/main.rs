@@ -39,6 +39,8 @@
 
 mod commands;
 mod simulate; // now implemented as a safe stub for M4
+// M7: evaluation harness (implemented in a separate module)
+mod bench;
 
 use std::fs;
 use std::path::PathBuf;
@@ -173,6 +175,34 @@ enum Cmd {
     VerifyStore {
         #[arg(long, short)]
         db: PathBuf,
+    },
+    
+    /// Run the M7 evaluation harness and emit CSV/JSON artifacts
+    Bench {
+        /// Scenario name: hb-chain | concurrent | offline-revoke | partition-3
+        #[arg(long, default_value = "hb-chain")]
+        scenario: String,
+        /// RNG seed for determinism
+        #[arg(long, default_value_t = 1u64)]
+        seed: u64,
+        /// Number of ops to generate
+        #[arg(long, default_value_t = 100usize)]
+        ops: usize,
+        /// Number of peers (>=1). With --net, drives multi-node runs.
+        #[arg(long, default_value_t = 1usize)]
+        peers: usize,
+        /// Enable networked scenarios (requires net feature and M6)
+        #[arg(long)]
+        net: bool,
+        /// Optional partition schedule (JSON). Only meaningful with --net.
+        #[arg(long)]
+        partition: Option<PathBuf>,
+        /// Create a checkpoint every K ops (optional)
+        #[arg(long)]
+        checkpoint_every: Option<usize>,
+        /// Output directory for artifacts
+        #[arg(long, default_value = "docs/eval/out")]
+        out_dir: PathBuf,
     },
 }
 
@@ -326,6 +356,28 @@ fn main() -> anyhow::Result<()> {
             store.verify_integrity()?;
             println!("OK");
         }
+                Cmd::Bench {
+                        scenario,
+                        seed,
+                        ops,
+                        peers,
+                        net,
+                        partition,
+                        checkpoint_every,
+                        out_dir,
+                    } => {
+                        // Delegate to the M7 harness (to be added next)
+                        bench::run(bench::Options {
+                            scenario,
+                            seed,
+                            ops,
+                            peers,
+                            net,
+                            partition,
+                            checkpoint_every,
+                            out_dir,
+                        })?;
+                    }
     }
     Ok(())
 }
