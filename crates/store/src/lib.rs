@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -25,6 +25,34 @@ use ecac_core::metrics::METRICS;
 use std::time::Instant;
 use ecac_core::{status::StatusCache, trust::TrustStore, vc::verify_vc};
 
+#[cfg(feature = "audit")]
+use ed25519_dalek::SigningKey;
+#[cfg(feature = "audit")]
+use ecac_core::audit::AuditEvent;
+#[cfg(feature = "audit")]
+use crate::audit::AuditWriter;
+
+#[cfg(feature = "audit")]
+fn parse_node_sk_hex(s: &str) -> anyhow::Result<SigningKey> {
+    let s = s.trim();
+    anyhow::ensure!(s.len() == 64, "ECAC_NODE_SK_HEX must be 64 hex chars");
+    let mut key = [0u8; 32];
+    let b = s.as_bytes();
+    for i in 0..32 {
+        let n = |x| -> anyhow::Result<u8> {
+            Ok(match x {
+                b'0'..=b'9' => x - b'0',
+                b'a'..=b'f' => x - b'a' + 10,
+                b'A'..=b'F' => x - b'A' + 10,
+                _ => anyhow::bail!("bad hex"),
+            })
+        };
+        key[i] = (n(b[2 * i])? << 4) | n(b[2 * i + 1])?;
+    }
+    Ok(SigningKey::from_bytes(&key))
+}
+
+
 type Db = DBWithThreadMode<MultiThreaded>;
 
 const CF_OPS: &str = "ops";
@@ -39,6 +67,8 @@ const CF_META: &str = "meta";
 pub struct Store {
     db: Arc<Db>,
     sync_writes: bool,
+    #[cfg(feature = "audit")]
+    audit: Option<Arc<Mutex<AuditWriter>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +154,9 @@ fn composite_author_key(
     k
 }
 
+#[cfg(feature = "audit")]
+pub mod audit;
+
 impl Store {
     /// Try to finalize any orphan ops that now have all parents present:
     /// writes `edges` and `by_author` rows for them in a single batch.
@@ -204,6 +237,27 @@ impl Store {
         let this = Self {
             db: Arc::new(db),
             sync_writes: opts.sync_writes,
+            #[cfg(feature = "audit")]
+        audit: {
+            if let Ok(hex) = std::env::var("ECAC_NODE_SK_HEX") {
+                match parse_node_sk_hex(&hex) {
+                    Ok(sk) => {
+                        let pk_bytes = sk.verifying_key().to_bytes();
+                        let node_id = hash_bytes(&pk_bytes);
+                        let mut audit_dir = path.to_path_buf();
+                        audit_dir.push("audit");
+                        std::fs::create_dir_all(&audit_dir).ok();
+                        Some(Arc::new(Mutex::new(AuditWriter::open(&audit_dir, sk, node_id)?)))
+                    }
+                    Err(e) => {
+                        eprintln!("audit disabled: bad ECAC_NODE_SK_HEX ({e})");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        },
         };
         // Schema guard
         const SCHEMA: &str = "ecac:v1";
@@ -378,6 +432,28 @@ impl Store {
         // Verify id and signature
         let header_bytes = canonical_cbor(&op.header);
         let expect = hash_with_domain(OP_HASH_DOMAIN, &header_bytes);
+        let id_mismatch = expect != op.op_id;
+        let sig_ok = op.verify() && !id_mismatch;
+    
+        // Audit: always log ingest + whether signature verified
+        #[cfg(feature = "audit")]
+        if let Some(a) = &self.audit {
+                let _ = a.lock().unwrap().append(AuditEvent::IngestedOp {
+                        op_id: op.op_id,
+                        author_pk: op.header.author_pk,
+                        parents: op.header.parents.clone(),
+                        verified_sig: sig_ok,
+                    });
+        }
+    
+        // Reject on bad header hash / signature
+        if id_mismatch {
+            return Err(anyhow!("op_id mismatch (header hash != embedded op_id)"));
+        }
+        if !sig_ok {
+            return Err(anyhow!("invalid signature for op {}", hex::encode(op.op_id)));
+        }
+
         if expect != op.op_id {
             return Err(anyhow!("op_id mismatch (header hash != embedded op_id)"));
         }
@@ -603,6 +679,14 @@ impl Store {
         let dt = t0.elapsed().as_millis() as u64;
         METRICS.observe_ms("batch_write_ms", dt);
         METRICS.observe_ms("checkpoint_create_ms", dt);
+        #[cfg(feature = "audit")]
+        if let Some(a) = &self.audit {
+                let _ = a.lock().unwrap().append(AuditEvent::Checkpoint {
+                        checkpoint_id: id,
+                        topo_idx,
+                        state_digest,
+                    });
+        }
         Ok(id)
     }
     pub fn checkpoint_latest(&self) -> Result<Option<(u64, u64)>> {

@@ -15,3 +15,6 @@ pub mod policy; // keep after vc/trust/status so it can use them
 
 pub mod metrics; // M7 metrics registry
 
+// M8 (feature-gated)
+#[cfg(feature = "audit")]
+pub mod audit;
