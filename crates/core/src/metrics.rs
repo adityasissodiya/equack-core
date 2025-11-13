@@ -91,7 +91,7 @@ impl Histo {
 
     /// Return (count, sum_ms, p50_ms, p95_ms, max_ms).
     fn snapshot(&self) -> (u64, u64, u64, u64, u64) {
-        let mut counts: Vec<u64> = self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect();
+        let counts: Vec<u64> = self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect();
         let total: u64 = counts.iter().sum();
         let sum_ms = self.sum_ms.load(Ordering::Relaxed);
         let max_ms = self.max_ms.load(Ordering::Relaxed);

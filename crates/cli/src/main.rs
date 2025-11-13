@@ -467,7 +467,7 @@ fn replay_over_ops(ops: &[Op]) -> (ecac_core::state::State, [u8; 32]) {
 }
 
 fn replay_over_ops_with_state(
-    mut st: Option<ecac_core::state::State>,
+    st: Option<ecac_core::state::State>,
     ops: &[Op],
 ) -> (ecac_core::state::State, [u8; 32]) {
     // Build full DAG so policy epochs and HB checks see complete history

@@ -15,6 +15,7 @@ git tag -f m7-freeze || true
 COMMIT="$(git rev-parse --short HEAD || echo unknown)"
 echo "[m7] commit=$COMMIT (tagged m7-freeze)"
 cargo build -p ecac-cli --release
+export ECAC_COMMIT="$COMMIT"
 
 [[ -x "$CLI" ]] || { echo "[m7] fatal: missing CLI at $CLI"; exit 1; }
 
@@ -33,7 +34,7 @@ fi
 ops=(1000 10000 50000)
 peers=(1 3 5)
 seeds="$(seq 1 10)"
-scens=(hb-chain concurrent)
+scens=(hb-chain concurrent offline-revocation)
 checkpoint_every=1000
 
 # ---------- user overrides ----------
@@ -48,7 +49,7 @@ if [[ "${QUICK:-0}" == "1" ]]; then
   ops=(1000 10000)
   peers=(1)
   seeds="1"
-  scens=(hb-chain concurrent)
+  scens=(hb-chain concurrent offline-revocation)
 fi
 
 # 2b) Run-scoped output root (commit-specific so checks ignore stale files)
@@ -106,14 +107,48 @@ run_one() {
   echo "[m7] $CLI ${args[*]}"
   "$CLI" "${args[@]}"
 
-  # Stamp outputs (ops + peers) and promote to RUN_OUT
+    # Stamp outputs (ops + peers) and promote to RUN_OUT
   local stamp="ops${nops}.p${mpeers}"
   local base="${scen}-${seed}"
-  for kind in "csv" "timeline.jsonl" "state.json"; do
-    local src="$run_dir/${base}-${kind}"
-    local dst="$RUN_OUT/${base}.${stamp}-${kind}"
-    [[ -f "$src" ]] && mv -f "$src" "$dst"
-  done
+  local moved=0
+
+  shopt -s nullglob
+  # Exact filenames produced by the CLI:
+  #   ${base}.csv
+  #   ${base}-timeline.jsonl
+  #   ${base}-state.json
+  if [[ -f "$run_dir/${base}.csv" ]]; then
+    cp -f "$run_dir/${base}.csv" "$RUN_OUT/${base}.${stamp}.csv"
+    moved=1
+  fi
+  if [[ -f "$run_dir/${base}-timeline.jsonl" ]]; then
+    cp -f "$run_dir/${base}-timeline.jsonl" "$RUN_OUT/${base}.${stamp}-timeline.jsonl"
+    moved=1
+  fi
+  if [[ -f "$run_dir/${base}-state.json" ]]; then
+    cp -f "$run_dir/${base}-state.json" "$RUN_OUT/${base}.${stamp}-state.json"
+    moved=1
+  fi
+
+  # Fallback: if naming ever differs, just copy everything out
+  if (( moved == 0 )); then
+    for f in "$run_dir"/*.{csv,jsonl,json} "$run_dir"/*.json.gz; do
+      [[ -e "$f" ]] || continue
+      cp -f "$f" "$RUN_OUT/"
+      moved=1
+    done
+  fi
+  shopt -u nullglob
+
+  if (( moved == 0 )); then
+    echo "[m7] WARNING: nothing copied from $run_dir (unexpected CLI output layout?)"
+  fi
+
+
+  # Optional: show what we collected for this run
+  echo "[m7] artifacts in $RUN_OUT:"
+  ls -1 "$RUN_OUT" || true
+
 
   rmdir "$run_dir" 2>/dev/null || true
 }
