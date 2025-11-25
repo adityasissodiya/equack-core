@@ -138,6 +138,13 @@ pub fn run(opts: Options) -> Result<()> {
             
                                 let t1 = Instant::now();
                                 let (_state_inc, digest_inc) = ecac_core::replay::apply_incremental(&mut state_ck, &dag);
+//                                 #[cfg(feature = "audit")]
+// if let Ok(Some(mut audit)) = crate::commands::open_audit_sink_default() {
+//     let (_state, _digest) = ecac_core::replay::apply_incremental_with_audit(&mut state, &dag, &mut audit);
+// } else {
+//     let (_state, _digest) = ecac_core::replay::apply_incremental(&mut state, &dag);
+// }
+
                                 let replay_incremental_ms = t1.elapsed().as_millis() as u64;
                                 // Parity check: full vs incremental digest must match.
                                 if digest_full != digest_inc {

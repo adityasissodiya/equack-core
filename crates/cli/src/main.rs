@@ -39,7 +39,7 @@
 
 mod commands;
 mod simulate; // now implemented as a safe stub for M4
-// M7: evaluation harness (implemented in a separate module)
+              // M7: evaluation harness (implemented in a separate module)
 mod bench;
 
 use std::fs;
@@ -176,7 +176,7 @@ enum Cmd {
         #[arg(long, short)]
         db: PathBuf,
     },
-    
+
     /// Run the M7 evaluation harness and emit CSV/JSON artifacts
     Bench {
         /// Scenario name: hb-chain | concurrent | offline-revoke | partition-3
@@ -203,6 +203,48 @@ enum Cmd {
         /// Output directory for artifacts
         #[arg(long, default_value = "docs/eval/out")]
         out_dir: PathBuf,
+    },
+
+    // ===== M8 audit subcommands =====
+    /// Verify audit chain integrity (hash-link + signatures) in <dir> (default: ".audit")
+    AuditVerifyChain {
+        /// Audit directory (default: ".audit")
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+
+    /// Export audit log to deterministic JSONL
+    AuditExport {
+        /// Audit directory (default: ".audit")
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Output file (default: "audit.jsonl")
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Verify chain AND cross-check replay decisions vs audit (expects "<db>/audit")
+    AuditVerifyFull {
+        /// DB directory (default: ".ecac.db")
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
+    /// Dump decoded audit entries (whole log or a single segment)
+    AuditCat {
+        /// Audit directory (default: ".audit")
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Specific segment file (e.g., "segment-00000001.log")
+        #[arg(long)]
+        segment: Option<PathBuf>,
+    },
+    /// Replay the store and write decision events to the on-disk audit sink
+    #[cfg(feature = "audit")]
+    AuditRecord {
+        /// RocksDB directory (default ".ecac.db")
+        #[arg(long, default_value = ".ecac.db")]
+        db: String,
     },
 }
 
@@ -356,28 +398,81 @@ fn main() -> anyhow::Result<()> {
             store.verify_integrity()?;
             println!("OK");
         }
-                Cmd::Bench {
-                        scenario,
-                        seed,
-                        ops,
-                        peers,
-                        net,
-                        partition,
-                        checkpoint_every,
-                        out_dir,
-                    } => {
-                        // Delegate to the M7 harness (to be added next)
-                        bench::run(bench::Options {
-                            scenario,
-                            seed,
-                            ops,
-                            peers,
-                            net,
-                            partition,
-                            checkpoint_every,
-                            out_dir,
-                        })?;
-                    }
+        Cmd::Bench {
+            scenario,
+            seed,
+            ops,
+            peers,
+            net,
+            partition,
+            checkpoint_every,
+            out_dir,
+        } => {
+            // Delegate to the M7 harness (to be added next)
+            bench::run(bench::Options {
+                scenario,
+                seed,
+                ops,
+                peers,
+                net,
+                partition,
+                checkpoint_every,
+                out_dir,
+            })?;
+        }
+        // ===== M8 audit subcommands =====
+        Cmd::AuditVerifyChain { dir } => {
+            #[cfg(feature = "audit")]
+            {
+                commands::cmd_audit_verify(dir.as_ref().and_then(|p| p.to_str()))?;
+            }
+            #[cfg(not(feature = "audit"))]
+            {
+                eprintln!("audit feature is not enabled; rebuild with --features audit");
+            }
+        }
+
+        Cmd::AuditExport { dir, out } => {
+            #[cfg(feature = "audit")]
+            {
+                commands::cmd_audit_export(
+                    dir.as_ref().and_then(|p| p.to_str()),
+                    out.as_ref().and_then(|p| p.to_str()),
+                )?;
+            }
+            #[cfg(not(feature = "audit"))]
+            {
+                eprintln!("audit feature is not enabled; rebuild with --features audit");
+            }
+        }
+
+        Cmd::AuditVerifyFull { db } => {
+            #[cfg(feature = "audit")]
+            {
+                commands::cmd_audit_verify_full(db.as_ref().and_then(|p| p.to_str()))?;
+            }
+            #[cfg(not(feature = "audit"))]
+            {
+                eprintln!("audit feature is not enabled; rebuild with --features audit");
+            }
+        }
+
+        Cmd::AuditCat { dir, segment } => {
+            #[cfg(feature = "audit")]
+            {
+                let dir_opt = dir.as_ref().and_then(|p| p.to_str());
+                let seg_opt = segment.as_ref().and_then(|p| p.to_str());
+                commands::cmd_audit_cat(dir_opt, seg_opt)?;
+            }
+            #[cfg(not(feature = "audit"))]
+            {
+                eprintln!("audit feature is not enabled; rebuild with --features audit");
+            }
+        }
+        #[cfg(feature = "audit")]
+        Cmd::AuditRecord { db } => {
+            commands::cmd_audit_record(Some(db.as_str()))?;
+        }
     }
     Ok(())
 }

@@ -18,3 +18,4 @@ pub mod metrics; // M7 metrics registry
 // M8 (feature-gated)
 #[cfg(feature = "audit")]
 pub mod audit;
+pub mod audit_hook;

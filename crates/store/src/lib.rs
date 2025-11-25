@@ -1,8 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    sync::{Arc, Mutex},
 };
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use rocksdb::{
@@ -31,6 +31,11 @@ use ed25519_dalek::SigningKey;
 use ecac_core::audit::AuditEvent;
 #[cfg(feature = "audit")]
 use crate::audit::AuditWriter;
+#[cfg(feature = "audit")]
+pub mod audit_sink;
+#[cfg(feature = "audit")]
+pub use audit_sink::StoreAuditHook;
+
 
 #[cfg(feature = "audit")]
 fn parse_node_sk_hex(s: &str) -> anyhow::Result<SigningKey> {

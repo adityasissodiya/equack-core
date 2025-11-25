@@ -4,21 +4,35 @@
 //! Policy: build epochs over the SAME order; deny-wins gate before applying data.
 //! M2 compatibility: if the log contains **no** policy events, we default-allow.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::dag::Dag;
 use crate::op::{OpId, Payload};
 use crate::policy::{self, Action};
 use crate::state::State;
 use crate::metrics::METRICS;
+
 use std::time::Instant;
+
+#[cfg(feature = "audit")]
+use crate::audit_hook::{AuditHook, NoopAuditHook};
+#[cfg(feature = "audit")]
+use crate::audit::{AuditEvent, AppliedReason, SkipReason};
 
 /// Full rebuild over the DAG's activated nodes.
 pub fn replay_full(dag: &Dag) -> (State, [u8; 32]) {
     let t0 = Instant::now();
     let order = dag.topo_sort();
     let mut state = State::new();
-    apply_over_order(dag, &order, &mut state);
+    #[cfg(feature = "audit")]
+    {
+        let mut noop = NoopAuditHook;
+        apply_over_order_with_audit(dag, &order, &mut state, &mut noop);
+    }
+    #[cfg(not(feature = "audit"))]
+    {
+        apply_over_order(dag, &order, &mut state);
+    }
     let digest = state.digest();
     METRICS.observe_ms("replay_full_ms", t0.elapsed().as_millis() as u64);
     (state, digest)
@@ -29,12 +43,21 @@ pub fn replay_full(dag: &Dag) -> (State, [u8; 32]) {
 pub fn apply_incremental(state: &mut State, dag: &Dag) -> (State, [u8; 32]) {
     let t0 = Instant::now();
     let order = dag.topo_sort();
-    apply_over_order(dag, &order, state);
+    #[cfg(feature = "audit")]
+    {
+        let mut noop = NoopAuditHook;
+        apply_over_order_with_audit(dag, &order, state, &mut noop);
+    }
+    #[cfg(not(feature = "audit"))]
+    {
+        apply_over_order(dag, &order, state);
+    }
     let digest = state.digest();
     METRICS.observe_ms("replay_incremental_ms", t0.elapsed().as_millis() as u64);
     (state.clone(), digest)
 }
 
+#[cfg(not(feature = "audit"))]
 fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
     // Detect whether any policy events exist; if none, default-allow (M2 compatibility).
     let has_policy = order.iter().any(|id| {
@@ -65,14 +88,20 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
         let mut data_applied: u64 = 0;
         let mut data_skipped_policy: u64 = 0;
     
-    for (pos, id) in order.iter().enumerate().skip(start_pos) {
+            // Map each op id to its global topo position so we can validate
+            // “parent appears earlier” even when we’re processing only a suffix.
+            let pos_index: HashMap<OpId, usize> =
+                order.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
+        
+        for (pos, id) in order.iter().enumerate().skip(start_pos) {
+        
         let Some(op) = dag.get(id) else {
             continue;
         };
-        if !op.verify() {
-            continue;
-        }
-
+                // Invalid signature => skip (no audit in non-audit build)
+                if !op.verify() {
+                    continue;
+                }
         match &op.header.payload {
             Payload::Data { key, value } => {
                 data_total += 1;
@@ -134,6 +163,7 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
             Payload::Grant { .. } | Payload::Revoke { .. } => {}
             _ => {}
         }
+
     }
 
     // Processed count = entire order length (we traversed all).
@@ -146,6 +176,201 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
         METRICS.inc("ops_skipped_policy", data_skipped_policy);
     }
 }
+
+
+// ---- Audit-enabled versions -------------------------------------------------
+
+#[cfg(feature = "audit")]
+pub fn replay_full_with_audit(
+    dag: &Dag,
+    audit: &mut dyn AuditHook,
+) -> (State, [u8; 32]) {
+    let t0 = Instant::now();
+    let order = dag.topo_sort();
+    let mut state = State::new();
+    apply_over_order_with_audit(dag, &order, &mut state, audit);
+    let digest = state.digest();
+    METRICS.observe_ms("replay_full_ms", t0.elapsed().as_millis() as u64);
+    (state, digest)
+}
+
+#[cfg(feature = "audit")]
+pub fn apply_incremental_with_audit(
+    state: &mut State,
+    dag: &Dag,
+    audit: &mut dyn AuditHook,
+) -> (State, [u8; 32]) {
+    let t0 = Instant::now();
+    let order = dag.topo_sort();
+    apply_over_order_with_audit(dag, &order, state, audit);
+    let digest = state.digest();
+    METRICS.observe_ms("replay_incremental_ms", t0.elapsed().as_millis() as u64);
+    (state.clone(), digest)
+}
+
+#[cfg(feature = "audit")]
+fn apply_over_order_with_audit(
+    dag: &Dag,
+    order: &[OpId],
+    state: &mut State,
+    audit: &mut dyn AuditHook,
+) {
+    // Detect whether any policy events exist; if none, default-allow (M2 compatibility).
+    let has_policy = order.iter().any(|id| {
+        dag.get(id)
+            .map(|op| matches!(op.header.payload, Payload::Grant { .. } | Payload::Revoke { .. }))
+            .unwrap_or(false)
+    });
+
+    // Build epochs (cheap at our scale).
+    let epoch_index = if has_policy {
+        policy::build_auth_epochs(dag, order)
+    } else {
+        Default::default()
+    };
+
+    // Start position for incremental suffix.
+    let mut start_pos = state.processed_count();
+    if start_pos > order.len() {
+        start_pos = order.len();
+    }
+
+    // Counters
+    let mut data_total: u64 = 0;
+    let mut data_applied: u64 = 0;
+    let mut data_skipped_policy: u64 = 0;
+
+    // Absolute parent sanity: map each op id to its topo index.
+    let pos_index: HashMap<OpId, usize> =
+        order.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
+
+    for (pos, id) in order.iter().enumerate().skip(start_pos) {
+        let Some(op) = dag.get(id) else { continue; };
+
+        // Invalid signature => SkippedOp(InvalidSig)
+        if !op.verify() {
+            audit.on_event(AuditEvent::SkippedOp {
+                op_id: *id,
+                topo_idx: pos as u64,
+                reason: SkipReason::InvalidSig,
+            });
+            continue;
+        }
+
+        // Parent sanity: every declared parent must appear earlier in topo order.
+        let parents_ok = op.header.parents.iter().all(|p| {
+            pos_index.get(p).map_or(false, |ppos| *ppos < pos)
+        });
+        if !parents_ok {
+            audit.on_event(AuditEvent::SkippedOp {
+                op_id: *id,
+                topo_idx: pos as u64,
+                reason: SkipReason::BadParent,
+            });
+            continue;
+        }
+
+        match &op.header.payload {
+            Payload::Data { key, value } => {
+                data_total += 1;
+
+                if let Some((action, obj, field, elem_opt, resource_tags)) =
+                    policy::derive_action_and_tags(key)
+                {
+                    // Deny-wins gate
+                    let allowed = if has_policy {
+                        policy::is_permitted_at_pos(
+                            &epoch_index,
+                            &op.header.author_pk,
+                            action,
+                            &resource_tags,
+                            pos,
+                            op.hlc(),
+                        )
+                    } else {
+                        true
+                    };
+
+                    if !allowed {
+                        data_skipped_policy += 1;
+                        audit.on_event(AuditEvent::SkippedOp {
+                            op_id: *id,
+                            topo_idx: pos as u64,
+                            reason: SkipReason::DenyWins,
+                        });
+                        continue;
+                    }
+
+                    match action {
+                        Action::SetField => {
+                            let mv = state.mv_field_mut(&obj, &field);
+                            mv.apply_put(*id, value.clone(), |a, b| dag_is_ancestor(dag, a, b));
+                            METRICS.observe_ms(
+                                "mvreg_concurrent_winners",
+                                mv.values().len() as u64,
+                            );
+                            data_applied += 1;
+                            audit.on_event(AuditEvent::AppliedOp {
+                                op_id: *id,
+                                topo_idx: pos as u64,
+                                reason: AppliedReason::Authorized,
+                            });
+                        }
+                        Action::SetAdd => {
+                            if let Some(elem) = elem_opt {
+                                let set = state.set_field_mut(&obj, &field);
+                                set.add(elem, *id, value.clone());
+                                data_applied += 1;
+                                audit.on_event(AuditEvent::AppliedOp {
+                                    op_id: *id,
+                                    topo_idx: pos as u64,
+                                    reason: AppliedReason::Authorized,
+                                });
+                            }
+                        }
+                        Action::SetRem => {
+                            if let Some(elem) = elem_opt {
+                                let set = state.set_field_mut(&obj, &field);
+                                set.remove_with_hb(&elem, id, |add_tag, rem| {
+                                    dag_is_ancestor(dag, add_tag, rem)
+                                });
+                                data_applied += 1;
+                                audit.on_event(AuditEvent::AppliedOp {
+                                    op_id: *id,
+                                    topo_idx: pos as u64,
+                                    reason: AppliedReason::Authorized,
+                                });
+                            }
+                        }
+                    }
+                }
+                // Unknown prefixes ignored (forward-compatible).
+            }
+            // Policy events: consumed by epoch builder; no data-layer state change.
+            Payload::Grant { .. } | Payload::Revoke { .. } => {}
+            _ => {}
+        }
+    }
+
+    // Processed count = entire order length (we traversed all).
+    state.set_processed_count(order.len());
+
+    // Push counters once per call.
+    if data_total > 0 {
+        METRICS.inc("ops_total", data_total);
+        METRICS.inc("ops_applied", data_applied);
+        METRICS.inc("ops_skipped_policy", data_skipped_policy);
+    }
+
+    // Emit a checkpoint at the end of the replay window.
+    let digest = state.digest();
+    audit.on_event(AuditEvent::Checkpoint {
+        checkpoint_id: state.processed_count() as u64,
+        topo_idx: state.processed_count() as u64,
+        state_digest: digest,
+    });
+}
+
 
 fn dag_is_ancestor(dag: &Dag, a: &OpId, b: &OpId) -> bool {
     if a == b {

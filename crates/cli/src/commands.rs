@@ -232,3 +232,440 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
     println!("wrote {}", dir.display());
     Ok(())
 }
+
+// crates/cli/src/commands.rs
+
+#[cfg(feature = "audit")]
+pub fn open_audit_sink_default() -> anyhow::Result<Option<ecac_store::StoreAuditHook>> {
+    match ecac_store::StoreAuditHook::open_default() {
+        Ok(h) => Ok(Some(h)),
+        Err(e) => {
+            eprintln!("audit: disabled (failed to open default sink: {e})");
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(not(feature = "audit"))]
+pub fn open_audit_sink_default() -> anyhow::Result<Option<()>> {
+    Ok(None)
+}
+
+// in crates/cli/src/commands.rs (or a new file)
+#[cfg(feature = "audit")]
+struct MemAudit(pub Vec<ecac_core::audit::AuditEvent>);
+
+#[cfg(feature = "audit")]
+impl ecac_core::audit_hook::AuditHook for MemAudit {
+    fn on_event(&mut self, e: ecac_core::audit::AuditEvent) {
+        self.0.push(e);
+    }
+}
+
+// ===== Audit CLI helpers =====
+
+#[cfg(feature = "audit")]
+use ecac_core::audit::AuditEvent;
+#[cfg(feature = "audit")]
+use ecac_store::audit::AuditReader;
+#[cfg(feature = "audit")]
+use std::io::Read; // fs, Path, Result, Deserialize, Serialize are already imported above
+
+// --- shared local types to read the on-disk audit index/segments ---
+
+#[cfg(feature = "audit")]
+#[derive(Deserialize)]
+struct CliIndex {
+    segments: Vec<CliIndexSeg>,
+}
+
+#[cfg(feature = "audit")]
+#[derive(Deserialize)]
+struct CliIndexSeg {
+    // relative path of segment (e.g., "segment-00000001.log")
+    path: String,
+    // the rest are ignored by the CLI but present in the index file
+    #[allow(dead_code)]
+    segment_id: Option<u32>,
+    #[allow(dead_code)]
+    first_seq: Option<u64>,
+    #[allow(dead_code)]
+    last_seq: Option<u64>,
+    #[allow(dead_code)]
+    first_hash: Option<[u8; 32]>,
+    #[allow(dead_code)]
+    last_hash: Option<[u8; 32]>,
+}
+
+#[cfg(feature = "audit")]
+#[derive(Deserialize, Serialize)]
+struct EntryWireCli {
+    seq: u64,
+    ts_monotonic: u64,
+    prev_hash: [u8; 32],
+    event: AuditEvent,
+    node_id: [u8; 32],
+    signature: Vec<u8>,
+}
+
+#[cfg(feature = "audit")]
+fn read_u32_be(r: &mut impl Read) -> std::io::Result<Option<u32>> {
+    let mut len = [0u8; 4];
+    match r.read_exact(&mut len) {
+        Ok(()) => Ok(Some(u32::from_be_bytes(len))),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(feature = "audit")]
+fn hex32(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+// ---- audit-verify (chain only) ----
+
+#[cfg(feature = "audit")]
+pub fn cmd_audit_verify(dir_opt: Option<&str>) -> Result<()> {
+    let dir = dir_opt.unwrap_or(".audit");
+    let r = AuditReader::open(Path::new(dir))?;
+    r.verify().map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("OK: audit chain verified at {dir}");
+    Ok(())
+}
+
+// ---- audit-export ----
+// Deterministic JSONL: one JSON object per line, stable field order.
+// We first verify the chain; if it passes, we stream decode each segment.
+
+#[cfg(feature = "audit")]
+pub fn cmd_audit_export(dir_opt: Option<&str>, out_path_opt: Option<&str>) -> Result<()> {
+    let dir = dir_opt.unwrap_or(".audit");
+    let out_path = out_path_opt.unwrap_or("audit.jsonl");
+
+    // 1) Integrity check.
+    let r = AuditReader::open(Path::new(dir))?;
+    r.verify().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 2) Load index and iterate segments in order.
+    let index_bytes = fs::read(Path::new(dir).join("index.json"))?;
+    let index: CliIndex = serde_json::from_slice(&index_bytes)?;
+
+    let mut out = std::fs::File::create(out_path)?;
+
+    for seg in index.segments {
+        let path = Path::new(dir).join(seg.path);
+        let mut f = std::fs::File::open(&path)?;
+        loop {
+            let len = match read_u32_be(&mut f)? {
+                Some(n) => n as usize,
+                None => break, // EOF at boundary
+            };
+            let mut buf = vec![0u8; len];
+            f.read_exact(&mut buf)?;
+            let entry: EntryWireCli = serde_cbor::from_slice(&buf)
+                .map_err(|e| anyhow::anyhow!("CBOR decode failed in {:?}: {e}", path))?;
+
+            // Build a stable export record (byte arrays → hex)
+            #[derive(Serialize)]
+            struct Jsonl<'a> {
+                seq: u64,
+                ts_monotonic: u64,
+                prev_hash_hex: String,
+                node_id_hex: String,
+                #[serde(borrow)]
+                event: &'a AuditEvent,
+                signature_hex: String,
+            }
+            let j = Jsonl {
+                seq: entry.seq,
+                ts_monotonic: entry.ts_monotonic,
+                prev_hash_hex: hex32(&entry.prev_hash),
+                node_id_hex: hex32(&entry.node_id),
+                event: &entry.event,
+                signature_hex: hex32(&entry.signature),
+            };
+
+            serde_json::to_writer(&mut out, &j)?;
+            // newline-delimited
+            use std::io::Write as _;
+            out.write_all(b"\n")?;
+        }
+    }
+
+    println!("wrote deterministic JSONL to {}", out_path);
+    Ok(())
+}
+
+// ---- audit-cat ----
+// Dump decoded entries (pretty JSON) from either the whole log or a single segment.
+
+#[cfg(feature = "audit")]
+pub fn cmd_audit_cat(dir_opt: Option<&str>, segment_opt: Option<&str>) -> Result<()> {
+    let dir = dir_opt.unwrap_or(".audit");
+
+    let segments: Vec<String> = if let Some(seg_name) = segment_opt {
+        vec![seg_name.to_string()]
+    } else {
+        let idx = fs::read(Path::new(dir).join("index.json"))?;
+        let index: CliIndex = serde_json::from_slice(&idx)?;
+        index.segments.into_iter().map(|s| s.path).collect()
+    };
+
+    for seg in segments {
+        let path = Path::new(dir).join(&seg);
+        println!("=== {} ===", path.display());
+        let mut f = std::fs::File::open(&path)?;
+        let mut _offset: u64 = 0;
+        loop {
+            let len = match read_u32_be(&mut f)? {
+                Some(n) => n as usize,
+                None => break,
+            };
+            _offset += 4;
+            let mut buf = vec![0u8; len];
+            f.read_exact(&mut buf)?;
+            let entry: EntryWireCli = serde_cbor::from_slice(&buf)?;
+            println!(
+                "{{\"seq\":{},\"ts_monotonic\":{},\"prev_hash\":\"{}\",\"node_id\":\"{}\",\"event\":{},\"signature\":\"{}\"}}",
+                entry.seq,
+                entry.ts_monotonic,
+                hex32(&entry.prev_hash),
+                hex32(&entry.node_id),
+                serde_json::to_string(&entry.event)?,
+                hex32(&entry.signature),
+            );
+            _offset += len as u64;
+        }
+    }
+    Ok(())
+}
+
+// ---- audit-verify-full (chain + replay cross-check) ----
+#[cfg(feature = "audit")]
+use ecac_core::dag::Dag; // Op and Store are already imported at the top
+
+// Replay the store and WRITE decision events to the on-disk audit sink.
+// Uses the default sink (respects ECAC_NODE_SK_HEX, writes to .audit).
+#[cfg(feature = "audit")]
+pub fn cmd_audit_record(db_dir_opt: Option<&str>) -> Result<()> {
+    use anyhow::Context;
+    let db_dir = db_dir_opt.unwrap_or(".ecac.db");
+    let store = Store::open(Path::new(db_dir), Default::default())
+        .with_context(|| format!("open store at {}", db_dir))?;
+    let ids = store.topo_ids().context("load topo ids")?;
+    let blobs = store.load_ops_cbor(&ids).context("load ops cbor")?;
+
+    let mut dag = Dag::default();
+    for bytes in blobs {
+        let op: Op = serde_cbor::from_slice(&bytes).context("decode Op from store")?;
+        dag.insert(op);
+    }
+
+    // Open default audit sink (creates .audit/*, requires ECAC_NODE_SK_HEX).
+    let Some(mut sink) = open_audit_sink_default()? else {
+        return Err(anyhow::anyhow!(
+            "audit sink unavailable: set ECAC_NODE_SK_HEX (64 hex) and ensure .audit is writable"
+        ));
+    };
+
+    let (_state, _digest) = ecac_core::replay::replay_full_with_audit(&dag, &mut sink);
+    println!("OK: wrote decision events to the audit sink");
+    Ok(())
+}
+/// Verify audit chain integrity and cross-check replay decisions against the on-disk audit.
+/// Order of audit dir selection:
+///  1) If ECAC_AUDIT_DIR is set, use it (must contain index.json and node_pk.bin)
+///  2) <db_dir>/audit
+///  3) .audit
+/// If `db_dir_opt` is None, <db_dir> defaults to ".ecac.db".
+
+#[cfg(feature = "audit")]
+pub fn cmd_audit_verify_full(db_dir_opt: Option<&str>) -> Result<()> {
+    use anyhow::Context;
+    use std::io::Read as _;
+
+    let db_dir = db_dir_opt.unwrap_or(".ecac.db");
+        // 0) ECAC_AUDIT_DIR override
+        let audit_dir: PathBuf = if let Ok(env_dir) = std::env::var("ECAC_AUDIT_DIR") {
+            let p = PathBuf::from(env_dir);
+            if p.join("index.json").exists() && p.join("node_pk.bin").exists() {
+                eprintln!("audit: using ECAC_AUDIT_DIR={}", p.display());
+                p
+            } else {
+                return Err(anyhow::anyhow!(
+                "ECAC_AUDIT_DIR='{}' is not a valid audit dir (missing index.json/node_pk.bin)",
+                    p.display()
+                ));
+            }
+        } else {
+            // 1) Prefer <db>/audit; if missing/incomplete, fall back to .audit with a note.
+            let primary = Path::new(db_dir).join("audit");
+            let fallback = Path::new(".audit");
+            if primary.join("index.json").exists() && primary.join("node_pk.bin").exists() {
+                primary
+            } else if fallback.join("index.json").exists() && fallback.join("node_pk.bin").exists() {
+                eprintln!(
+                    "audit: '{}' missing or incomplete; falling back to {}",
+                    Path::new(db_dir).join("audit").display(),
+                    fallback.display()
+                );
+                fallback.to_path_buf()
+            } else {
+                return Err(anyhow::anyhow!(
+                    "no audit log found in '{}' or '{}'",
+                    Path::new(db_dir).join("audit").display(),
+                    fallback.display()
+                ));
+            }
+        };
+
+    // 1) Chain integrity.
+    let r = AuditReader::open(&audit_dir)?;
+    r.verify().map_err(|e| anyhow::anyhow!("{e}"))?;
+    eprintln!("audit: chain OK at {}", audit_dir.display());
+
+    // 2) Rebuild DAG from store (parent-first topo IDs) and replay with in-memory audit.
+    let store = Store::open(Path::new(db_dir), Default::default())
+        .with_context(|| format!("open store at {}", db_dir))?;
+    let ids = store.topo_ids().context("load topo ids")?;
+    let blobs = store.load_ops_cbor(&ids).context("load ops cbor")?;
+
+    let mut dag = Dag::default();
+    for bytes in blobs {
+        let op: Op = serde_cbor::from_slice(&bytes).context("decode Op from store")?;
+        // If your Dag uses a different API, change this to the right call.
+        dag.insert(op);
+    }
+
+    let mut mem = MemAudit(Vec::new());
+    let (_state, _digest) = ecac_core::replay::replay_full_with_audit(&dag, &mut mem);
+
+    // 3) Stream the on-disk audit decisions.
+    let index_bytes = fs::read(audit_dir.join("index.json"))?;
+    let index: CliIndex = serde_json::from_slice(&index_bytes)?;
+    let mut disk_events: Vec<AuditEvent> = Vec::new();
+    for seg in &index.segments {
+        let p = audit_dir.join(&seg.path);
+        let mut f =
+            std::fs::File::open(&p).with_context(|| format!("open segment {}", p.display()))?;
+        loop {
+            let len = match read_u32_be(&mut f)? {
+                Some(n) => n as usize,
+                None => break,
+            };
+            let mut buf = vec![0u8; len];
+            f.read_exact(&mut buf)?;
+            let entry: EntryWireCli = serde_cbor::from_slice(&buf)
+                .with_context(|| format!("decode CBOR in {}", p.display()))?;
+            disk_events.push(entry.event);
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    enum Dec {
+        Applied {
+            op: [u8; 32],
+            topo: u64,
+            why: &'static str,
+        },
+        Skipped {
+            op: [u8; 32],
+            topo: u64,
+            why: &'static str,
+        },
+    }
+    fn extract(v: &[AuditEvent]) -> Vec<Dec> {
+        use ecac_core::audit::{AppliedReason, SkipReason};
+        let mut out = Vec::new();
+        for e in v {
+            match e {
+                AuditEvent::AppliedOp {
+                    op_id,
+                    topo_idx,
+                    reason,
+                } => {
+                    let why = match reason {
+                        AppliedReason::Authorized => "authorized",
+                    };
+                    out.push(Dec::Applied {
+                        op: *op_id,
+                        topo: *topo_idx,
+                        why,
+                    });
+                }
+                AuditEvent::SkippedOp {
+                    op_id,
+                    topo_idx,
+                    reason,
+                } => {
+                    let why = match reason {
+                        SkipReason::DenyWins => "deny_wins",
+                        SkipReason::InvalidSig => "invalid_sig",
+                        SkipReason::BadParent => "bad_parent",
+                        SkipReason::RevokedCred => "revoked_cred",
+                        SkipReason::ExpiredCred => "expired_cred",
+                        SkipReason::OutOfScope => "out_of_scope",
+                    };
+                    out.push(Dec::Skipped {
+                        op: *op_id,
+                        topo: *topo_idx,
+                        why,
+                    });
+                }
+                _ => {}
+            }
+        }
+        out.sort();
+        out
+    }
+
+    let want = extract(&mem.0);
+    let have = extract(&disk_events);
+    if want == have {
+        println!("OK: replay decisions match audit ({} entries)", want.len());
+        return Ok(());
+    }
+
+    // Show first mismatch and per-reason counts to debug fast.
+    let n = want.len().max(have.len());
+    for i in 0..n {
+        match (want.get(i), have.get(i)) {
+            (Some(a), Some(b)) if a == b => continue,
+            (Some(a), Some(b)) => {
+                eprintln!("mismatch @ {}:\n  replay: {:?}\n  audit : {:?}", i, a, b);
+                break;
+            }
+            (Some(a), None) => {
+                eprintln!("extra in replay @ {}: {:?}", i, a);
+                break;
+            }
+            (None, Some(b)) => {
+                eprintln!("missing in replay @ {}: {:?}", i, b);
+                break;
+            }
+            _ => unreachable!(),
+        }
+    }
+    use std::collections::BTreeMap;
+    let sum = |src: &[Dec]| -> BTreeMap<&'static str, usize> {
+        let mut m = BTreeMap::new();
+        for d in src {
+            match d {
+                Dec::Applied { why, .. } | Dec::Skipped { why, .. } => {
+                    *m.entry(*why).or_default() += 1;
+                }
+            }
+        }
+        m
+    };
+    eprintln!("replay summary: {:?}", sum(&want));
+    eprintln!("audit  summary: {:?}", sum(&have));
+    Err(anyhow::anyhow!("audit decisions diverge"))
+}
