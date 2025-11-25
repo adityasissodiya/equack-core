@@ -7,16 +7,18 @@ edition = "2021"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_cbor = "0.11"
-ecac-core = { path = "../core" }
-ecac-store = { path = "../store" }
 blake3 = "1"
 anyhow = "1"
 ed25519-dalek = "2.2"
 base64 = "0.22"
 serde_json = "1"
+ecac-core = { path = "../core", default-features = false }
+ecac-store = { path = "../store", default-features = false }
 
 [dev-dependencies]
 rand = "0.8"
 
 [features]
+default = []
 audit = ["ecac-store/audit", "ecac-core/audit"]
+

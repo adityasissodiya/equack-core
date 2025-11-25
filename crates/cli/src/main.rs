@@ -147,6 +147,12 @@ enum Cmd {
         /// A .cbor file or a directory containing *.cbor (or *.op.cbor) files
         input: PathBuf,
     },
+    /// Same as op-append, but also emits audit SkippedOp on signature failures
+    #[cfg(feature = "audit")]
+    OpAppendAudited {
+        #[arg(long, short)] db: PathBuf,
+        input: PathBuf,
+    },
     /// Deterministic replay from a RocksDB store (equals `replay <ops.cbor>`)
     ReplayFromStore {
         #[arg(long, short)]
@@ -204,8 +210,39 @@ enum Cmd {
         #[arg(long, default_value = "docs/eval/out")]
         out_dir: PathBuf,
     },
+    /// Corrupt signature(s) in an Op/Vec<Op> CBOR to provoke invalid_sig
+    OpCorruptSig {
+        /// Input .cbor file (Op or Vec<Op>)
+        input: PathBuf,
+        /// Output .cbor file
+        output: PathBuf,
+    },
 
+    /// Make a new op with a bogus parent and sign it (to provoke bad_parent)
+    OpMakeOrphan {
+        /// Base .cbor with at least one Op; cloned payload of last Op is used
+        base: PathBuf,
+        /// Author secret key (32-byte ed25519) hex
+        author_sk_hex: String,
+        /// Output .cbor file
+        output: PathBuf,
+    },
+    /// Make a minimal single valid op (Credential) for testing
+    OpMakeMin {
+        author_sk_hex: String,
+        output: String,
+    },
+        /// Write a minimal Credential + Grant pair into a directory
+        OpMakeGrant {
+            /// Author (issuer) secret key hex (32-byte ed25519)
+            author_sk_hex: String,
+            /// Admin secret key hex (32-byte ed25519)
+            admin_sk_hex: String,
+            /// Output directory
+            out_dir: PathBuf,
+        },
     // ===== M8 audit subcommands =====
+
     /// Verify audit chain integrity (hash-link + signatures) in <dir> (default: ".audit")
     AuditVerifyChain {
         /// Audit directory (default: ".audit")
@@ -326,6 +363,21 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        #[cfg(feature = "audit")]
+        Cmd::OpAppendAudited { db, input } => {
+            let mut files = Vec::new();
+            if input.is_dir() {
+                for ent in fs::read_dir(&input)? {
+                    let p = ent?.path();
+                    if let Some(ext) = p.extension() { if ext == "cbor" { files.push(p); } }
+                }
+                files.sort();
+            } else {
+                files.push(input);
+            }
+            commands::cmd_op_append_audited(&db, files)?;
+        }
+
         Cmd::ReplayFromStore {
             db,
             from_checkpoint,
@@ -420,7 +472,32 @@ fn main() -> anyhow::Result<()> {
                 out_dir,
             })?;
         }
+        Cmd::OpCorruptSig { input, output } => {
+            commands::cmd_op_corrupt_sig(
+                input.as_os_str().to_str().unwrap(),
+                output.as_os_str().to_str().unwrap(),
+            )?;
+        }
+
+        Cmd::OpMakeOrphan {
+            base,
+            author_sk_hex,
+            output,
+        } => {
+            commands::cmd_op_make_orphan(
+                base.as_os_str().to_str().unwrap(),
+                &author_sk_hex,
+                output.as_os_str().to_str().unwrap(),
+            )?;
+        }
         // ===== M8 audit subcommands =====
+        Cmd::OpMakeGrant {
+            author_sk_hex,
+            admin_sk_hex,
+            out_dir,
+        } => {
+            commands::cmd_op_make_grant(&author_sk_hex, &admin_sk_hex, out_dir.as_path())?;
+        }
         Cmd::AuditVerifyChain { dir } => {
             #[cfg(feature = "audit")]
             {
@@ -472,6 +549,13 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "audit")]
         Cmd::AuditRecord { db } => {
             commands::cmd_audit_record(Some(db.as_str()))?;
+        }
+        Cmd::OpMakeMin {
+            author_sk_hex,
+            output,
+        } => {
+            // helper for tests: create a valid one-element Vec<Op> CBOR file
+            commands::cmd_op_make_min(&author_sk_hex, &output)?;
         }
     }
     Ok(())

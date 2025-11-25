@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, Verifier};
-use serde::{Deserialize, Serialize};
 use ecac_core::audit::AuditEvent;
+use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
 
 // ---- wire types -------------------------------------------------------------
 
@@ -23,19 +23,9 @@ const NODE_PK_FILE: &str = "node_pk.bin";
 const NODE_ID_FILE: &str = "node_id.bin";
 
 fn canonical_cbor<T: serde::Serialize>(v: &T) -> Vec<u8> {
-        // serde_cbor 0.11 doesn't expose a "canonical" toggle. For our struct-only
-        // payloads this is deterministic (field order is definition order).
-        serde_cbor::to_vec(v).expect("CBOR serialize")
-    }
-     
-#[derive(Serialize)]
-struct EntryNoSig<'a> {
-    seq: u64,
-    ts_monotonic: u64,
-    prev_hash: [u8; 32],
-    #[serde(borrow)]
-    event: &'a AuditEvent,
-    node_id: [u8; 32],
+    // serde_cbor 0.11 doesn't expose a "canonical" toggle. For our struct-only
+    // payloads this is deterministic (field order is definition order).
+    serde_cbor::to_vec(v).expect("CBOR serialize")
 }
 
 #[derive(Clone)]
@@ -48,49 +38,26 @@ struct Entry {
     signature: [u8; 64],
 }
 
-// Wire adapter to avoid serde on [u8; 64].
+// The exact fields that are signed (no signature here).
 #[derive(Serialize, Deserialize, Clone)]
-struct EntryWire {
+struct EntryToSign {
     seq: u64,
     ts_monotonic: u64,
     prev_hash: [u8; 32],
-    event: AuditEvent,
     node_id: [u8; 32],
+    event: AuditEvent,
+}
+
+// What’s stored on disk: signed payload + signature (as Vec<u8> for serde).
+#[derive(Serialize, Deserialize, Clone)]
+struct EntryWire {
+    #[serde(flatten)]
+    to_sign: EntryToSign,
     signature: Vec<u8>,
 }
 
-impl From<&Entry> for EntryWire {
-    fn from(e: &Entry) -> Self {
-        Self {
-            seq: e.seq,
-            ts_monotonic: e.ts_monotonic,
-            prev_hash: e.prev_hash,
-            event: e.event.clone(),
-            node_id: e.node_id,
-            signature: e.signature.to_vec(),
-        }
-    }
-}
-
-impl TryFrom<EntryWire> for Entry {
-    type Error = anyhow::Error;
-    fn try_from(w: EntryWire) -> Result<Self> {
-        let sig: [u8; 64] = w
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow!("signature length must be 64"))?;
-        Ok(Self {
-            seq: w.seq,
-            ts_monotonic: w.ts_monotonic,
-            prev_hash: w.prev_hash,
-            event: w.event,
-            node_id: w.node_id,
-            signature: sig,
-        })
-    }
-}
-
+// (old EntryNoSig, duplicate EntryWire, to_sign_bytes, write_entry, verify_entry,
+//  and the From/TryFrom impls removed)
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Index {
@@ -161,14 +128,24 @@ impl AuditWriter {
         fs::create_dir_all(dir).ok();
 
         let vk = sk.verifying_key();
-        // Persist node pk/id for verifiers.
+        // Persist node pk/id for verifiers (overwrite if mismatched).
         let pk_bytes = vk.to_bytes();
         let pk_path = dir.join(NODE_PK_FILE);
         let id_path = dir.join(NODE_ID_FILE);
-        if !pk_path.exists() {
+        if pk_path.exists() {
+            let on_disk = fs::read(&pk_path)?;
+            if on_disk != pk_bytes {
+                fs::write(&pk_path, &pk_bytes)?;
+            }
+        } else {
             fs::write(&pk_path, &pk_bytes)?;
         }
-        if !id_path.exists() {
+        if id_path.exists() {
+            let on_disk = fs::read(&id_path)?;
+            if on_disk.as_slice() != node_id {
+                fs::write(&id_path, &node_id)?;
+            }
+        } else {
             fs::write(&id_path, &node_id)?;
         }
 
@@ -287,16 +264,18 @@ impl AuditWriter {
         let seq = self.seq + 1;
         let ts_monotonic = self.ts_counter + 1;
 
-        let pre = EntryNoSig {
+        // Build the exact payload we sign.
+        let to_sign = EntryToSign {
             seq,
             ts_monotonic,
             prev_hash: self.prev_hash,
-            event: &event,
             node_id: self.node_id,
+            event: event.clone(),
         };
-        let pre_bytes = canonical_cbor(&pre);
+        let pre_bytes = canonical_cbor(&to_sign);
         let entry_hash = hash_preimage(&pre_bytes);
 
+        // Sign the domain-separated hash.
         let sig: Signature = self.sk.sign(&entry_hash);
         let entry = Entry {
             seq,
@@ -306,8 +285,12 @@ impl AuditWriter {
             node_id: self.node_id,
             signature: sig.to_bytes(),
         };
-                // Write canonical CBOR of the wire representation
-        let wire = EntryWire::from(&entry);
+
+        // Wire encoding (to_sign + signature as Vec<u8>), length-prefixed CBOR.
+        let wire = EntryWire {
+            to_sign,
+            signature: entry.signature.to_vec(),
+        };
         let bytes = canonical_cbor(&wire);
 
         let len = bytes.len() as u32;
@@ -352,7 +335,11 @@ pub enum VerifyError {
     Truncated { path: String, offset: u64 },
 
     #[error("sequence gap at {path}: expected {expected}, found {found}")]
-    SeqGap { path: String, expected: u64, found: u64 },
+    SeqGap {
+        path: String,
+        expected: u64,
+        found: u64,
+    },
 
     #[error("prev_hash mismatch at seq {seq} in {path}")]
     PrevHash { path: String, seq: u64 },
@@ -449,55 +436,54 @@ impl AuditReader {
                         }
                     });
                 }
-                                let wire: EntryWire =
-                                    serde_cbor::from_slice(&buf).map_err(|_| VerifyError::Truncated {
-                                        path: path.display().to_string(),
-                                        offset,
-                                    })?;
-                                let entry: Entry = wire.try_into().map_err(|_| VerifyError::Truncated {
-                                    path: path.display().to_string(),
-                                    offset,
-                                })?;
+                let wire: EntryWire =
+                    serde_cbor::from_slice(&buf).map_err(|_| VerifyError::Truncated {
+                        path: path.display().to_string(),
+                        offset,
+                    })?;
+                let s = &wire.to_sign;
+
                 // Seq continuity
-                if entry.seq != expect_seq {
+                if s.seq != expect_seq {
                     return Err(VerifyError::SeqGap {
                         path: path.display().to_string(),
                         expected: expect_seq,
-                        found: entry.seq,
+                        found: s.seq,
                     });
                 }
 
                 // node_id matches local
-                if entry.node_id != self.node_id {
+                if s.node_id != self.node_id {
                     return Err(VerifyError::BadNodeId {
                         path: path.display().to_string(),
-                        seq: entry.seq,
+                        seq: s.seq,
                     });
                 }
 
                 // Prev hash link
-                if entry.prev_hash != prev_hash {
+                if s.prev_hash != prev_hash {
                     return Err(VerifyError::PrevHash {
                         path: path.display().to_string(),
-                        seq: entry.seq,
+                        seq: s.seq,
                     });
                 }
 
-                // Signature over preimage
-                let pre = EntryNoSig {
-                    seq: entry.seq,
-                    ts_monotonic: entry.ts_monotonic,
-                    prev_hash: entry.prev_hash,
-                    event: &entry.event,
-                    node_id: entry.node_id,
-                };
-                let pre_bytes = canonical_cbor(&pre);
+                // Rebuild the exact preimage the writer signed.
+                let pre_bytes = canonical_cbor(&wire.to_sign);
                 let h = hash_preimage(&pre_bytes);
-                let sig = Signature::from_bytes(&entry.signature);
+                let sig_arr: [u8; 64] =
+                    wire.signature
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| VerifyError::Truncated {
+                            path: path.display().to_string(),
+                            offset,
+                        })?;
+                let sig = Signature::from_bytes(&sig_arr);
                 if self.vk.verify(&h, &sig).is_err() {
                     return Err(VerifyError::BadSig {
                         path: path.display().to_string(),
-                        seq: entry.seq,
+                        seq: s.seq,
                     });
                 }
 

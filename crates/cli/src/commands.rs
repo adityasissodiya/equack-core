@@ -2,8 +2,20 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "audit")]
+use ecac_core::audit::{AuditEvent, SkipReason};
+#[cfg(feature = "audit")]
+use ecac_core::audit_hook::AuditHook;
+#[cfg(feature = "audit")]
+// audited append path
+#[cfg(feature = "audit")]
+use ecac_store::StoreAuditHook;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
+use std::path::Path;
+
+// emit SkippedOp etc.
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ecac_core::crypto::vk_to_bytes;
 use ecac_core::hlc::Hlc;
@@ -14,7 +26,21 @@ use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
 use ecac_store::Store;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+
+// --- local hex helpers (avoid reaching into main.rs) ---
+fn to_hex<T: AsRef<[u8]>>(v: T) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let b = v.as_ref();
+    let mut out = String::with_capacity(b.len() * 2);
+    for &x in b {
+        out.push(HEX[(x >> 4) as usize] as char);
+        out.push(HEX[(x & 0x0f) as usize] as char);
+    }
+    out
+}
+fn to_hex32(v: &[u8; 32]) -> String {
+    to_hex(v)
+}
 
 fn hex_nibble(b: u8) -> Result<u8> {
     match b {
@@ -36,16 +62,6 @@ fn parse_sk_hex(hex: &str) -> Result<SigningKey> {
         key[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
     }
     Ok(SigningKey::from_bytes(&key))
-}
-
-fn to_hex32(arr: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(64);
-    for &b in arr {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
 }
 
 #[derive(Serialize, Deserialize)]
@@ -233,6 +249,40 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "audit")]
+pub fn cmd_op_append_audited(db_path: &Path, files: Vec<PathBuf>) -> Result<()> {
+    use ecac_store::Store;
+    let store = Store::open(db_path, Default::default())?;
+    // open default audit sink (respects ECAC_NODE_SK_HEX and ECAC_AUDIT_DIR or <db>/audit)
+    let Some(mut sink) = crate::commands::open_audit_sink_default()? else {
+        return Err(anyhow::anyhow!(
+            "audit sink unavailable: set ECAC_NODE_SK_HEX"
+        ));
+    };
+    for f in files {
+        let ops = super::read_ops_cbor(&f)?; // same tolerant reader
+        for op in ops {
+            let bytes = ecac_core::serialize::canonical_cbor(&op);
+            match store.put_op_cbor(&bytes) {
+                Ok(id) => eprintln!("appended {}", to_hex32(&id)),
+                Err(e) => {
+                    // If signature verification failed, log SkippedOp{InvalidSig}
+                    // (topo_idx is 0 here; it’s an ingest-time rejection, not part of DAG)
+                    let op_id = op.op_id;
+                    let reason = SkipReason::InvalidSig;
+                    let ev = AuditEvent::SkippedOp {
+                        op_id,
+                        topo_idx: 0,
+                        reason,
+                    };
+                    sink.on_event(ev);
+                    eprintln!("append failed for {}: {e}", to_hex32(&op_id));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 // crates/cli/src/commands.rs
 
 #[cfg(feature = "audit")]
@@ -264,8 +314,6 @@ impl ecac_core::audit_hook::AuditHook for MemAudit {
 
 // ===== Audit CLI helpers =====
 
-#[cfg(feature = "audit")]
-use ecac_core::audit::AuditEvent;
 #[cfg(feature = "audit")]
 use ecac_store::audit::AuditReader;
 #[cfg(feature = "audit")]
@@ -447,6 +495,199 @@ pub fn cmd_audit_cat(dir_opt: Option<&str>, segment_opt: Option<&str>) -> Result
     Ok(())
 }
 
+// ---- helpers: corrupt-sig and make-orphan -----------------------------------
+
+/// Load Op or Vec<Op> from CBOR (compat: also Vec<OpFlatCompat>).
+fn load_ops_any(p: &Path) -> Result<Vec<Op>> {
+    let data = fs::read(p)?;
+    if let Ok(v) = serde_cbor::from_slice::<Vec<Op>>(&data) {
+        return Ok(v);
+    }
+    if let Ok(op) = serde_cbor::from_slice::<Op>(&data) {
+        return Ok(vec![op]);
+    }
+    // Compat path: older flat format
+    if let Ok(vf) = serde_cbor::from_slice::<Vec<crate::OpFlatCompat>>(&data) {
+        let out = vf
+            .into_iter()
+            .map(|f| Op {
+                header: ecac_core::op::OpHeader {
+                    parents: f.parents,
+                    hlc: f.hlc,
+                    author_pk: f.author_pk,
+                    payload: f.payload,
+                },
+                sig: f.sig,
+                op_id: f.op_id,
+            })
+            .collect();
+        return Ok(out);
+    }
+    if let Ok(f) = serde_cbor::from_slice::<crate::OpFlatCompat>(&data) {
+        let op = Op {
+            header: ecac_core::op::OpHeader {
+                parents: f.parents,
+                hlc: f.hlc,
+                author_pk: f.author_pk,
+                payload: f.payload,
+            },
+            sig: f.sig,
+            op_id: f.op_id,
+        };
+        return Ok(vec![op]);
+    }
+    Err(anyhow!("{}: not an Op/Vec<Op> CBOR", p.display()))
+}
+
+#[allow(dead_code)]
+fn save_ops_vec(p: &Path, ops: &[Op]) -> Result<()> {
+    // Some serde_cbor versions require a Sized value; wrap the slice as Vec<Op>.
+    // This keeps encoding stable and avoids the `[Op]` unsized error.
+    let bytes = serde_cbor::to_vec(&ops.to_vec())?;
+    fs::write(p, bytes)?;
+    Ok(())
+}
+
+/// Flip one bit in the first signature to force verify failure.
+pub fn cmd_op_corrupt_sig(input: &str, output: &str) -> Result<()> {
+    let in_path = Path::new(input);
+    let mut ops = load_ops_any(in_path)?;
+    if ops.is_empty() {
+        return Err(anyhow!("no ops in {}", input));
+    }
+    for op in &mut ops {
+        if op.sig.is_empty() {
+            op.sig = vec![0x00];
+        } else {
+            op.sig[0] ^= 0x01;
+        }
+    }
+    // Keep structure; write as Vec<Op> to avoid ambiguity
+    save_ops_vec(Path::new(output), &ops)?;
+    eprintln!("wrote corrupted signatures to {}", output);
+    Ok(())
+}
+
+/// Append a new op cloned from last payload but with a bogus parent; sign with provided SK.
+pub fn cmd_op_make_orphan(base: &str, author_sk_hex: &str, output: &str) -> Result<()> {
+    let base_path = Path::new(base);
+    let mut ops = load_ops_any(base_path)?;
+    if ops.is_empty() {
+        return Err(anyhow!("no ops in {}", base));
+    }
+    let tmpl = ops.last().unwrap().clone();
+    let sk = parse_sk_hex(author_sk_hex)?; // function lives in this module
+    let author_pk = vk_to_bytes(&sk.verifying_key());
+    // All-zeros parent id is guaranteed missing in normal runs.
+    let bogus_parent = [0u8; 32];
+    // HLC: bump physical by 1ms to keep monotonic.
+    let hlc = {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // Keep it deterministic-ish relative to tmpl if clock jumps
+        let phys = std::cmp::max(now_ms, tmpl.header.hlc.physical_ms + 1);
+        Hlc::new(phys, tmpl.header.hlc.logical)
+    };
+    let new_op = Op::new(
+        vec![bogus_parent],
+        hlc,
+        author_pk,
+        tmpl.header.payload.clone(),
+        &sk,
+    );
+    ops.push(new_op);
+    save_ops_vec(Path::new(output), &ops)?;
+    eprintln!("appended orphan op → {}", output);
+    Ok(())
+}
+
+// Mint a minimal, valid single Credential op and write as a one-element Vec<Op> CBOR.
+pub fn cmd_op_make_min(author_sk_hex: &str, output: &str) -> Result<()> {
+    let sk = parse_sk_hex(author_sk_hex)?;
+    let pk = vk_to_bytes(&sk.verifying_key());
+    // Minimal credential payload; contents don't matter for signature tests.
+    let op = Op::new(
+        vec![],         // no parents
+        Hlc::new(0, 1), // deterministic HLC
+        pk,
+        Payload::Credential {
+            cred_id: "min-cred".to_string(),
+            cred_bytes: vec![1, 2, 3],     // dummy bytes
+            format: CredentialFormat::Jwt, // <-- missing field
+        },
+        &sk,
+    );
+    // Reuse the stable writer (writes a Vec<Op>)
+    save_ops_vec(Path::new(output), &[op])?;
+    eprintln!("wrote minimal op to {}", output);
+    Ok(())
+}
+
+/// Write a minimal Credential + Grant pair into a directory.
+/// Files: <out_dir>/cred.op.cbor and <out_dir>/grant.op.cbor
+pub fn cmd_op_make_grant(author_sk_hex: &str, admin_sk_hex: &str, out_dir: &Path) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fs::create_dir_all(out_dir)?;
+
+    // Keys
+    let issuer_sk = parse_sk_hex(author_sk_hex)?;
+    let issuer_pk = vk_to_bytes(&issuer_sk.verifying_key());
+    let admin_sk = parse_sk_hex(admin_sk_hex)?;
+    let admin_pk = vk_to_bytes(&admin_sk.verifying_key());
+
+    // Minimal, deterministic-ish timestamps (ms). Use now for readability.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // Minimal credential bytes (doesn't need to be a real JWT for plumbing tests)
+    let cred_bytes = b"m8-test-credential".to_vec();
+    let cred_hash = blake3_hash32(&cred_bytes);
+
+    // 1) Credential op signed by issuer
+    let cred_op = Op::new(
+        vec![],
+        Hlc::new(now_ms, 1),
+        issuer_pk,
+        Payload::Credential {
+            cred_id: "m8:test:cred".to_string(),
+            cred_bytes: cred_bytes.clone(),
+            format: CredentialFormat::Jwt,
+        },
+        &issuer_sk,
+    );
+
+    // 2) Grant op signed by admin, points at the credential's hash
+    //    For subject_pk, use issuer_pk to keep it self-contained.
+    let grant_op = Op::new(
+        vec![cred_op.op_id],
+        Hlc::new(now_ms, 2),
+        admin_pk,
+        Payload::Grant {
+            subject_pk: issuer_pk,
+            cred_hash,
+        },
+        &admin_sk,
+    );
+
+    fs::write(out_dir.join("cred.op.cbor"), canonical_cbor(&cred_op))?;
+    fs::write(out_dir.join("grant.op.cbor"), canonical_cbor(&grant_op))?;
+
+    println!("credential_op_id={}", to_hex32(&cred_op.op_id));
+    println!("grant_op_id      ={}", to_hex32(&grant_op.op_id));
+    println!("cred_hash        ={}", to_hex32(&cred_hash));
+    println!(
+        "wrote: {} and {}",
+        out_dir.join("cred.op.cbor").display(),
+        out_dir.join("grant.op.cbor").display()
+    );
+    Ok(())
+}
+
 // ---- audit-verify-full (chain + replay cross-check) ----
 #[cfg(feature = "audit")]
 use ecac_core::dag::Dag; // Op and Store are already imported at the top
@@ -492,39 +733,39 @@ pub fn cmd_audit_verify_full(db_dir_opt: Option<&str>) -> Result<()> {
     use std::io::Read as _;
 
     let db_dir = db_dir_opt.unwrap_or(".ecac.db");
-        // 0) ECAC_AUDIT_DIR override
-        let audit_dir: PathBuf = if let Ok(env_dir) = std::env::var("ECAC_AUDIT_DIR") {
-            let p = PathBuf::from(env_dir);
-            if p.join("index.json").exists() && p.join("node_pk.bin").exists() {
-                eprintln!("audit: using ECAC_AUDIT_DIR={}", p.display());
-                p
-            } else {
-                return Err(anyhow::anyhow!(
-                "ECAC_AUDIT_DIR='{}' is not a valid audit dir (missing index.json/node_pk.bin)",
-                    p.display()
-                ));
-            }
+    // 0) ECAC_AUDIT_DIR override
+    let audit_dir: PathBuf = if let Ok(env_dir) = std::env::var("ECAC_AUDIT_DIR") {
+        let p = PathBuf::from(env_dir);
+        if p.join("index.json").exists() && p.join("node_pk.bin").exists() {
+            eprintln!("audit: using ECAC_AUDIT_DIR={}", p.display());
+            p
         } else {
-            // 1) Prefer <db>/audit; if missing/incomplete, fall back to .audit with a note.
-            let primary = Path::new(db_dir).join("audit");
-            let fallback = Path::new(".audit");
-            if primary.join("index.json").exists() && primary.join("node_pk.bin").exists() {
-                primary
-            } else if fallback.join("index.json").exists() && fallback.join("node_pk.bin").exists() {
-                eprintln!(
-                    "audit: '{}' missing or incomplete; falling back to {}",
-                    Path::new(db_dir).join("audit").display(),
-                    fallback.display()
-                );
-                fallback.to_path_buf()
-            } else {
-                return Err(anyhow::anyhow!(
-                    "no audit log found in '{}' or '{}'",
-                    Path::new(db_dir).join("audit").display(),
-                    fallback.display()
-                ));
-            }
-        };
+            return Err(anyhow::anyhow!(
+                "ECAC_AUDIT_DIR='{}' is not a valid audit dir (missing index.json/node_pk.bin)",
+                p.display()
+            ));
+        }
+    } else {
+        // 1) Prefer <db>/audit; if missing/incomplete, fall back to .audit with a note.
+        let primary = Path::new(db_dir).join("audit");
+        let fallback = Path::new(".audit");
+        if primary.join("index.json").exists() && primary.join("node_pk.bin").exists() {
+            primary
+        } else if fallback.join("index.json").exists() && fallback.join("node_pk.bin").exists() {
+            eprintln!(
+                "audit: '{}' missing or incomplete; falling back to {}",
+                Path::new(db_dir).join("audit").display(),
+                fallback.display()
+            );
+            fallback.to_path_buf()
+        } else {
+            return Err(anyhow::anyhow!(
+                "no audit log found in '{}' or '{}'",
+                Path::new(db_dir).join("audit").display(),
+                fallback.display()
+            ));
+        }
+    };
 
     // 1) Chain integrity.
     let r = AuditReader::open(&audit_dir)?;

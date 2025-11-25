@@ -19,6 +19,8 @@ ed25519-dalek = { version = "2.2", default-features = false }
 [dev-dependencies]
 # Temp directories for DBs in tests
 tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+hex = "0.4"
 
 # Property tests (random DAGs, etc.)
 proptest = { version = "1", default-features = false, features = ["std"] }
