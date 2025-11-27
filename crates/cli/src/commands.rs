@@ -6,10 +6,6 @@ use anyhow::{anyhow, Result};
 use ecac_core::audit::{AuditEvent, SkipReason};
 #[cfg(feature = "audit")]
 use ecac_core::audit_hook::AuditHook;
-#[cfg(feature = "audit")]
-// audited append path
-#[cfg(feature = "audit")]
-use ecac_store::StoreAuditHook;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 use std::path::Path;
@@ -297,6 +293,7 @@ pub fn open_audit_sink_default() -> anyhow::Result<Option<ecac_store::StoreAudit
 }
 
 #[cfg(not(feature = "audit"))]
+#[allow(dead_code)]
 pub fn open_audit_sink_default() -> anyhow::Result<Option<()>> {
     Ok(None)
 }

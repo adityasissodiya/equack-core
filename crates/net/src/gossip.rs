@@ -61,7 +61,7 @@ pub fn publish_announce(
         h8
     );
     let msg_id = gs.publish(topic.clone(), bytes)?;
-        #[cfg(feature = "net")]
+    #[cfg(feature = "net")]
     {
         // Count successfully published announces.
         METRICS.inc("gossip_announces_sent", 1);
@@ -73,7 +73,7 @@ pub fn publish_announce(
         sa.announce.topo_watermark,
         byte_len
     );
-        #[cfg(feature = "net")]
+    #[cfg(feature = "net")]
     {
         METRICS.inc("gossip_announces_sent", 1);
     }
@@ -84,9 +84,9 @@ pub fn publish_announce(
 pub fn parse_announce(data: &[u8]) -> Option<SignedAnnounce> {
     match from_cbor_signed_announce(data).ok() {
         Some(sa) => {
-                    #[cfg(feature = "net")]
+            #[cfg(feature = "net")]
             {
-               // Count announces we accept/parse.
+                // Count announces we accept/parse.
                 METRICS.inc("gossip_announces_recv", 1);
             }
             log::trace!(

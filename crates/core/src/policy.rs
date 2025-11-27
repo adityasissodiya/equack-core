@@ -45,13 +45,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use std::time::Instant;
 use crate::metrics::METRICS;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use blake3::Hasher;
 use ed25519_dalek::Signature;
 use serde_json::Value;
+use std::time::Instant;
 
 use crate::crypto::{vk_from_bytes, PublicKeyBytes};
 use crate::dag::Dag;
@@ -282,10 +282,14 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
             _ => {}
         }
     }
-    
-        METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
-        if epochs_opened > 0 { METRICS.inc("epochs_total", epochs_opened); }
-        if revocations_seen > 0 { METRICS.inc("revocations_seen", revocations_seen); }
+
+    METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
+    if epochs_opened > 0 {
+        METRICS.inc("epochs_total", epochs_opened);
+    }
+    if revocations_seen > 0 {
+        METRICS.inc("revocations_seen", revocations_seen);
+    }
     idx
 }
 
@@ -505,7 +509,11 @@ pub fn build_auth_epochs_with(
         }
     }
     METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
-    if epochs_opened > 0 { METRICS.inc("epochs_total", epochs_opened); }
-    if revocations_seen > 0 { METRICS.inc("revocations_seen", revocations_seen); }
+    if epochs_opened > 0 {
+        METRICS.inc("epochs_total", epochs_opened);
+    }
+    if revocations_seen > 0 {
+        METRICS.inc("revocations_seen", revocations_seen);
+    }
     idx
 }

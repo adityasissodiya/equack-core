@@ -31,7 +31,13 @@ fn gen_hb_chain(seed: u64, n: usize) -> Vec<Op> {
             key: "mv:o:x".to_string(),
             value: format!("v{i}").into_bytes(),
         };
-        let op = Op::new(parents.clone(), Hlc::new(1_000 + i as u64, logical), pk, payload, &sk);
+        let op = Op::new(
+            parents.clone(),
+            Hlc::new(1_000 + i as u64, logical),
+            pk,
+            payload,
+            &sk,
+        );
         parents = vec![op.op_id];
         logical = logical.saturating_add(1);
         out.push(op);
@@ -52,7 +58,9 @@ fn audit_end_to_end_roundtrip() {
     let tmp = tempdir().unwrap();
     let audit_dir = tmp.path().join("audit");
     let sk = key_pair(99, b"node");
-    let node_id: [u8; 32] = blake3::hash(b"node-99").as_bytes()[..32].try_into().unwrap();
+    let node_id: [u8; 32] = blake3::hash(b"node-99").as_bytes()[..32]
+        .try_into()
+        .unwrap();
     let mut sink = StoreAuditHook::open(&audit_dir, sk, node_id).unwrap();
 
     // Replay with audit

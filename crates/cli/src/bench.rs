@@ -9,8 +9,8 @@ use ed25519_dalek::SigningKey;
 use ecac_core::crypto::vk_to_bytes;
 use ecac_core::dag::Dag;
 use ecac_core::hlc::Hlc;
-use ecac_core::op::{Op, OpId, Payload};
 use ecac_core::metrics::METRICS;
+use ecac_core::op::{Op, OpId, Payload};
 
 /// CLI-facing options (kept simple & deterministic).
 pub struct Options {
@@ -44,7 +44,7 @@ pub fn run(opts: Options) -> Result<()> {
     // Start clean & pre-register all keys we want in the CSV (stable schema).
     METRICS.reset();
     // Counters
-   for k in [
+    for k in [
         "ops_total",
         "ops_applied",
         "ops_skipped_policy",
@@ -74,35 +74,34 @@ pub fn run(opts: Options) -> Result<()> {
         METRICS.observe_ms(h, 0);
     }
 
-        // Generate deterministic workload; offline-revocation is planned here (kept vs skipped).
-        let (ops_to_insert, total_ops, skipped_policy, revoke_t_ms) = match scenario_str {
-            "hb-chain" => {
+    // Generate deterministic workload; offline-revocation is planned here (kept vs skipped).
+    let (ops_to_insert, _total_ops, _skipped_policy, revoke_t_ms) = match scenario_str {
+        "hb-chain" => {
             let ops = gen_hb_chain(opts.seed, opts.ops)?;
             let n = ops.len();
             (ops, n, 0usize, None)
-            }
-            "concurrent" => {
-                // your signature is (seed, n, peers)
-                            let ops = gen_concurrent_writers(opts.seed, opts.ops, opts.peers)?;
-                            let n = ops.len();
-                            (ops, n, 0usize, None)
-            }
-            "offline-revocation" => {
-                let (kept, total, skipped, t_ms) = plan_offline_revocation(opts.seed, opts.ops)?;
-                (kept, total, skipped, Some(t_ms))
-            }
-            other => {
-                return Err(anyhow!(
-                    "unsupported scenario '{}'. Supported: hb-chain, concurrent, offline-revocation",
-                    other
-                ));
-            }
-        };
+        }
+        "concurrent" => {
+            // your signature is (seed, n, peers)
+            let ops = gen_concurrent_writers(opts.seed, opts.ops, opts.peers)?;
+            let n = ops.len();
+            (ops, n, 0usize, None)
+        }
+        "offline-revocation" => {
+            let (kept, total, skipped, t_ms) = plan_offline_revocation(opts.seed, opts.ops)?;
+            (kept, total, skipped, Some(t_ms))
+        }
+        other => {
+            return Err(anyhow!(
+                "unsupported scenario '{}'. Supported: hb-chain, concurrent, offline-revocation",
+                other
+            ));
+        }
+    };
 
     // Silence "unused field" warnings if some knobs are not consumed yet by local scenarios.
     // (They will be used fully when net/partition harness is wired.)
     let _maybe_unused_partition = &opts.partition;
-
 
     // Build full DAG for replay
     let mut dag = Dag::new();
@@ -118,47 +117,48 @@ pub fn run(opts: Options) -> Result<()> {
 
     // Measure incremental replay over a suffix (simulate a checkpoint)
     let total = ops_to_insert.len();
-        let suffix = match opts.checkpoint_every {
-                Some(k) if k > 0 => std::cmp::min(k, total).max(1),
-                _ => std::cmp::max(1, total / 10), // default: 10% tail (>=1)
-            };
-            let checkpoint_idx = total.saturating_sub(suffix);
+    let suffix = match opts.checkpoint_every {
+        Some(k) if k > 0 => std::cmp::min(k, total).max(1),
+        _ => std::cmp::max(1, total / 10), // default: 10% tail (>=1)
+    };
+    let checkpoint_idx = total.saturating_sub(suffix);
 
-                // IMPORTANT: build a *consistent* checkpoint from the prefix only.
-                // Cloning the final state and rewinding processed_count replays the tail twice
-                // and creates artificial MVReg multi-winner samples (p95 spikes to 2).
-                //
-                // Construct a prefix DAG with ops[0..checkpoint_idx), replay it to get a clean
-                // checkpoint state, then apply the incremental over the *full* DAG.
-                let mut dag_prefix = Dag::new();
-                for op in ops_to_insert.iter().take(checkpoint_idx)  {
-                    dag_prefix.insert(op.clone());
-                }
-                let (mut state_ck, _digest_ck) = ecac_core::replay::replay_full(&dag_prefix);
-            
-                                let t1 = Instant::now();
-                                let (_state_inc, digest_inc) = ecac_core::replay::apply_incremental(&mut state_ck, &dag);
-//                                 #[cfg(feature = "audit")]
-// if let Ok(Some(mut audit)) = crate::commands::open_audit_sink_default() {
-//     let (_state, _digest) = ecac_core::replay::apply_incremental_with_audit(&mut state, &dag, &mut audit);
-// } else {
-//     let (_state, _digest) = ecac_core::replay::apply_incremental(&mut state, &dag);
-// }
+    // IMPORTANT: build a *consistent* checkpoint from the prefix only.
+    // Cloning the final state and rewinding processed_count replays the tail twice
+    // and creates artificial MVReg multi-winner samples (p95 spikes to 2).
+    //
+    // Construct a prefix DAG with ops[0..checkpoint_idx), replay it to get a clean
+    // checkpoint state, then apply the incremental over the *full* DAG.
+    let mut dag_prefix = Dag::new();
+    for op in ops_to_insert.iter().take(checkpoint_idx) {
+        dag_prefix.insert(op.clone());
+    }
+    let (mut state_ck, _digest_ck) = ecac_core::replay::replay_full(&dag_prefix);
 
-                                let replay_incremental_ms = t1.elapsed().as_millis() as u64;
-                                // Parity check: full vs incremental digest must match.
-                                if digest_full != digest_inc {
-                                    return Err(anyhow!(
-                                        "replay parity failed: digest_full != digest_inc (scenario={}, seed={})",
-                                        opts.scenario, opts.seed
-                                    ));
-                                }
+    let t1 = Instant::now();
+    let (_state_inc, digest_inc) = ecac_core::replay::apply_incremental(&mut state_ck, &dag);
+    //                                 #[cfg(feature = "audit")]
+    // if let Ok(Some(mut audit)) = crate::commands::open_audit_sink_default() {
+    //     let (_state, _digest) = ecac_core::replay::apply_incremental_with_audit(&mut state, &dag, &mut audit);
+    // } else {
+    //     let (_state, _digest) = ecac_core::replay::apply_incremental(&mut state, &dag);
+    // }
+
+    let replay_incremental_ms = t1.elapsed().as_millis() as u64;
+    // Parity check: full vs incremental digest must match.
+    if digest_full != digest_inc {
+        return Err(anyhow!(
+            "replay parity failed: digest_full != digest_inc (scenario={}, seed={})",
+            opts.scenario,
+            opts.seed
+        ));
+    }
     METRICS.observe_ms("replay_incremental_ms", replay_incremental_ms);
 
     // Write artifacts
     let prefix = format!("{}-{}", scenario_str, opts.seed);
 
-        // Sanity: incremental should not produce a different digest.
+    // Sanity: incremental should not produce a different digest.
     if digest_full != digest_inc {
         return Err(anyhow!(
             "replay parity failed: digest_full != digest_inc (scenario={}, seed={})",
@@ -183,8 +183,8 @@ pub fn run(opts: Options) -> Result<()> {
         "# ecac-metrics v1, commit={}, scenario={}, seed={}",
         commit, scenario_str, opts.seed
     )?;
-        let snapshot = METRICS.snapshot_csv(); // 2-line csv: header + row
-        write!(csv, "{}", snapshot)?;
+    let snapshot = METRICS.snapshot_csv(); // 2-line csv: header + row
+    write!(csv, "{}", snapshot)?;
     // 2) Timeline JSONL (lightweight breadcrumbs for plots)
     let mut tl_path = opts.out_dir.clone();
     tl_path.push(format!("{}-timeline.jsonl", &prefix));
@@ -195,8 +195,12 @@ pub fn run(opts: Options) -> Result<()> {
         scenario_str, opts.seed
     )?;
     if let Some(t_ms) = revoke_t_ms {
-                writeln!(tl, r#"{{"t_ms":{},"type":"revoke","note":"offline deny-wins"}}"#, t_ms)?;
-            }
+        writeln!(
+            tl,
+            r#"{{"t_ms":{},"type":"revoke","note":"offline deny-wins"}}"#,
+            t_ms
+        )?;
+    }
     writeln!(
         tl,
         r#"{{"t_ms":{},"type":"replay_full_done"}}"#,
@@ -243,7 +247,13 @@ fn gen_hb_chain(seed: u64, n: usize) -> Result<Vec<Op>> {
             key: "mv:o:x".to_string(),
             value: format!("v{i}").into_bytes(),
         };
-        let op = Op::new(parents.clone(), Hlc::new(1_000 + i as u64, logical), pk, payload, &sk);
+        let op = Op::new(
+            parents.clone(),
+            Hlc::new(1_000 + i as u64, logical),
+            pk,
+            payload,
+            &sk,
+        );
         parents = vec![op.op_id];
         logical = logical.saturating_add(1);
         out.push(op);
@@ -252,38 +262,48 @@ fn gen_hb_chain(seed: u64, n: usize) -> Result<Vec<Op>> {
 }
 
 fn gen_concurrent_writers(seed: u64, n: usize, peers: usize) -> Result<Vec<Op>> {
-        // N authors race on the same key; no edges between authors (true concurrency).
-        let n_authors = std::cmp::max(2, std::cmp::min(peers, 8)); // clamp to [2..8]
-    
-        // Build keypairs and per-author parent chains.
-        let sks: Vec<SigningKey> = (0..n_authors)
-            .map(|i| key_pair(seed, format!("concurrent/{i}").as_bytes()))
-            .collect();
-        let pks: Vec<[u8; 32]> = sks.iter().map(|sk| vk_to_bytes(&sk.verifying_key())).collect();
-        let mut parents: Vec<Vec<OpId>> = vec![Vec::new(); n_authors];
-    
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let a = i % n_authors;
-            let sk = &sks[a];
-            let pk = pks[a];
-            let payload = Payload::Data {
-                key: "mv:o:x".to_string(),
-                value: format!("v{i}").into_bytes(),
-            };
-            let tick = 1_000u64 + i as u64; // deterministic HLC ts
-            let op = Op::new(parents[a].clone(), Hlc::new(tick, (i as u32) + 1), pk, payload, sk);
-            parents[a].clear();
-            parents[a].push(op.op_id);
-            out.push(op);
-        }
-        Ok(out)
+    // N authors race on the same key; no edges between authors (true concurrency).
+    let n_authors = std::cmp::max(2, std::cmp::min(peers, 8)); // clamp to [2..8]
+
+    // Build keypairs and per-author parent chains.
+    let sks: Vec<SigningKey> = (0..n_authors)
+        .map(|i| key_pair(seed, format!("concurrent/{i}").as_bytes()))
+        .collect();
+    let pks: Vec<[u8; 32]> = sks
+        .iter()
+        .map(|sk| vk_to_bytes(&sk.verifying_key()))
+        .collect();
+    let mut parents: Vec<Vec<OpId>> = vec![Vec::new(); n_authors];
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = i % n_authors;
+        let sk = &sks[a];
+        let pk = pks[a];
+        let payload = Payload::Data {
+            key: "mv:o:x".to_string(),
+            value: format!("v{i}").into_bytes(),
+        };
+        let tick = 1_000u64 + i as u64; // deterministic HLC ts
+        let op = Op::new(
+            parents[a].clone(),
+            Hlc::new(tick, (i as u32) + 1),
+            pk,
+            payload,
+            sk,
+        );
+        parents[a].clear();
+        parents[a].push(op.op_id);
+        out.push(op);
     }
-    
-    fn gen_offline_revocation(seed: u64, n: usize, peers: usize) -> Result<Vec<Op>> {
-        // For now, synthesize using the concurrent generator as the op source.
-        // The policy engine (when active) will decide what to skip after a revoke.
-        gen_concurrent_writers(seed, n, peers)
+    Ok(out)
+}
+
+#[allow(dead_code)]
+fn gen_offline_revocation(seed: u64, n: usize, peers: usize) -> Result<Vec<Op>> {
+    // For now, synthesize using the concurrent generator as the op source.
+    // The policy engine (when active) will decide what to skip after a revoke.
+    gen_concurrent_writers(seed, n, peers)
 }
 
 // (No local mvreg p95 anymore; it's captured via METRICS histogram.)
@@ -293,7 +313,6 @@ fn gen_concurrent_writers(seed: u64, n: usize, peers: usize) -> Result<Vec<Op>> 
 /// - Choose a deterministic cut index; everything after the cut is considered
 ///   invalidated by a revoke and *not* inserted into the DAG.
 /// - Return (kept_ops, total_ops, skipped_due_to_policy, revoke_time_ms).
-
 
 /// Plan an offline-revocation run by splitting a linear HB chain into kept vs. skipped tail.
 /// Returns (ops_kept_for_DAG, total_requested_ops, skipped_due_to_policy, revoke_time_ms).

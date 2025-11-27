@@ -1,9 +1,9 @@
 #![cfg(feature = "audit")]
 
-use std::path::PathBuf;
-use ed25519_dalek::SigningKey;
-use ecac_store::audit::{AuditReader, AuditWriter};
 use ecac_core::audit::AuditEvent;
+use ecac_store::audit::{AuditReader, AuditWriter};
+use ed25519_dalek::SigningKey;
+use std::path::PathBuf;
 
 fn tmpdir() -> PathBuf {
     let p = std::env::temp_dir().join(format!("ecac-audit-rt-{}", uuid::Uuid::new_v4()));
@@ -14,9 +14,8 @@ fn tmpdir() -> PathBuf {
 #[test]
 fn audit_roundtrip_one_entry() {
     // fixed privkey bytes (32 bytes)
-    let sk_bytes = hex::decode(
-        "0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210"
-    ).unwrap();
+    let sk_bytes =
+        hex::decode("0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210").unwrap();
     let sk = SigningKey::from_bytes(&sk_bytes.try_into().unwrap());
 
     // arbitrary node_id that stays consistent on disk

@@ -7,17 +7,17 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dag::Dag;
+use crate::metrics::METRICS;
 use crate::op::{OpId, Payload};
 use crate::policy::{self, Action};
 use crate::state::State;
-use crate::metrics::METRICS;
 
 use std::time::Instant;
 
 #[cfg(feature = "audit")]
-use crate::audit_hook::{AuditHook, NoopAuditHook};
+use crate::audit::{AppliedReason, AuditEvent, SkipReason};
 #[cfg(feature = "audit")]
-use crate::audit::{AuditEvent, AppliedReason, SkipReason};
+use crate::audit_hook::{AuditHook, NoopAuditHook};
 
 /// Full rebuild over the DAG's activated nodes.
 pub fn replay_full(dag: &Dag) -> (State, [u8; 32]) {
@@ -83,25 +83,28 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
     if start_pos > order.len() {
         start_pos = order.len();
     }
-        // M7 counters (we accumulate locally, then bump the global registry once).
-        let mut data_total: u64 = 0;
-        let mut data_applied: u64 = 0;
-        let mut data_skipped_policy: u64 = 0;
-    
-            // Map each op id to its global topo position so we can validate
-            // “parent appears earlier” even when we’re processing only a suffix.
-            let pos_index: HashMap<OpId, usize> =
-                order.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
-        
-        for (pos, id) in order.iter().enumerate().skip(start_pos) {
-        
+    // M7 counters (we accumulate locally, then bump the global registry once).
+    let mut data_total: u64 = 0;
+    let mut data_applied: u64 = 0;
+    let mut data_skipped_policy: u64 = 0;
+
+    // Map each op id to its global topo position so we can validate
+    // “parent appears earlier” even when we’re processing only a suffix.
+    let _pos_index: HashMap<OpId, usize> = order
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
+
+    for (pos, id) in order.iter().enumerate().skip(start_pos) {
         let Some(op) = dag.get(id) else {
             continue;
         };
-                // Invalid signature => skip (no audit in non-audit build)
-                if !op.verify() {
-                    continue;
-                }
+        // Invalid signature => skip (no audit in non-audit build)
+        if !op.verify() {
+            continue;
+        }
         match &op.header.payload {
             Payload::Data { key, value } => {
                 data_total += 1;
@@ -133,10 +136,8 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
                             mv.apply_put(*id, value.clone(), |a, b| dag_is_ancestor(dag, a, b));
                             // Observe current winner count (used as a distribution).
                             // Units aren’t time; we still log via observe_ms() per the M7 API.
-                            METRICS.observe_ms(
-                                "mvreg_concurrent_winners",
-                                mv.values().len() as u64
-                            );
+                            METRICS
+                                .observe_ms("mvreg_concurrent_winners", mv.values().len() as u64);
                             data_applied += 1;
                         }
                         Action::SetAdd => {
@@ -163,7 +164,6 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
             Payload::Grant { .. } | Payload::Revoke { .. } => {}
             _ => {}
         }
-
     }
 
     // Processed count = entire order length (we traversed all).
@@ -177,14 +177,10 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
     }
 }
 
-
 // ---- Audit-enabled versions -------------------------------------------------
 
 #[cfg(feature = "audit")]
-pub fn replay_full_with_audit(
-    dag: &Dag,
-    audit: &mut dyn AuditHook,
-) -> (State, [u8; 32]) {
+pub fn replay_full_with_audit(dag: &Dag, audit: &mut dyn AuditHook) -> (State, [u8; 32]) {
     let t0 = Instant::now();
     let order = dag.topo_sort();
     let mut state = State::new();
@@ -218,7 +214,12 @@ fn apply_over_order_with_audit(
     // Detect whether any policy events exist; if none, default-allow (M2 compatibility).
     let has_policy = order.iter().any(|id| {
         dag.get(id)
-            .map(|op| matches!(op.header.payload, Payload::Grant { .. } | Payload::Revoke { .. }))
+            .map(|op| {
+                matches!(
+                    op.header.payload,
+                    Payload::Grant { .. } | Payload::Revoke { .. }
+                )
+            })
             .unwrap_or(false)
     });
 
@@ -241,11 +242,17 @@ fn apply_over_order_with_audit(
     let mut data_skipped_policy: u64 = 0;
 
     // Absolute parent sanity: map each op id to its topo index.
-    let pos_index: HashMap<OpId, usize> =
-        order.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
+    let pos_index: HashMap<OpId, usize> = order
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
 
     for (pos, id) in order.iter().enumerate().skip(start_pos) {
-        let Some(op) = dag.get(id) else { continue; };
+        let Some(op) = dag.get(id) else {
+            continue;
+        };
 
         // Invalid signature => SkippedOp(InvalidSig)
         if !op.verify() {
@@ -258,9 +265,11 @@ fn apply_over_order_with_audit(
         }
 
         // Parent sanity: every declared parent must appear earlier in topo order.
-        let parents_ok = op.header.parents.iter().all(|p| {
-            pos_index.get(p).map_or(false, |ppos| *ppos < pos)
-        });
+        let parents_ok = op
+            .header
+            .parents
+            .iter()
+            .all(|p| pos_index.get(p).map_or(false, |ppos| *ppos < pos));
         if !parents_ok {
             audit.on_event(AuditEvent::SkippedOp {
                 op_id: *id,
@@ -305,10 +314,8 @@ fn apply_over_order_with_audit(
                         Action::SetField => {
                             let mv = state.mv_field_mut(&obj, &field);
                             mv.apply_put(*id, value.clone(), |a, b| dag_is_ancestor(dag, a, b));
-                            METRICS.observe_ms(
-                                "mvreg_concurrent_winners",
-                                mv.values().len() as u64,
-                            );
+                            METRICS
+                                .observe_ms("mvreg_concurrent_winners", mv.values().len() as u64);
                             data_applied += 1;
                             audit.on_event(AuditEvent::AppliedOp {
                                 op_id: *id,
@@ -370,7 +377,6 @@ fn apply_over_order_with_audit(
         state_digest: digest,
     });
 }
-
 
 fn dag_is_ancestor(dag: &Dag, a: &OpId, b: &OpId) -> bool {
     if a == b {

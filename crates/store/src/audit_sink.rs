@@ -5,7 +5,7 @@ use ed25519_dalek::SigningKey;
 use getrandom::getrandom;
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
 

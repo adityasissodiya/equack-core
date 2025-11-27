@@ -93,8 +93,8 @@ SEG="$(printf '%s/segment-00000001.log' "$AUD")"
 [ -s "$SEG" ] || die "empty first segment"
 log "segment size: $(stat -c '%s' "$SEG" 2>/dev/null || stat -f '%z' "$SEG") bytes"
 
-# --- 2) Negative: truncation should be detected ------------------------------
-log "== negative path: truncation should fail =="
+# --- 2) Tail repair: truncation in last segment is auto-repaired -----------
+log "== tail repair: last-segment truncation should be repaired =="
 TRUNC_DIR="$WORKDIR/trunc"
 run "mkdir -p '$TRUNC_DIR' && cp -a '$AUD' '$TRUNC_DIR/'"
 TSEG="$TRUNC_DIR/audit/segment-00000001.log"
@@ -117,9 +117,9 @@ with open(p, 'rb+') as f:
 PY
 fi
 
-expect_fail_with 'truncated record' \
-  cargo run -q -p ecac-cli --features audit -- audit-verify-chain --dir "$TRUNC_DIR/audit"
-
+verify_ok "audit-verify-chain (after tail repair)" \
+cargo run -q -p ecac-cli --features audit -- audit-verify-chain --dir "$TRUNC_DIR/audit"
+ 
 # --- 3) Negative: bit flip should invalidate signature -----------------------
 log "== negative path: corruption → signature invalid (or parse error) =="
 FLIP_DIR="$WORKDIR/flip"

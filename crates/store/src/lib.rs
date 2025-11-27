@@ -1,8 +1,10 @@
+use std::sync::Arc;
+#[cfg(feature = "audit")]
+use std::sync::Mutex;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
-use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use rocksdb::{
@@ -22,20 +24,19 @@ use getrandom::getrandom;
 //use ed25519_dalek::Signature;
 use ecac_core::crypto::hash_bytes;
 use ecac_core::metrics::METRICS;
-use std::time::Instant;
 use ecac_core::{status::StatusCache, trust::TrustStore, vc::verify_vc};
+use std::time::Instant;
 
 #[cfg(feature = "audit")]
-use ed25519_dalek::SigningKey;
+use crate::audit::AuditWriter;
 #[cfg(feature = "audit")]
 use ecac_core::audit::AuditEvent;
 #[cfg(feature = "audit")]
-use crate::audit::AuditWriter;
+use ed25519_dalek::SigningKey;
 #[cfg(feature = "audit")]
 pub mod audit_sink;
 #[cfg(feature = "audit")]
 pub use audit_sink::StoreAuditHook;
-
 
 #[cfg(feature = "audit")]
 fn parse_node_sk_hex(s: &str) -> anyhow::Result<SigningKey> {
@@ -56,7 +57,6 @@ fn parse_node_sk_hex(s: &str) -> anyhow::Result<SigningKey> {
     }
     Ok(SigningKey::from_bytes(&key))
 }
-
 
 type Db = DBWithThreadMode<MultiThreaded>;
 
@@ -211,11 +211,11 @@ impl Store {
             b.put_cf(&self.cf(CF_BY_AUTHOR), k2, []);
             writes += 1;
         }
-                if writes > 0 {
-                        let t0 = Instant::now();
-                        self.db.write_opt(b, &self.write_opts())?;
-                        METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
-                    }
+        if writes > 0 {
+            let t0 = Instant::now();
+            self.db.write_opt(b, &self.write_opts())?;
+            METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
+        }
         Ok(())
     }
 }
@@ -243,26 +243,28 @@ impl Store {
             db: Arc::new(db),
             sync_writes: opts.sync_writes,
             #[cfg(feature = "audit")]
-        audit: {
-            if let Ok(hex) = std::env::var("ECAC_NODE_SK_HEX") {
-                match parse_node_sk_hex(&hex) {
-                    Ok(sk) => {
-                        let pk_bytes = sk.verifying_key().to_bytes();
-                        let node_id = hash_bytes(&pk_bytes);
-                        let mut audit_dir = path.to_path_buf();
-                        audit_dir.push("audit");
-                        std::fs::create_dir_all(&audit_dir).ok();
-                        Some(Arc::new(Mutex::new(AuditWriter::open(&audit_dir, sk, node_id)?)))
+            audit: {
+                if let Ok(hex) = std::env::var("ECAC_NODE_SK_HEX") {
+                    match parse_node_sk_hex(&hex) {
+                        Ok(sk) => {
+                            let pk_bytes = sk.verifying_key().to_bytes();
+                            let node_id = hash_bytes(&pk_bytes);
+                            let mut audit_dir = path.to_path_buf();
+                            audit_dir.push("audit");
+                            std::fs::create_dir_all(&audit_dir).ok();
+                            Some(Arc::new(Mutex::new(AuditWriter::open(
+                                &audit_dir, sk, node_id,
+                            )?)))
+                        }
+                        Err(e) => {
+                            eprintln!("audit disabled: bad ECAC_NODE_SK_HEX ({e})");
+                            None
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("audit disabled: bad ECAC_NODE_SK_HEX ({e})");
-                        None
-                    }
+                } else {
+                    None
                 }
-            } else {
-                None
-            }
-        },
+            },
         };
         // Schema guard
         const SCHEMA: &str = "ecac:v1";
@@ -439,24 +441,27 @@ impl Store {
         let expect = hash_with_domain(OP_HASH_DOMAIN, &header_bytes);
         let id_mismatch = expect != op.op_id;
         let sig_ok = op.verify() && !id_mismatch;
-    
+
         // Audit: always log ingest + whether signature verified
         #[cfg(feature = "audit")]
         if let Some(a) = &self.audit {
-                let _ = a.lock().unwrap().append(AuditEvent::IngestedOp {
-                        op_id: op.op_id,
-                        author_pk: op.header.author_pk,
-                        parents: op.header.parents.clone(),
-                        verified_sig: sig_ok,
-                    });
+            let _ = a.lock().unwrap().append(AuditEvent::IngestedOp {
+                op_id: op.op_id,
+                author_pk: op.header.author_pk,
+                parents: op.header.parents.clone(),
+                verified_sig: sig_ok,
+            });
         }
-    
+
         // Reject on bad header hash / signature
         if id_mismatch {
             return Err(anyhow!("op_id mismatch (header hash != embedded op_id)"));
         }
         if !sig_ok {
-            return Err(anyhow!("invalid signature for op {}", hex::encode(op.op_id)));
+            return Err(anyhow!(
+                "invalid signature for op {}",
+                hex::encode(op.op_id)
+            ));
         }
 
         if expect != op.op_id {
@@ -505,8 +510,8 @@ impl Store {
         b.put_cf(&self.cf(CF_BY_AUTHOR), k, []);
 
         let t0 = Instant::now();
-            self.db.write_opt(b, &self.write_opts())?;
-            METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
+        self.db.write_opt(b, &self.write_opts())?;
+        METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
 
         // DEV crash-inject: die immediately after a committed write
         if std::env::var("ECAC_CRASH_AFTER_WRITE").as_deref() == Ok("1") {
@@ -657,7 +662,7 @@ impl Store {
     pub fn persist_vc_verified(&self, cred_hash: [u8; 32], verified_cbor: &[u8]) -> Result<()> {
         let mut b = WriteBatch::default();
         b.put_cf(&self.cf(CF_VC_VERIFIED), cred_hash, verified_cbor);
-                let t0 = Instant::now();
+        let t0 = Instant::now();
         self.db.write_opt(b, &self.write_opts())?;
         METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
         Ok(())
@@ -686,11 +691,11 @@ impl Store {
         METRICS.observe_ms("checkpoint_create_ms", dt);
         #[cfg(feature = "audit")]
         if let Some(a) = &self.audit {
-                let _ = a.lock().unwrap().append(AuditEvent::Checkpoint {
-                        checkpoint_id: id,
-                        topo_idx,
-                        state_digest,
-                    });
+            let _ = a.lock().unwrap().append(AuditEvent::Checkpoint {
+                checkpoint_id: id,
+                topo_idx,
+                state_digest,
+            });
         }
         Ok(id)
     }

@@ -13,26 +13,25 @@
 //!   m.observe_ms("replay_full_ms", 42);
 //!   let csv = m.snapshot_csv(); // header + single row
 
+use once_cell::sync::Lazy;
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock,
 };
-use once_cell::sync::Lazy;
 pub static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
 /// Static histogram bucket upper bounds in milliseconds.
 /// The last bucket is +Inf (implicit).
 const MS_BUCKETS: &[u64] = &[
-    0, 1, 2, 5, 10, 20, 50, 100, 200, 500,
-    1_000, 2_000, 5_000, 10_000, 30_000,
-    60_000, 120_000, 300_000,
+    0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 120_000,
+    300_000,
 ];
 
 fn bucket_index(ms: u64) -> usize {
     match MS_BUCKETS.binary_search(&ms) {
-        Ok(idx) => idx,           // exact match to an upper bound bucket
-        Err(pos) => pos,          // first upper bound greater than ms
+        Ok(idx) => idx,  // exact match to an upper bound bucket
+        Err(pos) => pos, // first upper bound greater than ms
     }
 }
 
@@ -68,12 +67,10 @@ impl Histo {
         // fetch_max emulation
         let mut cur = self.max_ms.load(Ordering::Relaxed);
         while ms > cur {
-            match self.max_ms.compare_exchange_weak(
-                cur,
-                ms,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .max_ms
+                .compare_exchange_weak(cur, ms, Ordering::Relaxed, Ordering::Relaxed)
+            {
                 Ok(_) => break,
                 Err(prev) => cur = prev,
             }
@@ -91,7 +88,11 @@ impl Histo {
 
     /// Return (count, sum_ms, p50_ms, p95_ms, max_ms).
     fn snapshot(&self) -> (u64, u64, u64, u64, u64) {
-        let counts: Vec<u64> = self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect();
+        let counts: Vec<u64> = self
+            .buckets
+            .iter()
+            .map(|b| b.load(Ordering::Relaxed))
+            .collect();
         let total: u64 = counts.iter().sum();
         let sum_ms = self.sum_ms.load(Ordering::Relaxed);
         let max_ms = self.max_ms.load(Ordering::Relaxed);
@@ -141,36 +142,36 @@ impl Metrics {
 
     /// Increment a counter by `by` (counter is created if missing).
     pub fn inc(&self, key: &'static str, by: u64) {
-                // IMPORTANT: never hold a read guard while trying to acquire a write guard on the same lock.
-                // Using an inner scope forces the read guard to drop before we attempt the write path.
-                let cell = if let Some(existing) = {
-                    let r = self.counters.read().unwrap();
-                    r.get(key).cloned()
-                } {
-                    existing
-                } else {
-                    let mut w = self.counters.write().unwrap();
-                    w.entry(key)
-                        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-                        .clone()
-                };
+        // IMPORTANT: never hold a read guard while trying to acquire a write guard on the same lock.
+        // Using an inner scope forces the read guard to drop before we attempt the write path.
+        let cell = if let Some(existing) = {
+            let r = self.counters.read().unwrap();
+            r.get(key).cloned()
+        } {
+            existing
+        } else {
+            let mut w = self.counters.write().unwrap();
+            w.entry(key)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .clone()
+        };
         cell.fetch_add(by, Ordering::Relaxed);
     }
 
     /// Observe a timing in milliseconds into a histogram (created if missing).
     pub fn observe_ms(&self, key: &'static str, ms: u64) {
-                // Same pattern as inc(): drop read guard before taking write.
-                let h = if let Some(existing) = {
-                    let r = self.histos.read().unwrap();
-                    r.get(key).cloned()
-                } {
-                    existing
-                } else {
-                    let mut w = self.histos.write().unwrap();
-                    w.entry(key)
-                        .or_insert_with(|| Arc::new(Histo::new()))
-                        .clone()
-                };
+        // Same pattern as inc(): drop read guard before taking write.
+        let h = if let Some(existing) = {
+            let r = self.histos.read().unwrap();
+            r.get(key).cloned()
+        } {
+            existing
+        } else {
+            let mut w = self.histos.write().unwrap();
+            w.entry(key)
+                .or_insert_with(|| Arc::new(Histo::new()))
+                .clone()
+        };
         h.observe_ms(ms);
     }
 

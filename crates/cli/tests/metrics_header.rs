@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use ecac_core::metrics::METRICS;
+use std::collections::HashSet;
 
 /// Guard against accidental schema drift.
 /// We "pre-register" keys exactly like the bench does (inc/observe with zero)

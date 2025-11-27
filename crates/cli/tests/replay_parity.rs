@@ -26,7 +26,13 @@ fn gen_hb_chain(seed: u64, n: usize) -> Vec<Op> {
             key: "mv:o:x".to_string(),
             value: format!("v{i}").into_bytes(),
         };
-        let op = Op::new(parents.clone(), Hlc::new(1_000 + i as u64, logical), pk, payload, &sk);
+        let op = Op::new(
+            parents.clone(),
+            Hlc::new(1_000 + i as u64, logical),
+            pk,
+            payload,
+            &sk,
+        );
         parents = vec![op.op_id];
         logical = logical.saturating_add(1);
         out.push(op);
@@ -63,5 +69,8 @@ fn replay_parity_hb_chain_full_vs_incremental() {
     let (_state_inc, digest_inc) = ecac_core::replay::apply_incremental(&mut state_ck, &dag);
 
     // Parity: digests must match
-    assert_eq!(digest_full, digest_inc, "full vs incremental digest mismatch");
+    assert_eq!(
+        digest_full, digest_inc,
+        "full vs incremental digest mismatch"
+    );
 }

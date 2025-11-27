@@ -150,7 +150,8 @@ enum Cmd {
     /// Same as op-append, but also emits audit SkippedOp on signature failures
     #[cfg(feature = "audit")]
     OpAppendAudited {
-        #[arg(long, short)] db: PathBuf,
+        #[arg(long, short)]
+        db: PathBuf,
         input: PathBuf,
     },
     /// Deterministic replay from a RocksDB store (equals `replay <ops.cbor>`)
@@ -232,17 +233,16 @@ enum Cmd {
         author_sk_hex: String,
         output: String,
     },
-        /// Write a minimal Credential + Grant pair into a directory
-        OpMakeGrant {
-            /// Author (issuer) secret key hex (32-byte ed25519)
-            author_sk_hex: String,
-            /// Admin secret key hex (32-byte ed25519)
-            admin_sk_hex: String,
-            /// Output directory
-            out_dir: PathBuf,
-        },
+    /// Write a minimal Credential + Grant pair into a directory
+    OpMakeGrant {
+        /// Author (issuer) secret key hex (32-byte ed25519)
+        author_sk_hex: String,
+        /// Admin secret key hex (32-byte ed25519)
+        admin_sk_hex: String,
+        /// Output directory
+        out_dir: PathBuf,
+    },
     // ===== M8 audit subcommands =====
-
     /// Verify audit chain integrity (hash-link + signatures) in <dir> (default: ".audit")
     AuditVerifyChain {
         /// Audit directory (default: ".audit")
@@ -369,7 +369,11 @@ fn main() -> anyhow::Result<()> {
             if input.is_dir() {
                 for ent in fs::read_dir(&input)? {
                     let p = ent?.path();
-                    if let Some(ext) = p.extension() { if ext == "cbor" { files.push(p); } }
+                    if let Some(ext) = p.extension() {
+                        if ext == "cbor" {
+                            files.push(p);
+                        }
+                    }
                 }
                 files.sort();
             } else {
@@ -505,6 +509,8 @@ fn main() -> anyhow::Result<()> {
             }
             #[cfg(not(feature = "audit"))]
             {
+                // Silence unused variable warning when audit feature is disabled.
+                let _ = &dir;
                 eprintln!("audit feature is not enabled; rebuild with --features audit");
             }
         }
@@ -519,6 +525,8 @@ fn main() -> anyhow::Result<()> {
             }
             #[cfg(not(feature = "audit"))]
             {
+                // Silence unused variable warnings when audit feature is disabled.
+                let _ = (&dir, &out);
                 eprintln!("audit feature is not enabled; rebuild with --features audit");
             }
         }
@@ -530,6 +538,8 @@ fn main() -> anyhow::Result<()> {
             }
             #[cfg(not(feature = "audit"))]
             {
+                // Silence unused variable warning when audit feature is disabled.
+                let _ = &db;
                 eprintln!("audit feature is not enabled; rebuild with --features audit");
             }
         }
@@ -543,6 +553,8 @@ fn main() -> anyhow::Result<()> {
             }
             #[cfg(not(feature = "audit"))]
             {
+                // Silence unused variable warnings when audit feature is disabled.
+                let _ = (&dir, &segment);
                 eprintln!("audit feature is not enabled; rebuild with --features audit");
             }
         }

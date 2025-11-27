@@ -3,6 +3,8 @@ use ::futures::StreamExt;
 use anyhow::Result;
 use ecac_core::op::{Op, OpId};
 //use core::iter;
+#[cfg(feature = "net")]
+use ecac_core::metrics::METRICS;
 use libp2p::identify::{
     Behaviour as IdentifyBehaviour, Config as IdentifyConfig, Event as IdentifyEvent,
 };
@@ -29,8 +31,6 @@ use std::sync::Arc;
 use std::time::Duration; // <-- add this
 use tokio::sync::mpsc;
 use tokio::time::{Interval, MissedTickBehavior};
-#[cfg(feature = "net")]
-use ecac_core::metrics::METRICS;
 
 use crate::gossip::{announce_topic, build_gossipsub, parse_announce, topic_matches_announce};
 use crate::types::{FetchMissing, RpcFrame, SignedAnnounce};
@@ -472,7 +472,7 @@ impl Node {
     pub fn send_fetch(&mut self, peer: PeerId, req: FetchMissing) -> OutboundRequestId {
         let _want_dbg: SmallVec<[String; 4]> =
             req.want.iter().map(|id| format!("{:?}", id)).collect();
-                    #[cfg(feature = "net")]
+        #[cfg(feature = "net")]
         {
             // Count each outbound batch (our client currently batches 1 id per request).
             METRICS.inc("fetch_batches", 1);
@@ -564,7 +564,7 @@ impl Node {
             serde_cbor::from_slice(&bytes).map_err(|e| anyhow::anyhow!("decode op: {e}"))?;
         let id = op.op_id;
 
-                #[cfg(feature = "net")]
+        #[cfg(feature = "net")]
         {
             // We received an op’s bytes over the network.
             METRICS.inc("ops_fetched", 1);
@@ -572,7 +572,7 @@ impl Node {
 
         if let Some(have) = &self.have_fn {
             if (have)(&id) {
-                                #[cfg(feature = "net")]
+                #[cfg(feature = "net")]
                 {
                     // We fetched it but already had it locally.
                     METRICS.inc("ops_duplicates_dropped", 1);

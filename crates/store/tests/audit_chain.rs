@@ -1,10 +1,13 @@
 #![cfg(feature = "audit")]
 
-use ed25519_dalek::SigningKey;
-use tempfile::tempdir;
-use std::{fs, io::{Read, Write}};
-use getrandom::getrandom;
 use ecac_core::audit::AuditEvent;
+use ed25519_dalek::SigningKey;
+use getrandom::getrandom;
+use std::{
+    fs,
+    io::{Read, Write},
+};
+use tempfile::tempdir;
 
 // Minimal helper to make a node key + id.
 fn gen_node() -> (SigningKey, [u8; 32]) {
@@ -31,8 +34,16 @@ fn chain_basic() {
     let mut w = ecac_store::audit::AuditWriter::open(&audit_dir, sk, node_id).unwrap();
 
     // Append a couple of simple events (use whatever variant your core exposes).
-        let e1 = AuditEvent::Checkpoint { checkpoint_id: 0_u64, topo_idx: 0, state_digest: [0u8;32] };
-        let e2 = AuditEvent::Checkpoint { checkpoint_id: 1_u64, topo_idx: 1, state_digest: [1u8;32] };
+    let e1 = AuditEvent::Checkpoint {
+        checkpoint_id: 0_u64,
+        topo_idx: 0,
+        state_digest: [0u8; 32],
+    };
+    let e2 = AuditEvent::Checkpoint {
+        checkpoint_id: 1_u64,
+        topo_idx: 1,
+        state_digest: [1u8; 32],
+    };
 
     let s1 = w.append(e1).unwrap();
     let s2 = w.append(e2).unwrap();
@@ -51,8 +62,18 @@ fn corrupt_byte_reports_precisely() {
     let mut w = ecac_store::audit::AuditWriter::open(&audit_dir, sk, node_id).unwrap();
 
     // two entries so we can corrupt the second
-        w.append(AuditEvent::Checkpoint { checkpoint_id: 0_u64, topo_idx: 0, state_digest: [0;32] }).unwrap();
-        w.append(AuditEvent::Checkpoint { checkpoint_id: 1_u64, topo_idx: 1, state_digest: [1;32] }).unwrap();
+    w.append(AuditEvent::Checkpoint {
+        checkpoint_id: 0_u64,
+        topo_idx: 0,
+        state_digest: [0; 32],
+    })
+    .unwrap();
+    w.append(AuditEvent::Checkpoint {
+        checkpoint_id: 1_u64,
+        topo_idx: 1,
+        state_digest: [1; 32],
+    })
+    .unwrap();
     // Flip a byte inside the second CBOR blob
     let seg = audit_dir.join("segment-00000001.log");
     let mut bytes = fs::read(&seg).unwrap();
@@ -84,8 +105,18 @@ fn missing_prev_detects_gap() {
     let (sk, node_id) = gen_node();
     let mut w = ecac_store::audit::AuditWriter::open(&audit_dir, sk, node_id).unwrap();
 
-        w.append(AuditEvent::Checkpoint { checkpoint_id: 0_u64, topo_idx: 0, state_digest: [0;32] }).unwrap();
-        w.append(AuditEvent::Checkpoint { checkpoint_id: 1_u64, topo_idx: 1, state_digest: [1;32] }).unwrap();
+    w.append(AuditEvent::Checkpoint {
+        checkpoint_id: 0_u64,
+        topo_idx: 0,
+        state_digest: [0; 32],
+    })
+    .unwrap();
+    w.append(AuditEvent::Checkpoint {
+        checkpoint_id: 1_u64,
+        topo_idx: 1,
+        state_digest: [1; 32],
+    })
+    .unwrap();
 
     // Remove the first record (len+payload) so file starts at seq=2 while verifier expects 1
     let seg = audit_dir.join("segment-00000001.log");
@@ -98,7 +129,9 @@ fn missing_prev_detects_gap() {
     let r = ecac_store::audit::AuditReader::open(&audit_dir).unwrap();
     let err = r.verify().unwrap_err();
     match err {
-        ecac_store::audit::VerifyError::SeqGap { expected, found, .. } => {
+        ecac_store::audit::VerifyError::SeqGap {
+            expected, found, ..
+        } => {
             assert_eq!(expected, 1);
             assert_eq!(found, 2);
         }

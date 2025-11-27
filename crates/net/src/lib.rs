@@ -2,14 +2,14 @@
 
 pub mod gossip;
 pub mod rpc;
-pub mod sync;
 pub mod serializer;
+pub mod sync;
 pub mod transport;
-pub mod types;       // NEW: Phase 2
+pub mod types; // NEW: Phase 2
 
 // Re-export core types we’ll commonly use later (keeps imports clean)
 pub use ecac_core::op::OpId;
-pub use types::{Announce, SignedAnnounce, FetchMissing, RpcFrame, NodeId, Bloom16};
+pub use types::{Announce, Bloom16, FetchMissing, NodeId, RpcFrame, SignedAnnounce};
 
 // Placeholder newtypes for later phases (avoid re-plumbing)
 // #[allow(dead_code)]

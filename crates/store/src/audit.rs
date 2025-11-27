@@ -11,9 +11,9 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
 use ecac_core::audit::AuditEvent;
-use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-
+//use std::fs::OpenOptions;
 // ---- wire types -------------------------------------------------------------
 
 const DOMAIN: &[u8] = b"ECAC_AUDIT_V1";
@@ -28,14 +28,25 @@ fn canonical_cbor<T: serde::Serialize>(v: &T) -> Vec<u8> {
     serde_cbor::to_vec(v).expect("CBOR serialize")
 }
 
-#[derive(Clone)]
+#[allow(dead_code)] // used only via (de)serialization, not all fields are read directly
+#[derive(Clone, Serialize, Deserialize)]
 struct Entry {
+    #[allow(dead_code)]
     seq: u64,
+
+    #[allow(dead_code)]
     ts_monotonic: u64,
+
+    #[allow(dead_code)]
     prev_hash: [u8; 32],
+
+    #[allow(dead_code)]
     event: AuditEvent,
+
+    #[allow(dead_code)]
     node_id: [u8; 32],
-    signature: [u8; 64],
+
+    signature: Vec<u8>,
 }
 
 // The exact fields that are signed (no signature here).
@@ -107,7 +118,6 @@ fn atomic_write_json(path: &Path, v: &impl Serialize) -> Result<()> {
 pub struct AuditWriter {
     dir: PathBuf,
     sk: SigningKey,
-    vk: VerifyingKey,
     node_id: [u8; 32],
 
     seg_id: u32,
@@ -167,7 +177,7 @@ impl AuditWriter {
         };
 
         // If index has segments, resume last; else create first.
-        let (seg_id, mut file, mut seq, mut prev_hash, mut bytes_in_seg, _first_hash) =
+        let (seg_id, file, seq, prev_hash, bytes_in_seg, _first_hash) =
             if let Some(last) = index.segments.last() {
                 let p = dir.join(&last.path);
                 let mut f = OpenOptions::new().read(true).write(true).open(&p)?;
@@ -209,7 +219,6 @@ impl AuditWriter {
         Ok(Self {
             dir: dir.to_path_buf(),
             sk,
-            vk,
             node_id,
             seg_id,
             file,
@@ -283,9 +292,8 @@ impl AuditWriter {
             prev_hash: self.prev_hash,
             event,
             node_id: self.node_id,
-            signature: sig.to_bytes(),
+            signature: sig.to_bytes().to_vec(),
         };
-
         // Wire encoding (to_sign + signature as Vec<u8>), length-prefixed CBOR.
         let wire = EntryWire {
             to_sign,
@@ -407,6 +415,9 @@ impl AuditReader {
                 })?;
 
             let mut offset = 0u64;
+            let is_last_seg =
+                Some(seg.segment_id) == self.index.segments.last().map(|s| s.segment_id);
+            let mut last_good_offset: u64 = 0;
             loop {
                 let len = match read_u32_be(&mut f) {
                     Ok(Some(n)) => n as usize,
@@ -422,7 +433,36 @@ impl AuditReader {
                 offset += 4;
 
                 let mut buf = vec![0u8; len];
+
                 if let Err(e) = f.read_exact(&mut buf) {
+                    // Crash-tail repair: only for the *last* segment and only on EOF.
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof && is_last_seg {
+                        drop(f);
+                        eprintln!(
+                            "truncated tail repaired at {} (offset {})",
+                            path.display(),
+                            last_good_offset
+                        );
+                        let wf = OpenOptions::new().write(true).open(&path).map_err(|ioe| {
+                            VerifyError::Io {
+                                path: path.display().to_string(),
+                                offset: last_good_offset,
+                                source: ioe,
+                            }
+                        })?;
+                        if let Err(ioe) = wf.set_len(last_good_offset) {
+                            return Err(VerifyError::Io {
+                                path: path.display().to_string(),
+                                offset: last_good_offset,
+                                source: ioe,
+                            });
+                        }
+                        // Best effort; if sync fails we'll catch it next time.
+                        let _ = wf.sync_data();
+                        break;
+                    }
+
+                    // Any other segment or non-EOF read error is a hard failure.
                     return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
                         VerifyError::Truncated {
                             path: path.display().to_string(),
@@ -436,6 +476,11 @@ impl AuditReader {
                         }
                     });
                 }
+
+                // We’ve successfully read a full record: remember the boundary
+                // so we can truncate back to it if the *next* record is partial.
+                last_good_offset = offset + len as u64;
+
                 let wire: EntryWire =
                     serde_cbor::from_slice(&buf).map_err(|_| VerifyError::Truncated {
                         path: path.display().to_string(),
