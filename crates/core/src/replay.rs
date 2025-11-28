@@ -4,6 +4,12 @@
 //! Policy: build epochs over the SAME order; deny-wins gate before applying data.
 //! M2 compatibility: if the log contains **no** policy events, we default-allow.
 
+#[cfg(feature = "audit")]
+use crate::policy::DenyDetail;
+
+use crate::status::StatusCache;
+use crate::trust::TrustStore;
+
 use std::collections::{HashMap, HashSet};
 
 use crate::dag::Dag;
@@ -73,7 +79,14 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
 
     // Build epochs (cheap at our scale).
     let epoch_index = if has_policy {
-        policy::build_auth_epochs(dag, order)
+        // Try to build VC-aware epochs; if trust dir missing, fall back.
+        let trust = TrustStore::load_from_dir("./trust").ok();
+        let mut status = StatusCache::load_from_dir("./trust/status");
+        if let Some(trust) = trust {
+            policy::build_auth_epochs_with(dag, order, &trust, &mut status)
+        } else {
+            policy::build_auth_epochs(dag, order)
+        }
     } else {
         Default::default()
     };
@@ -111,9 +124,8 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
                 if let Some((action, obj, field, elem_opt, resource_tags)) =
                     policy::derive_action_and_tags(key)
                 {
-                    // Deny-wins gate
                     let allowed = if has_policy {
-                        policy::is_permitted_at_pos(
+                        policy::is_permitted_at_pos_with_reason(
                             &epoch_index,
                             &op.header.author_pk,
                             action,
@@ -121,6 +133,7 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
                             pos,
                             op.hlc(),
                         )
+                        .is_ok()
                     } else {
                         true
                     };
@@ -225,7 +238,14 @@ fn apply_over_order_with_audit(
 
     // Build epochs (cheap at our scale).
     let epoch_index = if has_policy {
-        policy::build_auth_epochs(dag, order)
+        // Try to build VC-aware epochs; if trust dir missing, fall back.
+        let trust = TrustStore::load_from_dir("./trust").ok();
+        let mut status = StatusCache::load_from_dir("./trust/status");
+        if let Some(trust) = trust {
+            policy::build_auth_epochs_with(dag, order, &trust, &mut status)
+        } else {
+            policy::build_auth_epochs(dag, order)
+        }
     } else {
         Default::default()
     };
@@ -286,26 +306,35 @@ fn apply_over_order_with_audit(
                 if let Some((action, obj, field, elem_opt, resource_tags)) =
                     policy::derive_action_and_tags(key)
                 {
-                    // Deny-wins gate
-                    let allowed = if has_policy {
-                        policy::is_permitted_at_pos(
+                    // Deny-wins gate with reason classification.
+                    let deny_detail = if has_policy {
+                        match policy::is_permitted_at_pos_with_reason(
                             &epoch_index,
                             &op.header.author_pk,
                             action,
                             &resource_tags,
                             pos,
                             op.hlc(),
-                        )
+                        ) {
+                            Ok(()) => None,
+                            Err(d) => Some(d),
+                        }
                     } else {
-                        true
+                        None
                     };
 
-                    if !allowed {
+                    if let Some(detail) = deny_detail {
                         data_skipped_policy += 1;
+                        let reason = match detail {
+                            DenyDetail::GenericDeny => SkipReason::DenyWins,
+                            DenyDetail::RevokedCred => SkipReason::RevokedCred,
+                            DenyDetail::ExpiredCred => SkipReason::ExpiredCred,
+                            DenyDetail::OutOfScope => SkipReason::OutOfScope,
+                        };
                         audit.on_event(AuditEvent::SkippedOp {
                             op_id: *id,
                             topo_idx: pos as u64,
-                            reason: SkipReason::DenyWins,
+                            reason,
                         });
                         continue;
                     }

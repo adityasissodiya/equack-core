@@ -71,6 +71,15 @@ pub enum Action {
     SetRem,
 }
 
+// New: explain *why* an op is denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyDetail {
+    RevokedCred,
+    ExpiredCred,
+    OutOfScope,
+    GenericDeny, // fallback (e.g. old deny-wins, no VC context)
+}
+
 /// Permission entry bound to a role.
 #[derive(Debug, Clone)]
 pub struct Permission {
@@ -347,6 +356,116 @@ pub fn is_permitted_at_pos(
     false
 }
 
+// Reason-aware wrapper around is_permitted_at_pos.
+// Currently just distinguishes "allowed" vs a generic deny; the VC/epoch
+// builder can later refine this to RevokedCred / ExpiredCred / OutOfScope.
+pub fn is_permitted_at_pos_with_reason(
+    idx: &EpochIndex,
+    author: &PublicKeyBytes,
+    action: Action,
+    resource_tags: &TagSet,
+    pos_idx: usize,
+    at_hlc: Hlc,
+) -> Result<(), DenyDetail> {
+    // Fast path: allowed under current policy.
+    if is_permitted_at_pos(idx, author, action, resource_tags, pos_idx, at_hlc) {
+        return Ok(());
+    }
+
+    // We only get here if the decision was "deny". Now we try to explain *why*.
+
+    // Reason flags (we'll derive the "strongest" explanation we can).
+    let mut revoked_for_resource = false;
+    let mut expired_for_resource = false;
+    let mut out_of_scope = false;
+
+    for ((subj, role), epochs) in idx.entries.iter() {
+        if subj != author {
+            continue;
+        }
+
+        // Check if this role even allows the action in principle
+        // (ignoring resource tags for the moment).
+        let mut role_allows_action = false;
+        for p in role_perms(role) {
+            if p.action == action {
+                role_allows_action = true;
+                break;
+            }
+        }
+        if !role_allows_action {
+            continue;
+        }
+
+        for ep in epochs {
+            // --- Position in topo order ---
+            let in_pos = pos_idx >= ep.start_pos
+                && ep
+                    .end_pos
+                    .map(|end| pos_idx < end)
+                    .unwrap_or(true);
+
+            let after_epoch = ep
+                .end_pos
+                .map(|end| pos_idx >= end)
+                .unwrap_or(false);
+
+            // --- Time window (HLC) ---
+            let in_time = ep
+                .not_before
+                .map(|nb| at_hlc >= nb)
+                .unwrap_or(true)
+                && ep
+                    .not_after
+                    .map(|na| at_hlc < na)
+                    .unwrap_or(true);
+
+            let after_expiry = ep
+                .not_after
+                .map(|na| at_hlc >= na)
+                .unwrap_or(false);
+
+            // --- Scope intersection ---
+            let scope_intersects = !ep.scope.is_disjoint(resource_tags);
+
+            // Revoked: there *was* an epoch whose scope covered this resource,
+            // but it has been closed by a Revoke before this topo position.
+            if scope_intersects && after_epoch {
+                revoked_for_resource = true;
+            }
+
+            // Expired: in terms of topo position the epoch would still be relevant,
+            // but the HLC is now beyond its not_after guard.
+            if scope_intersects && in_pos && after_expiry {
+                expired_for_resource = true;
+            }
+
+            // Out-of-scope: there is a valid epoch for this subject/role at this
+            // pos+time, but its scope does not intersect the resource tags.
+            if in_pos && in_time && !scope_intersects {
+                out_of_scope = true;
+            }
+        }
+    }
+
+    // Priority order: revocation > expiry > out-of-scope > generic.
+    if revoked_for_resource {
+        return Err(DenyDetail::RevokedCred);
+    }
+    if expired_for_resource {
+        return Err(DenyDetail::ExpiredCred);
+    }
+    if out_of_scope {
+        return Err(DenyDetail::OutOfScope);
+    }
+
+    // Either:
+    //  - no epochs at all for this subject/action, or
+    //  - epochs exist but they never meaningfully interacted with this resource.
+    // In both cases we fall back to a generic deny.
+    Err(DenyDetail::GenericDeny)
+}
+
 // --------------------
 // Helpers (JWT verify)
 
@@ -516,4 +635,128 @@ pub fn build_auth_epochs_with(
         METRICS.inc("revocations_seen", revocations_seen);
     }
     idx
+}
+
+// ---------------------------------------------------------------------------
+// Tests for deny-detail classification
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pk(fill: u8) -> PublicKeyBytes {
+        [fill; 32]
+    }
+
+    fn tagset(tags: &[&str]) -> TagSet {
+        let mut t = TagSet::new();
+        for s in tags {
+            t.insert((*s).to_string());
+        }
+        t
+    }
+
+    #[test]
+    fn deny_reason_revoked() {
+        let author = pk(1);
+        let mut idx = EpochIndex::default();
+
+        // Epoch was open on scope {"hv"} then closed at end_pos=5
+        idx.entries.insert(
+            (author, "editor".to_string()),
+            vec![Epoch {
+                scope: tagset(&["hv"]),
+                start_pos: 0,
+                end_pos: Some(5),
+                not_before: None,
+                not_after: None,
+            }],
+        );
+
+        let res = is_permitted_at_pos_with_reason(
+            &idx,
+            &author,
+            Action::SetField,
+            &tagset(&["hv"]),
+            /*pos_idx=*/ 6,
+            Hlc::new(0, 0),
+        );
+
+        assert_eq!(res, Err(DenyDetail::RevokedCred));
+    }
+
+    #[test]
+    fn deny_reason_expired() {
+        let author = pk(2);
+        let mut idx = EpochIndex::default();
+
+        // Epoch still covers the topo position but has expired in time.
+        idx.entries.insert(
+            (author, "editor".to_string()),
+            vec![Epoch {
+                scope: tagset(&["hv"]),
+                start_pos: 0,
+                end_pos: None,
+                not_before: None,
+                not_after: Some(Hlc::new(10, 0)),
+            }],
+        );
+
+        let res = is_permitted_at_pos_with_reason(
+            &idx,
+            &author,
+            Action::SetField,
+            &tagset(&["hv"]),
+            /*pos_idx=*/ 1,
+            Hlc::new(20, 0),
+        );
+
+        assert_eq!(res, Err(DenyDetail::ExpiredCred));
+    }
+
+    #[test]
+    fn deny_reason_out_of_scope() {
+        let author = pk(3);
+        let mut idx = EpochIndex::default();
+
+        // Epoch is live but scoped to "mech" while resource is "hv".
+        idx.entries.insert(
+            (author, "editor".to_string()),
+            vec![Epoch {
+                scope: tagset(&["mech"]),
+                start_pos: 0,
+                end_pos: None,
+                not_before: None,
+                not_after: None,
+            }],
+        );
+
+        let res = is_permitted_at_pos_with_reason(
+            &idx,
+            &author,
+            Action::SetField,
+            &tagset(&["hv"]),
+            /*pos_idx=*/ 1,
+            Hlc::new(0, 0),
+        );
+
+        assert_eq!(res, Err(DenyDetail::OutOfScope));
+    }
+
+    #[test]
+    fn deny_reason_generic_when_no_epochs() {
+        let author = pk(4);
+        let idx = EpochIndex::default();
+
+        let res = is_permitted_at_pos_with_reason(
+            &idx,
+            &author,
+            Action::SetField,
+            &tagset(&["hv"]),
+            /*pos_idx=*/ 0,
+            Hlc::new(0, 0),
+        );
+
+        assert_eq!(res, Err(DenyDetail::GenericDeny));
+    }
 }

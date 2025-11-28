@@ -66,11 +66,13 @@ struct PersistVerifiedVc {
     issuer: String,
     subject_pk: [u8; 32],
     role: String,
-    scope_tags: Vec<String>,
+    // IMPORTANT: the field name must be `scope` so CBOR matches
+    // `VerifiedVcPersist` in ecac-store.
+    scope: Vec<String>,
     nbf_ms: u64,
     exp_ms: u64,
-    status_list_id: Option<String>, // <-- was String
-    status_index: Option<u32>,      // <-- was u32
+    status_list_id: Option<String>,
+    status_index: Option<u32>,
     cred_hash: [u8; 32],
 }
 
@@ -112,11 +114,12 @@ pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
         issuer: v.issuer.clone(),
         subject_pk: v.subject_pk,
         role: v.role.clone(),
-        scope_tags: v.scope_tags.iter().cloned().collect(),
+        // keep iteration order identical to store’s VerifiedVcPersist
+        scope: v.scope_tags.iter().cloned().collect(),
         nbf_ms: v.nbf_ms,
         exp_ms: v.exp_ms,
-        status_list_id: v.status_list_id.clone(), // now matches Option<String>
-        status_index: v.status_index,             // now matches Option<u32>
+        status_list_id: v.status_list_id.clone(),
+        status_index: v.status_index,
         cred_hash: v.cred_hash,
     };
 
