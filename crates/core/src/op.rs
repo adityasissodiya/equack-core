@@ -74,6 +74,29 @@ pub enum Payload {
         at: Hlc,
     },
 
+    /// M9: KeyGrant binds a subject to a (tag, key_version) for read access,
+    /// backed by a VC identified via `cred_hash`.
+    ///
+    /// - `subject_pk`: reader identity
+    /// - `tag`: logical confidentiality tag (e.g., "hv", "mech")
+    /// - `key_version`: symmetric key version for this tag
+    /// - `cred_hash`: blake3 over the compact VC bytes (same as Grant)
+    KeyGrant {
+        subject_pk: PublicKeyBytes,
+        tag: String,
+        key_version: u32,
+        cred_hash: [u8; 32],
+    },
+
+    /// M9: KeyRotate updates the symmetric key for a given tag to `new_version`.
+    /// Prototype design: `new_key` is placed in the log (signed by KeyAdmin);
+    /// import into the local keyring is policy-gated.
+    KeyRotate {
+        tag: String,
+        new_version: u32,
+        new_key: Vec<u8>,
+    },
+ 
     #[serde(other)]
     _Reserved,
 }

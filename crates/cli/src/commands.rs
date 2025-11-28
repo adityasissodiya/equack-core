@@ -13,7 +13,7 @@ use std::path::Path;
 // emit SkippedOp etc.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ecac_core::crypto::vk_to_bytes;
+use ecac_core::crypto::{vk_to_bytes, derive_enc_aad, decrypt_value, EncV1};
 use ecac_core::hlc::Hlc;
 use ecac_core::op::{CredentialFormat, Op, Payload};
 use ecac_core::serialize::canonical_cbor;
@@ -21,6 +21,9 @@ use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
 use ecac_store::Store;
+use ecac_core::dag::Dag;
+use ecac_core::replay::replay_full;
+use ecac_core::state::FieldValue;
 use serde::{Deserialize, Serialize};
 
 // --- local hex helpers (avoid reaching into main.rs) ---
@@ -36,6 +39,13 @@ fn to_hex<T: AsRef<[u8]>>(v: T) -> String {
 }
 fn to_hex32(v: &[u8; 32]) -> String {
     to_hex(v)
+}
+
+fn bytes_to_display(v: &[u8]) -> String {
+    match std::str::from_utf8(v) {
+        Ok(s) => s.to_string(),
+        Err(_) => to_hex(v),
+    }
 }
 
 fn hex_nibble(b: u8) -> Result<u8> {
@@ -58,6 +68,20 @@ fn parse_sk_hex(hex: &str) -> Result<SigningKey> {
         key[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
     }
     Ok(SigningKey::from_bytes(&key))
+}
+
+
+fn parse_pk_hex(hex: &str) -> Result<[u8; 32]> {
+    let s = hex.trim();
+    if s.len() != 64 {
+        return Err(anyhow!("expected 64 hex chars for ed25519 public key"));
+    }
+    let b = s.as_bytes();
+    let mut key = [0u8; 32];
+    for i in 0..32 {
+        key[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
+    }
+    Ok(key)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -245,6 +269,158 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
         if value { 1 } else { 0 }
     );
     println!("wrote {}", dir.display());
+    Ok(())
+}
+
+
+/// Emit a KeyGrant op bound to (subject_pk, tag, key_version) and backed by a VC.
+/// Requirements:
+///  - ECAC_DB selects the RocksDB store (default ".ecac.db").
+///  - ECAC_KEYADMIN_SK_HEX is the key admin ed25519 SK (32-byte hex).
+///  - ./trust and ./trust/status exist and contain issuer + status metadata.
+pub fn cmd_grant_key(
+    subject_pk_hex: &str,
+    tag: &str,
+    version: u32,
+    vc_path: &str,
+) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Parse subject public key.
+    let subject_pk = parse_pk_hex(subject_pk_hex)?;
+
+    // Open store (for keyring + DAG heads).
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Ensure the keyring actually has a key for (tag, version).
+    if store.get_tag_key(tag, version)?.is_none() {
+        return Err(anyhow!(
+            "no key for tag='{}', version={} in keyring; run keyrotate first",
+            tag,
+            version
+        ));
+    }
+
+    // Load and verify the VC, extract cred_hash and subject.
+    let compact = fs::read(vc_path)?;
+    let trust =
+        TrustStore::load_from_dir("./trust").map_err(|e| anyhow!("trust load failed: {:?}", e))?;
+    let mut status = StatusCache::load_from_dir("./trust/status");
+    let v = verify_vc(&compact, &trust, &mut status)
+        .map_err(|e| anyhow!("VC verify failed: {:?}", e))?;
+
+    if v.subject_pk != subject_pk {
+        return Err(anyhow!(
+            "subject_pk_hex does not match VC subject_pk (VC subject is {})",
+            to_hex32(&v.subject_pk)
+        ));
+    }
+
+    let cred_hash = v.cred_hash;
+
+    // Signer for KeyGrant: ECAC_KEYADMIN_SK_HEX
+    let admin_sk_hex = std::env::var("ECAC_KEYADMIN_SK_HEX")
+        .map_err(|_| anyhow!("ECAC_KEYADMIN_SK_HEX not set (32-byte ed25519 SK hex)"))?;
+    let admin_sk = parse_sk_hex(&admin_sk_hex)?;
+    let admin_pk = vk_to_bytes(&admin_sk.verifying_key());
+
+    // Parents: current DAG heads.
+    let parents = store.heads(8).unwrap_or_default();
+
+    // HLC
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let hlc = Hlc::new(now_ms, 1);
+
+    let op = Op::new(
+        parents,
+        hlc,
+        admin_pk,
+        Payload::KeyGrant {
+            subject_pk,
+            tag: tag.to_string(),
+            key_version: version,
+            cred_hash,
+        },
+        &admin_sk,
+    );
+
+    let bytes = canonical_cbor(&op);
+    let id = store.put_op_cbor(&bytes)?;
+
+    println!("keygrant_op_id={}", to_hex32(&id));
+    println!("subject_pk={}", subject_pk_hex);
+    println!("tag={} key_version={}", tag, version);
+    println!("cred_hash={}", to_hex32(&cred_hash));
+    Ok(())
+}
+
+/// Rotate the symmetric key for a given tag:
+///  - Compute next key_version = max_version(tag) + 1 (or 1 if none).
+///  - Derive key bytes from (db_uuid, tag, version) via blake3 for reproducibility.
+///  - Store in keyring CF.
+///  - Emit a KeyRotate op signed by ECAC_KEYADMIN_SK_HEX.
+pub fn cmd_keyrotate(tag: &str) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Open store via ECAC_DB or default ".ecac.db"
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Compute next key_version for this tag.
+    let next_version = match store.max_key_version_for_tag(tag)? {
+        Some(cur) => cur.checked_add(1).ok_or_else(|| anyhow!("key_version overflow"))?,
+        None => 1,
+    };
+
+    // Derive a 32-byte key from (db_uuid, tag, version) using blake3.
+    // This is deterministic per-DB but looks random and is fine for tests/eval.
+    let db_uuid = store.db_uuid()?;
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&db_uuid);
+    buf.extend_from_slice(tag.as_bytes());
+    buf.extend_from_slice(&next_version.to_be_bytes());
+    let key = blake3_hash32(&buf);
+
+    // Persist in keyring.
+    store.put_tag_key(tag, next_version, &key)?;
+
+    // Signer for KeyRotate: ECAC_KEYADMIN_SK_HEX
+    let admin_sk_hex = std::env::var("ECAC_KEYADMIN_SK_HEX")
+        .map_err(|_| anyhow!("ECAC_KEYADMIN_SK_HEX not set (32-byte ed25519 SK hex)"))?;
+    let admin_sk = parse_sk_hex(&admin_sk_hex)?;
+    let admin_pk = vk_to_bytes(&admin_sk.verifying_key());
+
+    // Use current DAG heads as parents where possible.
+    let parents = store.heads(8).unwrap_or_default();
+
+    // HLC: use wall-clock ms, logical=1.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let hlc = Hlc::new(now_ms, 1);
+
+    let op = Op::new(
+        parents,
+        hlc,
+        admin_pk,
+        Payload::KeyRotate {
+            tag: tag.to_string(),
+            new_version: next_version,
+            new_key: key.to_vec(),
+        },
+        &admin_sk,
+    );
+
+    let bytes = canonical_cbor(&op);
+    let id = store.put_op_cbor(&bytes)?;
+
+    println!("tag={} new_version={}", tag, next_version);
+    println!("keyrotate_op_id={}", to_hex32(&id));
     Ok(())
 }
 
@@ -909,4 +1085,134 @@ pub fn cmd_audit_verify_full(db_dir_opt: Option<&str>) -> Result<()> {
     eprintln!("replay summary: {:?}", sum(&want));
     eprintln!("audit  summary: {:?}", sum(&have));
     Err(anyhow::anyhow!("audit decisions diverge"))
+}
+
+// ---- M9 CLI: show logical field value with key/VC gating --------------------
+
+/// Show the logical value of <obj>.<field> as visible to a given subject.
+///
+/// Source of truth:
+///   - Ops: RocksDB store selected via ECAC_DB or default ".ecac.db".
+///   - Keys: keyring CF in the same store.
+///   - Grants: KeyGrant ops in the log.
+///
+/// Behaviour:
+///   - If the winning value is plaintext, we print it (UTF-8 or hex).
+///   - If the winning value is EncV1, we only decrypt if:
+///       * there is a KeyGrant(subject_pk, tag, key_version), AND
+///       * the keyring has a key for (tag, key_version), AND
+///       * decryption with AAD = derive_enc_aad(op_id, obj, field) succeeds.
+///   - Otherwise we print "<redacted>".
+pub fn cmd_show(obj: &str, field: &str, subject_pk_hex: &str) -> Result<()> {
+    // Parse subject PK.
+    let subject_pk = parse_pk_hex(subject_pk_hex)?;
+
+    // Open store and load all ops in topo order.
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+    let ids = store.topo_ids()?;
+    let blobs = store.load_ops_cbor(&ids)?;
+
+    // Build DAG and keep a Vec<Op> for scanning grants.
+    let mut dag = Dag::new();
+    let mut ops = Vec::with_capacity(blobs.len());
+    for b in blobs {
+        let op: Op = serde_cbor::from_slice(&b)?;
+        dag.insert(op.clone());
+        ops.push(op);
+    }
+
+    // Deterministic replay (policy enforced in core).
+    let (state, _digest) = replay_full(&dag);
+
+    // Resolve field.
+    let Some(fields) = state.objects.get(obj) else {
+        println!(r#"{{"error":"object not found","obj":"{}"}}"#, obj);
+        return Ok(());
+    };
+    let Some(fv) = fields.get(field) else {
+        println!(
+            r#"{{"error":"field not found","obj":"{}","field":"{}"}}"#,
+            obj, field
+        );
+        return Ok(());
+    };
+
+    // Helper: does the log contain a KeyGrant for this (subject, tag, version)?
+    let has_keygrant = |tag: &str, ver: u32| -> bool {
+        for op in &ops {
+            if let Payload::KeyGrant {
+                subject_pk: spk,
+                tag: t,
+                key_version,
+                ..
+            } = &op.header.payload
+            {
+                if spk == &subject_pk && t == tag && *key_version == ver {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    let visible: Option<String> = match fv {
+        FieldValue::MV(mv) => {
+            // Iterate winner set in deterministic OpId order.
+            let mut candidate: Option<String> = None;
+            for (op_id, val) in mv.winners_with_tags() {
+                if val.is_empty() {
+                    continue;
+                }
+
+                // Try to interpret as EncV1 envelope first.
+                let maybe_plain = match serde_cbor::from_slice::<EncV1>(val) {
+                    Ok(enc) => {
+                        // Encrypted: require KeyGrant + key + successful decrypt.
+                        if !has_keygrant(&enc.tag, enc.key_version) {
+                            None
+                        } else {
+                            match store.get_tag_key(&enc.tag, enc.key_version) {
+                                Ok(Some(key)) => {
+                                    let aad = derive_enc_aad(op_id, obj, field);
+                                    if let Some(pt) = decrypt_value(&key, &enc, &aad) {
+                                        Some(bytes_to_display(&pt))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Ok(None) => None,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Plaintext: always visible.
+                        Some(bytes_to_display(val))
+                    }
+                };
+
+                if let Some(s) = maybe_plain {
+                    candidate = Some(s);
+                    break;
+                }
+            }
+            candidate
+        }
+        FieldValue::Set(set) => {
+            // For now, sets are not M9-encrypted; show a deterministic JSON-ish projection.
+            let mut elems = Vec::new();
+            for (ek, v) in set.iter_present() {
+                elems.push(format!(r#"{{"key":"{}","value":"{}"}}"#, ek, to_hex(&v)));
+            }
+            Some(format!(r#"[{}]"#, elems.join(",")))
+        }
+    };
+
+    if let Some(v) = visible {
+        println!("{}", v);
+    } else {
+        println!("\"<redacted>\"");
+    }
+    Ok(())
 }

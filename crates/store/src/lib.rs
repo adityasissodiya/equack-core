@@ -63,6 +63,7 @@ type Db = DBWithThreadMode<MultiThreaded>;
 const CF_OPS: &str = "ops";
 const CF_EDGES: &str = "edges";
 const CF_BY_AUTHOR: &str = "by_author";
+const CF_KEYS: &str = "keys";
 const CF_VC_RAW: &str = "vc_raw";
 const CF_VC_VERIFIED: &str = "vc_verified";
 const CF_CHECKPOINTS: &str = "checkpoints";
@@ -159,6 +160,41 @@ fn composite_author_key(
     k
 }
 
+/// Encode (tag, version) into an ordered RocksDB key for the keyring CF.
+/// Layout: [tag_len:u8][tag_bytes...][version_be:u32].
+#[inline]
+fn encode_tag_version_key(tag: &str, version: u32) -> Vec<u8> {
+    let tag_bytes = tag.as_bytes();
+    assert!(
+        tag_bytes.len() <= u8::MAX as usize,
+        "tag too long to encode in keyring"
+    );
+    let mut k = Vec::with_capacity(1 + tag_bytes.len() + 4);
+    k.push(tag_bytes.len() as u8);
+    k.extend_from_slice(tag_bytes);
+    k.extend_from_slice(&version.to_be_bytes());
+    k
+}
+
+/// Decode a keyring CF key back into (tag, version).
+/// Returns None for malformed keys; used when scanning.
+#[inline]
+fn decode_tag_version_key(raw: &[u8]) -> Option<(String, u32)> {
+    if raw.len() < 1 + 4 {
+        return None;
+    }
+    let len = raw[0] as usize;
+    if raw.len() != 1 + len + 4 {
+        return None;
+    }
+    let tag_bytes = &raw[1..1 + len];
+    let tag = std::str::from_utf8(tag_bytes).ok()?.to_string();
+    let mut v = [0u8; 4];
+    v.copy_from_slice(&raw[1 + len..]);
+    let ver = u32::from_be_bytes(v);
+    Some((tag, ver))
+}
+
 #[cfg(feature = "audit")]
 pub mod audit;
 
@@ -236,6 +272,7 @@ impl Store {
             ColumnFamilyDescriptor::new(CF_VC_RAW, Options::default()),
             ColumnFamilyDescriptor::new(CF_VC_VERIFIED, Options::default()),
             ColumnFamilyDescriptor::new(CF_CHECKPOINTS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_KEYS, Options::default()),
             ColumnFamilyDescriptor::new(CF_META, Options::default()),
         ];
         let db = Db::open_cf_descriptors(&db_opts, path, cfs)?;
@@ -887,5 +924,59 @@ impl Store {
         } else {
             Ok(1)
         }
+    }
+
+    // -----------------------------
+    // Keyring persistence (M9)
+    // -----------------------------
+
+    /// Store a symmetric key for (tag, version) in the keyring CF.
+    /// Overwrites any existing value for that tuple.
+    pub fn put_tag_key(&self, tag: &str, version: u32, key: &[u8; 32]) -> Result<()> {
+        let mut b = WriteBatch::default();
+        let k = encode_tag_version_key(tag, version);
+        b.put_cf(&self.cf(CF_KEYS), k, key);
+        let t0 = Instant::now();
+        self.db.write_opt(b, &self.write_opts())?;
+        METRICS.observe_ms("batch_write_ms", t0.elapsed().as_millis() as u64);
+        Ok(())
+    }
+
+    /// Load the symmetric key bytes for (tag, version), if present.
+    pub fn get_tag_key(&self, tag: &str, version: u32) -> Result<Option<[u8; 32]>> {
+        if let Some(v) = self
+            .db
+            .get_cf(&self.cf(CF_KEYS), &encode_tag_version_key(tag, version))?
+        {
+            anyhow::ensure!(
+                v.len() == 32,
+                "key for ({}, {}) must be 32 bytes, got {}",
+                tag,
+                version,
+                v.len()
+            );
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&v);
+            Ok(Some(out))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Return the highest key_version stored for a given tag, if any.
+    ///
+    /// This is enough for `keyrotate <tag>` to pick `current_version + 1`.
+    pub fn max_key_version_for_tag(&self, tag: &str) -> Result<Option<u32>> {
+        let mut max: Option<u32> = None;
+        let it = self.db.iterator_cf(&self.cf(CF_KEYS), IteratorMode::Start);
+        for kv in it {
+            let (k, _v) = kv?;
+            if let Some((t, ver)) = decode_tag_version_key(&k) {
+                if t == tag {
+                    max = Some(max.map_or(ver, |cur| cur.max(ver)));
+                }
+            }
+        }
+        Ok(max)
     }
 }

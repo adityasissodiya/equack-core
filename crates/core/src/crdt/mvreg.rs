@@ -92,4 +92,10 @@ impl MVReg {
     pub fn is_empty(&self) -> bool {
         self.winners.is_empty()
     }
+
+    /// Expose the current winner set as (tag, value) pairs.
+    /// Order is deterministic by OpId (BTreeMap key order).
+    pub fn winners_with_tags(&self) -> impl Iterator<Item = (&OpId, &Vec<u8>)> {
+        self.winners.iter()
+    }
 }

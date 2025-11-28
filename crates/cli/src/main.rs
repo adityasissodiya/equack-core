@@ -32,7 +32,13 @@
 //!      - Emits Credential + Grant ops (CBOR) after verifying the VC.
 //!   6) vc-status-set <list_id> <index> <0|1|true|false|on|off>
 //!      - Flips a single bit in trust/status/<list_id>.bin (little-endian bit order).
-//!
+//!   7) keyrotate <tag>
+//!      - Derive a new key_version for <tag>, store it in the keyring, and emit a KeyRotate op.
+//!   8) grant-key <subject_pk> <tag> <version> <vc.jwt>
+//!      - Verify the VC and emit a KeyGrant op bound to (subject_pk, tag, version).
+//!   9) show <obj> <field> --subject-pk <hex>
+//!      - Replay from the store and print the logical field value as visible to the subject
+//!        (plaintext if decryptable; "<redacted>" otherwise).
 //! Notes:
 //!   - DAG ignores ops whose parents are unknown (pending); replay only uses activated ops.
 //!   - Deny-wins gate is enforced iff the log contains *any* Grant/Revoke events.
@@ -137,6 +143,46 @@ enum Cmd {
         //value: bool,
         /// Value to set: 1/0/true/false/on/off
         value: String,
+    },
+
+    /// Rotate a symmetric key for a confidentiality tag and emit a KeyRotate op.
+    ///
+    /// DB is selected via ECAC_DB or defaults to ".ecac.db".
+    #[command(name = "keyrotate")]
+    KeyRotate {
+        /// Logical tag name (e.g., "hv", "mech", "confidential")
+        tag: String,
+    },
+
+    /// Emit a KeyGrant op for a subject on (tag, key_version) backed by a VC.
+    ///
+    /// - subject_pk is 32-byte ed25519 public key hex.
+    /// - VC is verified under ./trust and ./trust/status.
+    /// - DB is selected via ECAC_DB or defaults to ".ecac.db".
+    GrantKey {
+        /// Subject public key (32-byte ed25519) hex
+        subject_pk: String,
+        /// Logical confidentiality tag ("hv", "mech", ...)
+        tag: String,
+        /// Symmetric key version for this tag
+        version: u32,
+        /// Path to compact JWS (JWT-VC)
+        vc: PathBuf,
+    },
+
+    /// Show the logical value of <obj>.<field> as visible to a given subject.
+    ///
+    /// - Replays from the RocksDB store (ECAC_DB or ".ecac.db").
+    /// - Uses local keyring + KeyGrant ops to try decryption.
+    /// - Prints plaintext or "<redacted>".
+    Show {
+        /// Object id
+        obj: String,
+        /// Field name
+        field: String,
+        /// Subject public key (32-byte ed25519) hex
+        #[arg(long = "subject-pk")]
+        subject_pk: String,
     },
 
     /// Append op(s) from CBOR file or directory into a RocksDB store
@@ -333,6 +379,27 @@ fn main() -> anyhow::Result<()> {
         } => {
             let v = parse_bool_flag(&value)?;
             commands::cmd_vc_status_set(&list_id, index, v)?;
+        }
+
+        Cmd::KeyRotate { tag } => {
+            commands::cmd_keyrotate(&tag)?;
+        }
+
+        Cmd::GrantKey {
+            subject_pk,
+            tag,
+            version,
+            vc,
+        } => {
+            commands::cmd_grant_key(&subject_pk, &tag, version, vc.as_os_str().to_str().unwrap())?;
+        }
+
+        Cmd::Show {
+            obj,
+            field,
+            subject_pk,
+        } => {
+            commands::cmd_show(&obj, &field, &subject_pk)?;
         }
         Cmd::OpAppend { db, input } => {
             use ecac_store::Store;

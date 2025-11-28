@@ -116,6 +116,30 @@ fn role_perms(role: &str) -> &'static [Permission] {
     }
 }
 
+/// Role → readable tags (M9 read-control).
+///
+/// For now we keep this simple:
+/// - "editor" can read all tags we currently use ("hv", "mech")
+/// - plus a reserved "confidential" tag that will mark encrypted fields.
+static EDITOR_READ_TAGS: once_cell::sync::Lazy<TagSet> = once_cell::sync::Lazy::new(|| {
+    let mut t = TagSet::new();
+    t.insert("hv".to_string());
+    t.insert("mech".to_string());
+    t.insert("confidential".to_string());
+    t
+});
+
+fn role_read_tags(role: &str) -> &'static TagSet {
+    match role {
+        "editor" => &EDITOR_READ_TAGS,
+        _ => {
+            // Static empty set for roles with no read privileges.
+            static EMPTY: once_cell::sync::Lazy<TagSet> = once_cell::sync::Lazy::new(TagSet::new);
+            &EMPTY
+        }
+    }
+}
+
 /// Static resource tags for (obj,field). Keep deterministic.
 pub fn tags_for(obj: &str, field: &str) -> TagSet {
     let mut t = TagSet::new();
@@ -399,31 +423,16 @@ pub fn is_permitted_at_pos_with_reason(
 
         for ep in epochs {
             // --- Position in topo order ---
-            let in_pos = pos_idx >= ep.start_pos
-                && ep
-                    .end_pos
-                    .map(|end| pos_idx < end)
-                    .unwrap_or(true);
+            let in_pos =
+                pos_idx >= ep.start_pos && ep.end_pos.map(|end| pos_idx < end).unwrap_or(true);
 
-            let after_epoch = ep
-                .end_pos
-                .map(|end| pos_idx >= end)
-                .unwrap_or(false);
+            let after_epoch = ep.end_pos.map(|end| pos_idx >= end).unwrap_or(false);
 
             // --- Time window (HLC) ---
-            let in_time = ep
-                .not_before
-                .map(|nb| at_hlc >= nb)
-                .unwrap_or(true)
-                && ep
-                    .not_after
-                    .map(|na| at_hlc < na)
-                    .unwrap_or(true);
+            let in_time = ep.not_before.map(|nb| at_hlc >= nb).unwrap_or(true)
+                && ep.not_after.map(|na| at_hlc < na).unwrap_or(true);
 
-            let after_expiry = ep
-                .not_after
-                .map(|na| at_hlc >= na)
-                .unwrap_or(false);
+            let after_expiry = ep.not_after.map(|na| at_hlc >= na).unwrap_or(false);
 
             // --- Scope intersection ---
             let scope_intersects = !ep.scope.is_disjoint(resource_tags);
@@ -464,6 +473,72 @@ pub fn is_permitted_at_pos_with_reason(
     //  - epochs exist but they never meaningfully interacted with this resource.
     // In both cases we fall back to a generic deny.
     Err(DenyDetail::GenericDeny)
+}
+
+/// Check whether a subject is allowed to **read** data protected by a given tag
+/// and key version at a specific topo position + HLC.
+///
+/// M9 model sketch:
+///   - Role → read-tags mapping is static (`role_read_tags`).
+///   - Epochs are still VC-based (`Grant` / `Revoke`) over tag scopes.
+///   - Key version is threaded through the API because KeyGrant/KeyRotate
+///     semantics will refine this later; for now we ignore `key_version`
+///     and rely purely on role + tag-scope epochs.
+///
+/// This function is intentionally separate from `is_permitted_at_pos`, which
+/// governs **write** authorization.
+pub fn can_read_tag_version(
+    idx: &EpochIndex,
+    subject: &PublicKeyBytes,
+    tag: &str,
+    key_version: u32,
+    pos_idx: usize,
+    at_hlc: Hlc,
+) -> bool {
+    // `key_version` is carried for future refinement (KeyGrant epochs), but
+    // in this first M9 step we only gate on role + tag-scoped epochs.
+    let _ = key_version;
+
+    // Treat the protected resource as having exactly this tag.
+    let mut resource_tags = TagSet::new();
+    resource_tags.insert(tag.to_string());
+
+    for ((subj, role), epochs) in idx.entries.iter() {
+        if subj != subject {
+            continue;
+        }
+
+        // Role must allow reading this tag at all.
+        if !role_read_tags(role).contains(tag) {
+            continue;
+        }
+
+        for ep in epochs {
+            if pos_idx < ep.start_pos {
+                continue;
+            }
+            if let Some(end) = ep.end_pos {
+                if pos_idx >= end {
+                    continue;
+                }
+            }
+            if ep.scope.is_disjoint(&resource_tags) {
+                continue;
+            }
+            if let Some(nbf) = ep.not_before {
+                if at_hlc < nbf {
+                    continue;
+                }
+            }
+            if let Some(naf) = ep.not_after {
+                if at_hlc >= naf {
+                    continue;
+                }
+            }
+            return true;
+        }
+    }
+    false
 }
 
 // --------------------

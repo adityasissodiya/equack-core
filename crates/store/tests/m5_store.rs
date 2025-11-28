@@ -95,6 +95,8 @@ fn open_raw_db(p: &Path) -> DBWithThreadMode<MultiThreaded> {
         ColumnFamilyDescriptor::new("vc_raw", Options::default()),
         ColumnFamilyDescriptor::new("vc_verified", Options::default()),
         ColumnFamilyDescriptor::new("checkpoints", Options::default()),
+        // M9 keyring CF (must match Store::open order)
+        ColumnFamilyDescriptor::new("keys", Options::default()),
         ColumnFamilyDescriptor::new("meta", Options::default()),
     ];
     DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, p, cfs).expect("open raw db")
