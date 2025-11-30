@@ -96,7 +96,7 @@ pub enum Payload {
         new_version: u32,
         new_key: Vec<u8>,
     },
- 
+
     #[serde(other)]
     _Reserved,
 }

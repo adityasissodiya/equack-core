@@ -13,17 +13,17 @@ use std::path::Path;
 // emit SkippedOp etc.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ecac_core::crypto::{vk_to_bytes, derive_enc_aad, decrypt_value, EncV1};
+use ecac_core::crypto::{decrypt_value, derive_enc_aad, vk_to_bytes, EncV1};
+use ecac_core::dag::Dag;
 use ecac_core::hlc::Hlc;
 use ecac_core::op::{CredentialFormat, Op, Payload};
+use ecac_core::replay::replay_full;
 use ecac_core::serialize::canonical_cbor;
+use ecac_core::state::FieldValue;
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
 use ecac_core::vc::{blake3_hash32, verify_vc};
 use ecac_store::Store;
-use ecac_core::dag::Dag;
-use ecac_core::replay::replay_full;
-use ecac_core::state::FieldValue;
 use serde::{Deserialize, Serialize};
 
 // --- local hex helpers (avoid reaching into main.rs) ---
@@ -69,7 +69,6 @@ fn parse_sk_hex(hex: &str) -> Result<SigningKey> {
     }
     Ok(SigningKey::from_bytes(&key))
 }
-
 
 fn parse_pk_hex(hex: &str) -> Result<[u8; 32]> {
     let s = hex.trim();
@@ -273,17 +272,77 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
 }
 
 
+/// Append a single data op into the RocksDB store.
+///
+/// Arguments:
+///   - kind: currently must be "data".
+///   - obj, field: logical object and field identifiers.
+///   - value: logical value as UTF-8; stored as raw bytes.
+///
+/// Environment:
+///   - ECAC_DB: path to RocksDB directory (defaults to ".ecac.db").
+///   - ECAC_SUBJECT_SK_HEX: 32-byte ed25519 secret key (64 hex chars).
+///
+/// Behaviour:
+///   - Builds a M2/M3-style Payload::Data with key = "mv:<obj>:<field>".
+///   - No M9 encryption-on-write yet; values are stored as plaintext bytes.
+pub fn cmd_write(kind: &str, obj: &str, field: &str, value: &str) -> Result<()> {
+    // For now we only support "data" writes.
+    if kind != "data" {
+        return Err(anyhow!(
+            "unsupported write kind '{}'; only 'data' is implemented",
+            kind
+        ));
+    }
+
+    // Open store via ECAC_DB or default ".ecac.db".
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Writer identity: ECAC_SUBJECT_SK_HEX (32-byte ed25519 SK hex).
+    let sk_hex = std::env::var("ECAC_SUBJECT_SK_HEX")
+        .map_err(|_| anyhow!("ECAC_SUBJECT_SK_HEX not set (32-byte ed25519 SK hex)"))?;
+    let sk = parse_sk_hex(&sk_hex)?;
+    let pk = vk_to_bytes(&sk.verifying_key());
+
+    // Parents: current DAG heads (same pattern as keyrotate/grant-key).
+    let parents = store.heads(8).unwrap_or_default();
+
+    // HLC: wall-clock ms, logical=1.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let hlc = Hlc::new(now_ms, 1);
+
+    // IMPORTANT:
+    // Match policy::derive_action_and_tags:
+    //   mv:<obj>:<field>  => Action::SetField
+    let key = format!("mv:{}:{}", obj, field);
+    let val_bytes = value.as_bytes().to_vec();
+
+    let op = Op::new(
+        parents,
+        hlc,
+        pk,
+        Payload::Data { key, value: val_bytes },
+        &sk,
+    );
+
+    let bytes = canonical_cbor(&op);
+    let id = store.put_op_cbor(&bytes)?;
+
+    println!("write_op_id={}", to_hex32(&id));
+    println!("obj={} field={}", obj, field);
+    Ok(())
+}
+
 /// Emit a KeyGrant op bound to (subject_pk, tag, key_version) and backed by a VC.
 /// Requirements:
 ///  - ECAC_DB selects the RocksDB store (default ".ecac.db").
 ///  - ECAC_KEYADMIN_SK_HEX is the key admin ed25519 SK (32-byte hex).
 ///  - ./trust and ./trust/status exist and contain issuer + status metadata.
-pub fn cmd_grant_key(
-    subject_pk_hex: &str,
-    tag: &str,
-    version: u32,
-    vc_path: &str,
-) -> Result<()> {
+pub fn cmd_grant_key(subject_pk_hex: &str, tag: &str, version: u32, vc_path: &str) -> Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Parse subject public key.
@@ -372,7 +431,9 @@ pub fn cmd_keyrotate(tag: &str) -> Result<()> {
 
     // Compute next key_version for this tag.
     let next_version = match store.max_key_version_for_tag(tag)? {
-        Some(cur) => cur.checked_add(1).ok_or_else(|| anyhow!("key_version overflow"))?,
+        Some(cur) => cur
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("key_version overflow"))?,
         None => 1,
     };
 

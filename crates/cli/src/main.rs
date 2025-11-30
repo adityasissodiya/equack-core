@@ -107,6 +107,24 @@ enum Cmd {
         field: String,
     },
 
+    /// Append a single data op into the RocksDB store.
+    ///
+    /// This is the M2/M3-style writer:
+    ///   - key = "mv:<obj>:<field>"
+    ///   - value is the UTF-8 bytes of <value>.
+    ///
+    /// DB is selected via ECAC_DB or defaults to ".ecac.db".
+    Write {
+        /// Currently only "data" is supported (reserved for future kinds).
+        kind: String,
+        /// Object id
+        obj: String,
+        /// Field name
+        field: String,
+        /// Logical value (UTF-8)
+        value: String,
+    },
+
     /// (Temporarily stubbed) Synthesize scenarios. Will be VC-backed in M4.
     Simulate {
         /// Scenario name (ignored for now)
@@ -353,6 +371,15 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Replay { ops } => cmd_replay(ops)?,
         Cmd::Project { ops, obj, field } => cmd_project(ops, obj, field)?,
+        Cmd::Write {
+            kind,
+            obj,
+            field,
+            value,
+        } => {
+            // M2/M3-style writer; no encryption-on-write yet.
+            commands::cmd_write(&kind, &obj, &field, &value)?;
+        }
         Cmd::Simulate { scenario } => simulate::cmd_simulate(Some(scenario.as_str()))?,
         Cmd::VcVerify { vc } => commands::cmd_vc_verify(vc.as_os_str().to_str().unwrap())?,
         Cmd::VcAttach {

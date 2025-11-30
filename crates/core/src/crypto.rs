@@ -10,10 +10,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use chacha20poly1305::{
-    aead::{AeadCore, AeadInPlace, KeyInit},
-    Key,
-    XChaCha20Poly1305,
-    XNonce,
+    aead::{AeadInPlace, KeyInit},
+    Key, XChaCha20Poly1305, XNonce,
 };
 
 pub type PublicKeyBytes = [u8; 32];
@@ -127,7 +125,6 @@ pub fn decrypt_value(key: &[u8; 32], enc: &EncV1, aad: &[u8]) -> Option<Vec<u8>>
     Some(buf)
 }
 
-
 /// Generate a fresh Ed25519 keypair.
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
     let sk = SigningKey::generate(&mut OsRng);
@@ -183,33 +180,32 @@ mod tests {
         tampered[0] ^= 0x01;
         assert!(!verify_hash(&tampered, &sig, &vk));
     }
-        #[test]
-        fn enc_dec_roundtrip_and_tamper() {
-            // Fixed key for test determinism.
-            let key: [u8; 32] = [7u8; 32];
-            let op_id: [u8; 32] = [1u8; 32];
-            let aad = derive_enc_aad(&op_id, "o", "x");
-            let pt = b"secret bytes";
-    
-            let enc = encrypt_value("hv", 1, &key, pt, &aad);
-            let dec = decrypt_value(&key, &enc, &aad).expect("decrypt ok");
-            assert_eq!(dec, pt);
-    
-            // Wrong key ⇒ fail.
-            let wrong_key: [u8; 32] = [3u8; 32];
-            assert!(decrypt_value(&wrong_key, &enc, &aad).is_none());
-    
-            // Tamper ciphertext ⇒ fail.
-            let mut enc_ct_tampered = enc.clone();
-            if !enc_ct_tampered.ct.is_empty() {
-                enc_ct_tampered.ct[0] ^= 0x01;
-            }
-            assert!(decrypt_value(&key, &enc_ct_tampered, &aad).is_none());
-    
-            // Tamper tag ⇒ fail.
-            let mut enc_tag_tampered = enc;
-            enc_tag_tampered.aead_tag[0] ^= 0x01;
-            assert!(decrypt_value(&key, &enc_tag_tampered, &aad).is_none());
-        }
+    #[test]
+    fn enc_dec_roundtrip_and_tamper() {
+        // Fixed key for test determinism.
+        let key: [u8; 32] = [7u8; 32];
+        let op_id: [u8; 32] = [1u8; 32];
+        let aad = derive_enc_aad(&op_id, "o", "x");
+        let pt = b"secret bytes";
 
+        let enc = encrypt_value("hv", 1, &key, pt, &aad);
+        let dec = decrypt_value(&key, &enc, &aad).expect("decrypt ok");
+        assert_eq!(dec, pt);
+
+        // Wrong key ⇒ fail.
+        let wrong_key: [u8; 32] = [3u8; 32];
+        assert!(decrypt_value(&wrong_key, &enc, &aad).is_none());
+
+        // Tamper ciphertext ⇒ fail.
+        let mut enc_ct_tampered = enc.clone();
+        if !enc_ct_tampered.ct.is_empty() {
+            enc_ct_tampered.ct[0] ^= 0x01;
+        }
+        assert!(decrypt_value(&key, &enc_ct_tampered, &aad).is_none());
+
+        // Tamper tag ⇒ fail.
+        let mut enc_tag_tampered = enc;
+        enc_tag_tampered.aead_tag[0] ^= 0x01;
+        assert!(decrypt_value(&key, &enc_tag_tampered, &aad).is_none());
+    }
 }
