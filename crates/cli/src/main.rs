@@ -150,6 +150,14 @@ enum Cmd {
         out_dir: Option<PathBuf>,
     },
 
+    /// Mint a demo VC + trust config for local testing.
+    ///
+    /// - Generates issuer + subject keys.
+    /// - Writes ./trust/issuers.toml
+    /// - Writes ./vc.jwt
+    /// - Prints JSON with issuer_vk_hex, subject_pk_hex, vc_path.
+    VcMintDemo,
+
     /// Flip a bit in a local status list: 1 = revoked, 0 = not revoked
     VcStatusSet {
         /// Status list id (file is ./trust/status/<list_id>.bin)
@@ -399,6 +407,11 @@ fn main() -> anyhow::Result<()> {
                 Some(out),
             )?;
         }
+
+        Cmd::VcMintDemo => {
+            commands::cmd_vc_mint_demo()?;
+        }
+
         Cmd::VcStatusSet {
             list_id,
             index,

@@ -33,15 +33,35 @@ pub fn hash_with_domain(domain: &[u8], msg: &[u8]) -> [u8; 32] {
 }
 
 /// Domain separator for AEAD AAD derivation.
-/// M9: aad = blake3("ECAC_AAD" || op_id || obj || field)
+/// M9: aad = blake3(
+///     "ECAC_AAD"
+///     || author_pk
+///     || hlc_physical_ms
+///     || hlc_logical
+///     || parents
+///     || obj
+///     || field
+/// )
 pub const ENC_AAD_DOMAIN: &[u8] = b"ECAC_AAD";
 
-/// Derive the AEAD AAD for a given (op_id, obj, field).
+/// Derive the AEAD AAD for a given op header + (obj, field).
 /// Callers should pass this as `aad` into encrypt/decrypt.
-pub fn derive_enc_aad(op_id: &[u8; 32], obj: &str, field: &str) -> [u8; 32] {
+pub fn derive_enc_aad(
+    author_pk: &[u8; 32],
+    hlc_physical_ms: u64,
+    hlc_logical: u64,
+    parents: &[[u8; 32]],
+    obj: &str,
+    field: &str,
+) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(ENC_AAD_DOMAIN);
-    hasher.update(op_id);
+    hasher.update(author_pk);
+    hasher.update(&hlc_physical_ms.to_be_bytes());
+    hasher.update(&hlc_logical.to_be_bytes());
+    for p in parents {
+        hasher.update(p);
+    }
     hasher.update(obj.as_bytes());
     hasher.update(field.as_bytes());
     *hasher.finalize().as_bytes()
@@ -184,8 +204,13 @@ mod tests {
     fn enc_dec_roundtrip_and_tamper() {
         // Fixed key for test determinism.
         let key: [u8; 32] = [7u8; 32];
-        let op_id: [u8; 32] = [1u8; 32];
-        let aad = derive_enc_aad(&op_id, "o", "x");
+        let author_pk: [u8; 32] = [1u8; 32];
+        let hlc_physical_ms: u64 = 0;
+        let hlc_logical: u64 = 0;
+        // No parents in this synthetic test.
+        let parents: &[[u8; 32]] = &[];
+        let aad = derive_enc_aad(&author_pk, hlc_physical_ms, hlc_logical, parents, "o", "x");
+
         let pt = b"secret bytes";
 
         let enc = encrypt_value("hv", 1, &key, pt, &aad);

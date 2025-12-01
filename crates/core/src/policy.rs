@@ -146,6 +146,8 @@ pub fn tags_for(obj: &str, field: &str) -> TagSet {
     match (obj, field) {
         ("o", "x") => {
             t.insert("hv".to_string());
+            // M9: treat this field as confidential for experiments.
+            t.insert("confidential".to_string());
         }
         ("o", "s") => {
             t.insert("mech".to_string());
@@ -198,7 +200,19 @@ pub struct Epoch {
 /// Authorization index over the deterministic total order.
 #[derive(Default)]
 pub struct EpochIndex {
-    entries: BTreeMap<(PublicKeyBytes, String), Vec<Epoch>>,
+    // Write authorization epochs keyed by (subject_pk, role).
+    pub(crate) entries: BTreeMap<(PublicKeyBytes, String), Vec<Epoch>>,
+    // Read/key epochs keyed by subject only; tag+version inside each entry.
+    pub(crate) key_epochs: BTreeMap<PublicKeyBytes, Vec<KeyGrantEpoch>>,
+}
+
+/// One read/key epoch entry for (subject, tag, key_version).
+#[derive(Debug, Clone)]
+pub struct KeyGrantEpoch {
+    pub tag: String,
+    pub key_version: u32,
+    pub not_before: Option<Hlc>,
+    pub not_after: Option<Hlc>,
 }
 
 impl EpochIndex {
@@ -230,6 +244,50 @@ impl EpochIndex {
             .map(|((_s, r), v)| (r, v))
             .collect()
     }
+
+    fn push_key_epoch(
+        &mut self,
+        subject: PublicKeyBytes,
+        tag: String,
+        key_version: u32,
+        e: KeyGrantEpoch,
+    ) {
+        let entry = self.key_epochs.entry(subject).or_default();
+        // We still push even if multiple epochs exist for the same (tag,version);
+        // the HLC guards will pick the live one at query time.
+        entry.push(e);
+    }
+
+    /// Check whether `subject` has an active KeyGrant epoch for (tag, key_version)
+    /// at the given HLC. This is purely time-based in M9; we do not key on topo.
+    pub fn subject_has_key_for(
+        &self,
+        subject: &PublicKeyBytes,
+        tag: &str,
+        key_version: u32,
+        at_hlc: Hlc,
+    ) -> bool {
+        let Some(v) = self.key_epochs.get(subject) else {
+            return false;
+        };
+        for ep in v {
+            if ep.tag != tag || ep.key_version != key_version {
+                continue;
+            }
+            if let Some(nbf) = ep.not_before {
+                if at_hlc < nbf {
+                    continue;
+                }
+            }
+            if let Some(naf) = ep.not_after {
+                if at_hlc >= naf {
+                    continue;
+                }
+            }
+            return true;
+        }
+        false
+    }
 }
 
 /// Minimal verified VC bundle extracted from a Credential.
@@ -251,6 +309,7 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
     let t0 = Instant::now();
     let mut epochs_opened: u64 = 0;
     let mut revocations_seen: u64 = 0;
+    let mut keygrants_seen: u64 = 0;
     // ---- Pass 1: collect verified credentials (cred_hash -> claims)
     let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
 
@@ -268,7 +327,7 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
         }
     }
 
-    // ---- Pass 2: build epochs from grants/revokes
+    // ---- Pass 2: build epochs from grants/revokes/keygrants
     let mut idx = EpochIndex::default();
 
     for (pos, id) in topo.iter().enumerate() {
@@ -312,6 +371,31 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
                 }
                 idx.close_epochs_intersecting_scope(subject_pk, role, &scope, pos);
             }
+            Payload::KeyGrant {
+                subject_pk,
+                tag,
+                key_version,
+                cred_hash,
+            } => {
+                if let Some(vc) = vc_index.get(cred_hash) {
+                    // Subject must match VC.claims.sub_pk
+                    if &vc.subject_pk != subject_pk {
+                        continue;
+                    }
+                    idx.push_key_epoch(
+                        *subject_pk,
+                        tag.clone(),
+                        *key_version,
+                        KeyGrantEpoch {
+                            tag: tag.clone(),
+                            key_version: *key_version,
+                            not_before: Some(Hlc::new(vc.nbf_ms, 0)),
+                            not_after: Some(Hlc::new(vc.exp_ms, 0)),
+                        },
+                    );
+                    keygrants_seen += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -322,6 +406,9 @@ pub fn build_auth_epochs(dag: &Dag, topo: &[OpId]) -> EpochIndex {
     }
     if revocations_seen > 0 {
         METRICS.inc("revocations_seen", revocations_seen);
+    }
+    if keygrants_seen > 0 {
+        METRICS.inc("keygrants_seen", keygrants_seen);
     }
     idx
 }
@@ -495,13 +582,12 @@ pub fn can_read_tag_version(
     pos_idx: usize,
     at_hlc: Hlc,
 ) -> bool {
-    // `key_version` is carried for future refinement (KeyGrant epochs), but
-    // in this first M9 step we only gate on role + tag-scoped epochs.
-    let _ = key_version;
-
+    // First: role+scope must authorize reading this tag at pos+time.
     // Treat the protected resource as having exactly this tag.
     let mut resource_tags = TagSet::new();
     resource_tags.insert(tag.to_string());
+
+    let mut role_ok = false;
 
     for ((subj, role), epochs) in idx.entries.iter() {
         if subj != subject {
@@ -535,10 +621,24 @@ pub fn can_read_tag_version(
                     continue;
                 }
             }
-            return true;
+            role_ok = true;
+            break;
+        }
+        if role_ok {
+            break;
         }
     }
-    false
+
+    if !role_ok {
+        return false;
+    }
+
+    // Second: subject must have a matching KeyGrant epoch for (tag, key_version).
+    if !idx.subject_has_key_for(subject, tag, key_version, at_hlc) {
+        return false;
+    }
+
+    true
 }
 
 // --------------------
@@ -636,6 +736,7 @@ pub fn build_auth_epochs_with(
     let t0 = Instant::now();
     let mut epochs_opened: u64 = 0;
     let mut revocations_seen: u64 = 0;
+    let mut keygrants_seen: u64 = 0;
     // 1) verify credentials once, index by cred_hash
     let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
     for id in topo {
@@ -657,7 +758,7 @@ pub fn build_auth_epochs_with(
         }
     }
 
-    // 2) build epochs: only Grant{cred_hash} referencing a verified VC counts
+    // 2) build epochs: only Grant/KeyGrant referencing a verified VC count
     let mut idx = EpochIndex::default();
     for (pos, id) in topo.iter().enumerate() {
         let Some(op) = dag.get(id) else {
@@ -699,6 +800,30 @@ pub fn build_auth_epochs_with(
                 }
                 idx.close_epochs_intersecting_scope(subject_pk, role, &s, pos);
             }
+            Payload::KeyGrant {
+                subject_pk,
+                tag,
+                key_version,
+                cred_hash,
+            } => {
+                if let Some(vc) = vc_index.get(cred_hash) {
+                    if &vc.subject_pk != subject_pk {
+                        continue;
+                    }
+                    idx.push_key_epoch(
+                        *subject_pk,
+                        tag.clone(),
+                        *key_version,
+                        KeyGrantEpoch {
+                            tag: tag.clone(),
+                            key_version: *key_version,
+                            not_before: Some(Hlc::new(vc.nbf_ms, 0)),
+                            not_after: Some(Hlc::new(vc.exp_ms, 0)),
+                        },
+                    );
+                    keygrants_seen += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -708,6 +833,9 @@ pub fn build_auth_epochs_with(
     }
     if revocations_seen > 0 {
         METRICS.inc("revocations_seen", revocations_seen);
+    }
+    if keygrants_seen > 0 {
+        METRICS.inc("keygrants_seen", keygrants_seen);
     }
     idx
 }

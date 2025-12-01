@@ -2,22 +2,27 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 #[cfg(feature = "audit")]
 use ecac_core::audit::{AuditEvent, SkipReason};
 #[cfg(feature = "audit")]
 use ecac_core::audit_hook::AuditHook;
+use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
+use ed25519_dalek::SigningKey as EdSigningKey;
 use serde_json::json;
 use std::path::Path;
 
 // emit SkippedOp etc.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ecac_core::crypto::{decrypt_value, derive_enc_aad, vk_to_bytes, EncV1};
+use ecac_core::crypto::{derive_enc_aad, encrypt_value, vk_to_bytes};
 use ecac_core::dag::Dag;
 use ecac_core::hlc::Hlc;
 use ecac_core::op::{CredentialFormat, Op, Payload};
-use ecac_core::replay::replay_full;
+use ecac_core::policy::tags_for;
+use ecac_core::replay::{project_field_for_subject, replay_full};
 use ecac_core::serialize::canonical_cbor;
 use ecac_core::state::FieldValue;
 use ecac_core::status::StatusCache;
@@ -97,6 +102,86 @@ struct PersistVerifiedVc {
     status_list_id: Option<String>,
     status_index: Option<u32>,
     cred_hash: [u8; 32],
+}
+
+/// Mint a demo VC + trust config:
+///   - Generates an issuer Ed25519 keypair.
+///   - Generates a subject Ed25519 keypair.
+///   - Writes ./trust/issuers.toml with the issuer VK and schema "standard-v1".
+///   - Mints a compact JWT VC (alg=EdDSA) that matches crates/core/src/vc.rs expectations.
+///   - Writes the VC to ./vc.jwt.
+///   - Prints a JSON blob with issuer, issuer_vk_hex, subject_pk_hex and vc_path.
+pub fn cmd_vc_mint_demo() -> Result<()> {
+    use rand::rngs::OsRng;
+
+    // 1) Generate issuer keypair
+    let mut rng = OsRng;
+    let issuer_sk = EdSigningKey::generate(&mut rng);
+    let issuer_vk = issuer_sk.verifying_key();
+    let issuer_vk_bytes = issuer_vk.to_bytes();
+
+    // 2) Generate subject keypair (we only need PK for VC + grants)
+    let subject_sk = EdSigningKey::generate(&mut rng);
+    let subject_vk = subject_sk.verifying_key();
+    let subject_pk_bytes = subject_vk.to_bytes();
+
+    let issuer_vk_hex = to_hex32(&issuer_vk_bytes);
+    let subject_pk_hex = to_hex32(&subject_pk_bytes);
+    let issuer_id = "local-issuer-1";
+
+    // 3) Write ./trust/issuers.toml so TrustStore::load_from_dir("./trust") works.
+    fs::create_dir_all("./trust")?;
+    let issuers_toml = format!(
+        "[issuers]\n{iss} = \"{vk}\"\n\n[schemas]\n{iss} = \"standard-v1\"\n",
+        iss = issuer_id,
+        vk = issuer_vk_hex,
+    );
+    fs::write("./trust/issuers.toml", issuers_toml)?;
+
+    // 4) Build JWT header + payload in the shape vc.rs expects.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let header = json!({
+        "alg": "EdDSA",
+        "typ": "JWT",
+    });
+
+    let payload = json!({
+        "iss": issuer_id,
+        "jti": format!("demo-vc-{}", now_ms),
+        "role": "confidential_reader",
+        "sub_pk": subject_pk_hex,
+        "nbf": now_ms,
+        "exp": now_ms + 86_400_000u64, // +1 day
+        "scope": ["confidential"],
+        // no "status" => no revocation checks
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
+    let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+
+    let sig = issuer_sk.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+    let compact = format!("{}.{}.{}", header_b64, payload_b64, sig_b64);
+
+    // 5) Persist VC to ./vc.jwt
+    let vc_path = "vc.jwt";
+    fs::write(vc_path, &compact)?;
+
+    // 6) Emit JSON so scripts can grab subject_pk_hex etc.
+    let out = json!({
+        "issuer": issuer_id,
+        "issuer_vk_hex": issuer_vk_hex,
+        "subject_pk_hex": subject_pk_hex,
+        "vc_path": vc_path,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
 }
 
 pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
@@ -271,7 +356,6 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
     Ok(())
 }
 
-
 /// Append a single data op into the RocksDB store.
 ///
 /// Arguments:
@@ -285,7 +369,12 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
 ///
 /// Behaviour:
 ///   - Builds a M2/M3-style Payload::Data with key = "mv:<obj>:<field>".
-///   - No M9 encryption-on-write yet; values are stored as plaintext bytes.
+///   - If policy::tags_for(obj, field) contains "confidential":
+///       * Loads the current key_version and key bytes for tag="confidential"
+///         from the keyring (you must have run `keyrotate confidential`).
+///       * Encrypts the UTF-8 bytes into EncV1 using AAD derived from the
+///         eventual op header: (author_pk, hlc, parents, obj, field).
+///  ///   - Otherwise, stores the UTF-8 bytes as plaintext.
 pub fn cmd_write(kind: &str, obj: &str, field: &str, value: &str) -> Result<()> {
     // For now we only support "data" writes.
     if kind != "data" {
@@ -319,13 +408,64 @@ pub fn cmd_write(kind: &str, obj: &str, field: &str, value: &str) -> Result<()> 
     // Match policy::derive_action_and_tags:
     //   mv:<obj>:<field>  => Action::SetField
     let key = format!("mv:{}:{}", obj, field);
-    let val_bytes = value.as_bytes().to_vec();
+
+    // Start from logical UTF-8 bytes.
+    let mut val_bytes = value.as_bytes().to_vec();
+
+    // M9: encrypt-on-write for confidential fields.
+    //
+    // We treat the presence of the static "confidential" resource tag (as
+    // returned by policy::tags_for) as the signal that this field must be
+    // encrypted under tag="confidential".
+    //
+    // This does *not* change behaviour for existing fields until you actually
+    // add "confidential" to their tag set in policy.rs.
+    let tags = tags_for(obj, field);
+    let is_confidential = tags.iter().any(|t| t == "confidential");
+
+    if is_confidential {
+        let enc_tag = "confidential";
+
+        // Look up the current key_version for this tag.
+        let key_version = store.max_key_version_for_tag(enc_tag)?.ok_or_else(|| {
+            anyhow!(
+                "no key_version for tag='{}'; run `keyrotate {}` first",
+                enc_tag,
+                enc_tag
+            )
+        })?;
+
+        // Fetch the actual 32-byte key.
+        let key_bytes = store.get_tag_key(enc_tag, key_version)?.ok_or_else(|| {
+            anyhow!(
+                "missing key material for tag='{}', version={}",
+                enc_tag,
+                key_version
+            )
+        })?;
+
+        // AAD = hash(header fields + (obj, field)), matching the decrypt side.
+        let aad = derive_enc_aad(
+            &pk,
+            hlc.physical_ms,
+            hlc.logical as u64,
+            &parents,
+            obj,
+            field,
+        );
+
+        let enc = encrypt_value(enc_tag, key_version, &key_bytes, &val_bytes, &aad);
+        val_bytes = serde_cbor::to_vec(&enc)?;
+    }
 
     let op = Op::new(
         parents,
         hlc,
         pk,
-        Payload::Data { key, value: val_bytes },
+        Payload::Data {
+            key,
+            value: val_bytes,
+        },
         &sk,
     );
 
@@ -1174,19 +1314,17 @@ pub fn cmd_show(obj: &str, field: &str, subject_pk_hex: &str) -> Result<()> {
     let ids = store.topo_ids()?;
     let blobs = store.load_ops_cbor(&ids)?;
 
-    // Build DAG and keep a Vec<Op> for scanning grants.
+    // Build DAG.
     let mut dag = Dag::new();
-    let mut ops = Vec::with_capacity(blobs.len());
     for b in blobs {
         let op: Op = serde_cbor::from_slice(&b)?;
-        dag.insert(op.clone());
-        ops.push(op);
+        dag.insert(op);
     }
 
-    // Deterministic replay (policy enforced in core).
+    // Deterministic replay (write policy enforcement in core).
     let (state, _digest) = replay_full(&dag);
 
-    // Resolve field.
+    // Resolve field early for error messages and to handle Set separately.
     let Some(fields) = state.objects.get(obj) else {
         println!(r#"{{"error":"object not found","obj":"{}"}}"#, obj);
         return Ok(());
@@ -1199,81 +1337,37 @@ pub fn cmd_show(obj: &str, field: &str, subject_pk_hex: &str) -> Result<()> {
         return Ok(());
     };
 
-    // Helper: does the log contain a KeyGrant for this (subject, tag, version)?
-    let has_keygrant = |tag: &str, ver: u32| -> bool {
-        for op in &ops {
-            if let Payload::KeyGrant {
-                subject_pk: spk,
-                tag: t,
-                key_version,
-                ..
-            } = &op.header.payload
-            {
-                if spk == &subject_pk && t == tag && *key_version == ver {
-                    return true;
-                }
+    match fv {
+        FieldValue::MV(_mv) => {
+            // Key lookup closure: (tag, version) -> key bytes from keyring.
+            let store_ref = &store;
+            let visible = project_field_for_subject(
+                &dag,
+                &state,
+                &subject_pk,
+                |tag, ver| match store_ref.get_tag_key(tag, ver) {
+                    Ok(Some(k)) => Some(k),
+                    _ => None,
+                },
+                obj,
+                field,
+            );
+
+            if let Some(v) = visible {
+                println!("{}", v);
+            } else {
+                println!("\"<redacted>\"");
             }
-        }
-        false
-    };
-
-    let visible: Option<String> = match fv {
-        FieldValue::MV(mv) => {
-            // Iterate winner set in deterministic OpId order.
-            let mut candidate: Option<String> = None;
-            for (op_id, val) in mv.winners_with_tags() {
-                if val.is_empty() {
-                    continue;
-                }
-
-                // Try to interpret as EncV1 envelope first.
-                let maybe_plain = match serde_cbor::from_slice::<EncV1>(val) {
-                    Ok(enc) => {
-                        // Encrypted: require KeyGrant + key + successful decrypt.
-                        if !has_keygrant(&enc.tag, enc.key_version) {
-                            None
-                        } else {
-                            match store.get_tag_key(&enc.tag, enc.key_version) {
-                                Ok(Some(key)) => {
-                                    let aad = derive_enc_aad(op_id, obj, field);
-                                    if let Some(pt) = decrypt_value(&key, &enc, &aad) {
-                                        Some(bytes_to_display(&pt))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                Ok(None) => None,
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Plaintext: always visible.
-                        Some(bytes_to_display(val))
-                    }
-                };
-
-                if let Some(s) = maybe_plain {
-                    candidate = Some(s);
-                    break;
-                }
-            }
-            candidate
         }
         FieldValue::Set(set) => {
-            // For now, sets are not M9-encrypted; show a deterministic JSON-ish projection.
+            // Sets are not M9-encrypted; reuse the old deterministic projection.
             let mut elems = Vec::new();
             for (ek, v) in set.iter_present() {
                 elems.push(format!(r#"{{"key":"{}","value":"{}"}}"#, ek, to_hex(&v)));
             }
-            Some(format!(r#"[{}]"#, elems.join(",")))
+            println!("[{}]", elems.join(","));
         }
-    };
-
-    if let Some(v) = visible {
-        println!("{}", v);
-    } else {
-        println!("\"<redacted>\"");
     }
+
     Ok(())
 }

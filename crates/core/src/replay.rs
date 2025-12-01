@@ -12,11 +12,12 @@ use crate::trust::TrustStore;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::crypto::{decrypt_value, derive_enc_aad, EncV1, PublicKeyBytes};
 use crate::dag::Dag;
 use crate::metrics::METRICS;
 use crate::op::{OpId, Payload};
 use crate::policy::{self, Action};
-use crate::state::State;
+use crate::state::{FieldValue, State};
 
 use std::time::Instant;
 
@@ -405,6 +406,164 @@ fn apply_over_order_with_audit(
         topo_idx: state.processed_count() as u64,
         state_digest: digest,
     });
+}
+
+fn to_hex<T: AsRef<[u8]>>(v: T) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let b = v.as_ref();
+    let mut out = String::with_capacity(b.len() * 2);
+    for &x in b {
+        out.push(HEX[(x >> 4) as usize] as char);
+        out.push(HEX[(x & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn bytes_to_display(v: &[u8]) -> String {
+    match std::str::from_utf8(v) {
+        Ok(s) => s.to_string(),
+        Err(_) => to_hex(v),
+    }
+}
+
+/// Project the logical value of `<obj>.<field>` for a given subject, applying
+/// M9 read-control (role/scope epochs + KeyGrant + AEAD decrypt).
+///
+/// Inputs:
+///   - `dag`: the SAME DAG used for replay.
+///   - `state`: the materialized CRDT state from `replay_full` / `apply_incremental`.
+///   - `subject_pk`: viewer identity.
+///   - `key_lookup`: closure providing `(tag, version) -> key_bytes` from the keyring.
+///
+/// Behaviour:
+///   - If the field is MV:
+///       * Plaintext winner ⇒ always visible.
+///       * EncV1 winner ⇒ visible iff `policy::can_read_tag_version` allows it AND
+///         `key_lookup` returns a key and AEAD decryption with header-based AAD succeeds.
+///   - If the field is a Set: we currently render a deterministic JSON-ish view and do
+///     not apply redaction (M9 does not encrypt sets).
+///
+/// Returns `Some(string)` if the subject sees a value, or `None` if fully redacted.
+pub fn project_field_for_subject<F>(
+    dag: &Dag,
+    state: &State,
+    subject_pk: &PublicKeyBytes,
+    key_lookup: F,
+    obj: &str,
+    field: &str,
+) -> Option<String>
+where
+    F: Fn(&str, u32) -> Option<[u8; 32]>,
+{
+    // Resolve field first; if it doesn't exist, signal "no value".
+    let fields = state.objects.get(obj)?;
+    let fv = fields.get(field)?;
+
+    // If there are no policy-like events at all, we still want the same epoch
+    // building behaviour as write replay; but we also turn it on when there
+    // are KeyGrant events.
+    let order = dag.topo_sort();
+    let has_policy_like = order.iter().any(|id| {
+        let Some(op) = dag.get(id) else {
+            return false;
+        };
+        matches!(
+            op.header.payload,
+            Payload::Grant { .. } | Payload::Revoke { .. } | Payload::KeyGrant { .. }
+        )
+    });
+
+    let epoch_index = if has_policy_like {
+        // Same trust/VC path as apply_over_order().
+        let trust = TrustStore::load_from_dir("./trust").ok();
+        let mut status = StatusCache::load_from_dir("./trust/status");
+        if let Some(trust) = trust {
+            policy::build_auth_epochs_with(dag, &order, &trust, &mut status)
+        } else {
+            policy::build_auth_epochs(dag, &order)
+        }
+    } else {
+        policy::EpochIndex::default()
+    };
+
+    // Map each OpId to its topo index so we can feed pos_idx into policy.
+    let pos_index: HashMap<OpId, usize> = order
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
+
+    match fv {
+        FieldValue::MV(mv) => {
+            let mut candidate: Option<String> = None;
+
+            // Iterate winners in deterministic OpId order.
+            for (op_id, val) in mv.winners_with_tags() {
+                if val.is_empty() {
+                    continue;
+                }
+
+                // Try encrypted path first.
+                if let Ok(enc) = serde_cbor::from_slice::<EncV1>(val) {
+                    let Some(pos) = pos_index.get(op_id).copied() else {
+                        continue;
+                    };
+                    let Some(op) = dag.get(op_id) else {
+                        continue;
+                    };
+
+                    // Policy gate: role/scope epoch + KeyGrant(epoch) + HLC guards.
+                    if !policy::can_read_tag_version(
+                        &epoch_index,
+                        subject_pk,
+                        &enc.tag,
+                        enc.key_version,
+                        pos,
+                        op.hlc(),
+                    ) {
+                        continue;
+                    }
+
+                    // Keyring gate.
+                    let Some(key) = key_lookup(&enc.tag, enc.key_version) else {
+                        continue;
+                    };
+
+                    let aad = derive_enc_aad(
+                        &op.header.author_pk,
+                        op.header.hlc.physical_ms,
+                        op.header.hlc.logical as u64,
+                        &op.header.parents,
+                        obj,
+                        field,
+                    );
+
+                    if let Some(pt) = decrypt_value(&key, &enc, &aad) {
+                        candidate = Some(bytes_to_display(&pt));
+                        break;
+                    } else {
+                        // AEAD failure ⇒ treat as not visible under this winner.
+                        continue;
+                    }
+                } else {
+                    // Plaintext winner: always visible (no read-policy gating).
+                    candidate = Some(bytes_to_display(val));
+                    break;
+                }
+            }
+
+            candidate
+        }
+        FieldValue::Set(set) => {
+            // M9 does not encrypt sets. Keep old "deterministic JSON-ish" view.
+            let mut elems = Vec::new();
+            for (ek, v) in set.iter_present() {
+                elems.push(format!(r#"{{"key":"{}","value":"{}"}}"#, ek, to_hex(&v)));
+            }
+            Some(format!("[{}]", elems.join(",")))
+        }
+    }
 }
 
 fn dag_is_ancestor(dag: &Dag, a: &OpId, b: &OpId) -> bool {
