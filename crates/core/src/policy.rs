@@ -962,4 +962,161 @@ mod tests {
 
         assert_eq!(res, Err(DenyDetail::GenericDeny));
     }
+    
+    #[test]
+    fn can_read_tag_version_allows_with_epoch_and_key() {
+        let subject = pk(10);
+        let mut idx = EpochIndex::default();
+
+        // Write/read epoch for subject as "editor" scoped to "confidential".
+        idx.entries.insert(
+            (subject, "editor".to_string()),
+            vec![Epoch {
+                scope: tagset(&["confidential"]),
+                start_pos: 0,
+                end_pos: None,
+                not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        // Matching KeyGrant epoch for (tag="confidential", key_version=1).
+        idx.key_epochs.insert(
+            subject,
+            vec![KeyGrantEpoch {
+                tag: "confidential".to_string(),
+                key_version: 1,
+                not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        let at = Hlc::new(20, 0);
+        assert!(
+            can_read_tag_version(
+                &idx,
+                &subject,
+                "confidential",
+                1,
+                /*pos_idx=*/ 1,
+                at,
+            ),
+            "subject with live epoch + matching keygrant must be allowed to read"
+        );
+    }
+
+    #[test]
+    fn can_read_tag_version_denies_without_keygrant() {
+        let subject = pk(11);
+        let mut idx = EpochIndex::default();
+
+        // Epoch grants role/scope, but there is NO KeyGrant entry.
+        idx.entries.insert(
+            (subject, "editor".to_string()),
+            vec![Epoch {
+                scope: tagset(&["confidential"]),
+                start_pos: 0,
+                end_pos: None,
+               not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        let at = Hlc::new(20, 0);
+        assert!(
+            !can_read_tag_version(
+                &idx,
+                &subject,
+                "confidential",
+                1,
+                /*pos_idx=*/ 1,
+                at,
+            ),
+            "role/scope alone is not enough; missing KeyGrant must deny"
+        );
+    }
+
+    #[test]
+    fn can_read_tag_version_denies_when_role_cannot_read_tag() {
+        let subject = pk(12);
+        let mut idx = EpochIndex::default();
+
+        // Epoch exists but under a role that has no read-tags configured.
+        idx.entries.insert(
+            (subject, "viewer".to_string()),
+            vec![Epoch {
+                scope: tagset(&["confidential"]),
+                start_pos: 0,
+                end_pos: None,
+                not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        // Even with a KeyGrant, the role itself cannot read "confidential".
+        idx.key_epochs.insert(
+            subject,
+            vec![KeyGrantEpoch {
+                tag: "confidential".to_string(),
+                key_version: 1,
+                not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        let at = Hlc::new(20, 0);
+        assert!(
+            !can_read_tag_version(
+                &idx,
+                &subject,
+                "confidential",
+                1,
+                /*pos_idx=*/ 1,
+                at,
+            ),
+            "KeyGrant must not override role_read_tags; unknown role is denied"
+        );
+    }
+
+    #[test]
+    fn can_read_tag_version_denies_when_scope_disjoint() {
+        let subject = pk(13);
+        let mut idx = EpochIndex::default();
+
+        // Epoch is live but scoped to "mech" while the protected tag is "confidential".
+        idx.entries.insert(
+            (subject, "editor".to_string()),
+            vec![Epoch {
+                scope: tagset(&["mech"]),
+                start_pos: 0,
+                end_pos: None,
+                not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        // KeyGrant exists but scope does not intersect the protected tag.
+        idx.key_epochs.insert(
+            subject,
+            vec![KeyGrantEpoch {
+                tag: "confidential".to_string(),
+                key_version: 1,
+                not_before: Some(Hlc::new(10, 0)),
+                not_after: Some(Hlc::new(100, 0)),
+            }],
+        );
+
+        let at = Hlc::new(20, 0);
+        assert!(
+            !can_read_tag_version(
+                &idx,
+                &subject,
+                "confidential",
+                1,
+                /*pos_idx=*/ 1,
+                at,
+            ),
+            "scope disjoint from protected tag must deny, even with KeyGrant"
+        );
+    }
 }

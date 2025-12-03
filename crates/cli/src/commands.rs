@@ -1302,7 +1302,8 @@ pub fn cmd_audit_verify_full(db_dir_opt: Option<&str>) -> Result<()> {
 ///   - If the winning value is EncV1, we only decrypt if:
 ///       * there is a KeyGrant(subject_pk, tag, key_version), AND
 ///       * the keyring has a key for (tag, key_version), AND
-///       * decryption with AAD = derive_enc_aad(op_id, obj, field) succeeds.
+///       * decryption with AAD derived from the op header and logical location
+///         (author_pk, hlc, parents, obj, field) via `derive_enc_aad` succeeds.
 ///   - Otherwise we print "<redacted>".
 pub fn cmd_show(obj: &str, field: &str, subject_pk_hex: &str) -> Result<()> {
     // Parse subject PK.

@@ -496,7 +496,13 @@ where
 
     match fv {
         FieldValue::MV(mv) => {
+            // Candidate plaintext the viewer is allowed to see.
             let mut candidate: Option<String> = None;
+            // If we ever see an encrypted winner that the viewer is *not*
+            // allowed to read, we treat the whole field as redacted. This
+            // prevents falling back to older/plaintext winners once the
+            // field has a confidential write the subject cannot decrypt.
+            let mut saw_encrypted_denied = bool::default();
 
             // Iterate winners in deterministic OpId order.
             for (op_id, val) in mv.winners_with_tags() {
@@ -507,6 +513,7 @@ where
                 // Try encrypted path first.
                 if let Ok(enc) = serde_cbor::from_slice::<EncV1>(val) {
                     let Some(pos) = pos_index.get(op_id).copied() else {
+                        saw_encrypted_denied = true;
                         continue;
                     };
                     let Some(op) = dag.get(op_id) else {
@@ -522,11 +529,15 @@ where
                         pos,
                         op.hlc(),
                     ) {
+                        // Viewer lacks a valid read epoch for this (tag,version).
+                        saw_encrypted_denied = true;
                         continue;
                     }
 
                     // Keyring gate.
                     let Some(key) = key_lookup(&enc.tag, enc.key_version) else {
+                        // Key not present locally – treat as denied for this subject.
+                        saw_encrypted_denied = true;
                         continue;
                     };
 
@@ -543,17 +554,32 @@ where
                         candidate = Some(bytes_to_display(&pt));
                         break;
                     } else {
-                        // AEAD failure ⇒ treat as not visible under this winner.
+                        // AEAD failure ⇒ treat as denied.
+                        saw_encrypted_denied = true;
                         continue;
                     }
                 } else {
-                    // Plaintext winner: always visible (no read-policy gating).
+                    // Plaintext winner.
+                    //
+                    // If we have ALREADY seen an encrypted winner we couldn't
+                    // authorize, we do *not* fall back to a plaintext value:
+                    // the field is considered confidential from that point on.
+                    if saw_encrypted_denied {
+                        continue;
+                    }
                     candidate = Some(bytes_to_display(val));
                     break;
                 }
             }
 
-            candidate
+            // If we ever saw an encrypted winner we could not authorize, the
+            // whole field is treated as redacted for this subject, even if an
+            // older/plaintext winner exists.
+            if saw_encrypted_denied {
+                None
+            } else {
+                candidate
+            }
         }
         FieldValue::Set(set) => {
             // M9 does not encrypt sets. Keep old "deterministic JSON-ish" view.
