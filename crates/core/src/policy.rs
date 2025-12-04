@@ -291,6 +291,103 @@ impl EpochIndex {
     }
 }
 
+/// Return true if `subject` currently has the given `role` at (pos_idx, at_hlc),
+/// ignoring resource/tag scopes. This is used for gating meta-ops such as
+/// trust updates (IssuerKey*, StatusListChunk).
+pub fn subject_has_role_at(
+    idx: &EpochIndex,
+    subject: &PublicKeyBytes,
+    role: &str,
+    pos_idx: usize,
+    at_hlc: Hlc,
+) -> bool {
+    let key = (*subject, role.to_string());
+    let Some(epochs) = idx.entries.get(&key) else {
+        return false;
+    };
+
+    for ep in epochs {
+        // Topo window [start_pos, end_pos)
+        if pos_idx < ep.start_pos {
+            continue;
+        }
+        if let Some(end) = ep.end_pos {
+            if pos_idx >= end {
+                continue;
+            }
+        }
+
+        // HLC window [not_before, not_after)
+        if let Some(nbf) = ep.not_before {
+            if at_hlc < nbf {
+                continue;
+            }
+        }
+        if let Some(naf) = ep.not_after {
+            if at_hlc >= naf {
+                continue;
+            }
+        }
+
+        return true;
+    }
+    false
+}
+
+/// Return true if there exists *any* subject with role `role` whose epoch
+/// is live at (pos_idx, at_hlc). This is how we decide whether a role-based
+/// gating mode is "turned on" at a given point in the log.
+pub fn role_active_at(
+    idx: &EpochIndex,
+    role: &str,
+    pos_idx: usize,
+    at_hlc: Hlc,
+) -> bool {
+    for ((_, r), epochs) in idx.entries.iter() {
+        if r != role {
+            continue;
+        }
+        for ep in epochs {
+            if pos_idx < ep.start_pos {
+                continue;
+            }
+            if let Some(end) = ep.end_pos {
+                if pos_idx >= end {
+                    continue;
+                }
+            }
+            if let Some(nbf) = ep.not_before {
+                if at_hlc < nbf {
+                    continue;
+                }
+            }
+            if let Some(naf) = ep.not_after {
+                if at_hlc >= naf {
+                    continue;
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Convenience: issuer_admin "mode is active" iff *some* issuer_admin epoch
+/// is live at this (pos, time).
+pub fn issuer_admin_mode_active(idx: &EpochIndex, pos_idx: usize, at_hlc: Hlc) -> bool {
+    role_active_at(idx, "issuer_admin", pos_idx, at_hlc)
+}
+
+/// Convenience: check whether the given author currently has issuer_admin role.
+pub fn author_is_issuer_admin_at(
+    idx: &EpochIndex,
+    author: &PublicKeyBytes,
+    pos_idx: usize,
+    at_hlc: Hlc,
+) -> bool {
+    subject_has_role_at(idx, author, "issuer_admin", pos_idx, at_hlc)
+}
+
 /// Minimal verified VC bundle extracted from a Credential.
 #[derive(Debug, Clone)]
 struct VerifiedClaims {

@@ -22,6 +22,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::dag::Dag;
 use crate::op::{OpId, Payload};
+use crate::policy;
 
 /// Logical issuer identifier (must match VC `iss` in M10).
 pub type IssuerId = String;
@@ -194,10 +195,71 @@ impl TrustView {
         let mut issuer_keys: HashMap<IssuerId, HashMap<KeyId, IssuerKeyRecord>> = HashMap::new();
         let mut status_versions: HashMap<(IssuerId, ListId, u32), StatusList> = HashMap::new();
 
-        for id in order {
+        // Build epochs using the M4-style VC path so we can interpret
+        // "issuer_admin" roles for gating trust ops. This path does *not*
+        // depend on TrustView, so there is no circularity.
+        let has_policy_like = order.iter().any(|id| {
+            dag.get(id)
+                .map(|op| {
+                    matches!(
+                        op.header.payload,
+                        Payload::Grant { .. } | Payload::Revoke { .. } | Payload::KeyGrant { .. }
+                    )
+                })
+                .unwrap_or(false)
+        });
+
+        let issuer_admin_epochs: policy::EpochIndex = if has_policy_like {
+            policy::build_auth_epochs(dag, order)
+        } else {
+            policy::EpochIndex::default()
+        };
+
+        Self::build_from_dag_with_epochs_internal(dag, order, &issuer_admin_epochs)
+    }
+
+    /// Internal helper: assemble issuer keys + status lists given a precomputed
+    /// `EpochIndex` describing authorization (including issuer_admin epochs).
+    fn build_from_dag_with_epochs_internal(
+        dag: &Dag,
+        order: &[OpId],
+        issuer_admin_epochs: &policy::EpochIndex,
+    ) -> Self {
+        let mut issuer_keys: HashMap<IssuerId, HashMap<KeyId, IssuerKeyRecord>> = HashMap::new();
+        let mut status_versions: HashMap<(IssuerId, ListId, u32), StatusList> = HashMap::new();
+
+        for (pos, id) in order.iter().enumerate() {
             let Some(op) = dag.get(id) else {
                 continue;
             };
+
+            // For trust ops, enforce issuer_admin gating once any issuer_admin
+            // epoch is live at this topo position + HLC. Before that point,
+            // trust ops are accepted (bootstrap behaviour).
+            let is_trust_op = matches!(
+                op.header.payload,
+                Payload::IssuerKey { .. }
+                    | Payload::IssuerKeyRevoke { .. }
+                    | Payload::StatusListChunk { .. }
+            );
+
+            if is_trust_op {
+                let at_hlc = op.hlc();
+                let gating_active =
+                policy::issuer_admin_mode_active(issuer_admin_epochs, pos, at_hlc);
+                if gating_active
+                                && !policy::author_is_issuer_admin_at(
+                                            issuer_admin_epochs,
+                                            &op.header.author_pk,
+                                            pos,
+                                            at_hlc,
+                                        )
+                {
+                    // Unauthorized trust op; ignore for TrustView assembly.
+                    continue;
+                }
+            }
+
             match &op.header.payload {
                 Payload::IssuerKey {
                     issuer_id,
@@ -316,6 +378,18 @@ impl TrustView {
             status_lists,
         }
     }
+            /// Test-only hook: build a TrustView using a supplied EpochIndex.
+    ///
+    /// This lets tests force issuer_admin mode "on" (or off) without needing
+    /// real VCs + Grants to flow through `build_auth_epochs`.
+    #[cfg(test)]
+    pub(crate) fn build_from_dag_with_epochs_for_test(
+        dag: &Dag,
+        order: &[OpId],
+        issuer_admin_epochs: &policy::EpochIndex,
+    ) -> Self {
+        Self::build_from_dag_with_epochs_internal(dag, order, issuer_admin_epochs)
+    }
 
     /// Check whether a credential index is revoked in the latest assembled
     /// status list for `list_id`.
@@ -405,11 +479,50 @@ impl TrustView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{generate_keypair, vk_to_bytes};
+    use crate::crypto::{generate_keypair, vk_to_bytes, PublicKeyBytes};
     use crate::dag::Dag;
     use crate::hlc::Hlc;
-    use crate::op::{Op, Payload};
+    use crate::op::{Op, OpHeader, OpId, Payload};
+    use crate::policy::{Epoch, EpochIndex, TagSet};
+    use crate::vc::{verify_vc_with_trustview, VcError};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
+    use serde_json::json;
     use std::collections::BTreeMap;
+
+    fn pk(fill: u8) -> PublicKeyBytes {
+        [fill; 32]
+    }
+
+    fn hex_from_bytes(v: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(v.len() * 2);
+        for &b in v {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    fn make_trust_op(
+        op_id: OpId,
+        parents: Vec<OpId>,
+        hlc_ms: u64,
+        author_pk: PublicKeyBytes,
+        payload: Payload,
+    ) -> Op {
+        Op {
+            header: OpHeader {
+                parents,
+                hlc: Hlc::new(hlc_ms, 0),
+                author_pk,
+                payload,
+            },
+            sig: Vec::new(),
+            op_id,
+        }
+    }
 
     #[test]
     fn status_list_is_revoked_matches_little_endian_bits() {
@@ -525,5 +638,285 @@ mod tests {
         assert!(tv.select_key(&issuer_id, Some(&key_id), 599).is_some());
         assert!(tv.select_key(&issuer_id, Some(&key_id), 600).is_none());
         assert!(tv.select_key(&issuer_id, Some(&key_id), 1_000).is_none());
+    }
+
+    #[test]
+    fn unauthorized_trust_ops_ignored_once_issuer_admin_active() {
+        let admin_pk = pk(1);
+        let non_admin_pk = pk(2);
+
+        let mut dag = Dag::new();
+
+        // IssuerKey by issuer_admin (should be kept).
+        let issuer_id_admin = "issuer-admin".to_string();
+        let key_id_admin = "k1".to_string();
+        let pubkey_admin = vec![9u8; 32];
+
+        let key_admin_op_id: OpId = [1u8; 32];
+        let key_admin_op = make_trust_op(
+            key_admin_op_id,
+            vec![],
+            10,
+            admin_pk,
+            Payload::IssuerKey {
+                issuer_id: issuer_id_admin.clone(),
+                key_id: key_id_admin.clone(),
+                algo: "EdDSA".to_string(),
+                pubkey: pubkey_admin.clone(),
+                valid_from_ms: 0,
+                valid_until_ms: 1_000_000,
+                prev_key_id: None,
+            },
+        );
+        dag.insert(key_admin_op);
+
+        // IssuerKey by non-admin (must be ignored once issuer_admin mode is on).
+        let issuer_id_bad = "issuer-bad".to_string();
+        let key_id_bad = "k2".to_string();
+        let pubkey_bad = vec![8u8; 32];
+
+        let key_bad_op_id: OpId = [2u8; 32];
+        let key_bad_op = make_trust_op(
+            key_bad_op_id,
+            vec![key_admin_op_id],
+            20,
+            non_admin_pk,
+            Payload::IssuerKey {
+                issuer_id: issuer_id_bad.clone(),
+                key_id: key_id_bad.clone(),
+                algo: "EdDSA".to_string(),
+                pubkey: pubkey_bad.clone(),
+                valid_from_ms: 0,
+                valid_until_ms: 1_000_000,
+                prev_key_id: None,
+            },
+        );
+        dag.insert(key_bad_op);
+
+        // Status list chunk by issuer_admin (kept).        
+        let list_ok_id = "list-ok".to_string();
+        let status_ok_op_id: OpId = [3u8; 32];
+        let mut hasher = Sha256::new();
+        let chunk_ok: Vec<u8> = vec![0b0000_0001];
+        hasher.update(&chunk_ok);
+        let digest_ok: [u8; 32] = hasher.finalize().into();
+
+        let status_ok_op = make_trust_op(
+            status_ok_op_id,
+            vec![key_bad_op_id],
+            30,
+            admin_pk,
+            Payload::StatusListChunk {
+                issuer_id: issuer_id_admin.clone(),
+                list_id: list_ok_id.clone(),
+                version: 1,
+                chunk_index: 0,
+                bitset_sha256: digest_ok,
+                chunk_bytes: chunk_ok.clone(),
+            },
+        );
+        dag.insert(status_ok_op);
+
+        // Status list chunk by non-admin (must be ignored once issuer_admin mode is on).
+        let list_bad_id = "list-bad".to_string();
+        let status_bad_op_id: OpId = [4u8; 32];
+        let mut hasher_bad = Sha256::new();
+        let chunk_bad: Vec<u8> = vec![0b0000_0001];
+        hasher_bad.update(&chunk_bad);
+        let digest_bad: [u8; 32] = hasher_bad.finalize().into();
+
+        let status_bad_op = make_trust_op(
+            status_bad_op_id,
+            vec![status_ok_op_id],
+            40,
+            non_admin_pk,
+            Payload::StatusListChunk {
+                issuer_id: issuer_id_bad.clone(),
+                list_id: list_bad_id.clone(),
+                version: 1,
+                chunk_index: 0,
+                bitset_sha256: digest_bad,
+                chunk_bytes: chunk_bad.clone(),
+            },
+        );
+        dag.insert(status_bad_op);
+
+        let order = dag.topo_sort();
+
+        // Synthetic issuer_admin epoch: admin_pk has role=issuer_admin for the
+        // entire log. This forces gating to be "on" for all trust ops.
+        let mut idx = EpochIndex::default();
+        idx.entries.insert(
+            (admin_pk, "issuer_admin".to_string()),
+            vec![Epoch {
+                scope: TagSet::new(),
+                start_pos: 0,
+                end_pos: None,
+                not_before: None,
+                not_after: None,
+            }],
+        );
+
+        let tv = TrustView::build_from_dag_with_epochs_for_test(&dag, &order, &idx);
+
+        // Only issuer_admin-authored issuer_id/key_id pair is present.
+        assert!(tv.issuer_keys.contains_key(&issuer_id_admin));
+        let admin_keys = tv.issuer_keys.get(&issuer_id_admin).unwrap();
+        assert!(admin_keys.contains_key(&key_id_admin));
+
+        // Non-admin issuer must not appear in TrustView.
+        assert!(
+            !tv.issuer_keys.contains_key(&issuer_id_bad),
+            "unauthorized IssuerKey must be ignored once issuer_admin is active"
+        );
+
+        // Status lists: only admin-authored list should be visible.
+        assert!(tv.status_lists.contains_key(&list_ok_id));
+        assert!(
+            !tv.status_lists.contains_key(&list_bad_id),
+            "unauthorized StatusListChunk must be ignored once issuer_admin is active"
+        );
+    }
+
+    #[test]
+    fn vc_verification_uses_only_issuer_admin_trust_ops() {
+        // issuer_admin principal and a non-admin principal
+        let admin_pk = pk(10);
+        let non_admin_pk = pk(20);
+
+        // Two issuer keypairs purely for VC signing.
+        let admin_issuer_sk = SigningKey::from_bytes(&[42u8; 32]);
+        let admin_issuer_vk: VerifyingKey = admin_issuer_sk.verifying_key();
+        let admin_pubkey_bytes: Vec<u8> = admin_issuer_vk.to_bytes().to_vec();
+
+        let bad_issuer_sk = SigningKey::from_bytes(&[43u8; 32]);
+        let bad_issuer_vk: VerifyingKey = bad_issuer_sk.verifying_key();
+        let bad_pubkey_bytes: Vec<u8> = bad_issuer_vk.to_bytes().to_vec();
+
+        let mut dag = Dag::new();
+
+        // Authorized IssuerKey for "iss-ok" authored by issuer_admin.
+        let iss_ok = "iss-ok".to_string();
+        let kid_ok = "k1".to_string();
+        let ok_op_id: OpId = [11u8; 32];
+        let ok_op = make_trust_op(
+            ok_op_id,
+            vec![],
+            0,
+            admin_pk,
+            Payload::IssuerKey {
+                issuer_id: iss_ok.clone(),
+                key_id: kid_ok.clone(),
+                algo: "EdDSA".to_string(),
+                pubkey: admin_pubkey_bytes.clone(),
+                valid_from_ms: 0,
+                valid_until_ms: 1_000_000,
+                prev_key_id: None,
+            },
+        );
+        dag.insert(ok_op);
+
+        // Unauthorized IssuerKey for "iss-bad" authored by a non-admin principal.
+        let iss_bad = "iss-bad".to_string();
+        let kid_bad = "k-bad".to_string();
+        let bad_op_id: OpId = [12u8; 32];
+        let bad_op = make_trust_op(
+            bad_op_id,
+            vec![ok_op_id],
+            0,
+            non_admin_pk,
+            Payload::IssuerKey {
+                issuer_id: iss_bad.clone(),
+                key_id: kid_bad.clone(),
+                algo: "EdDSA".to_string(),
+                pubkey: bad_pubkey_bytes.clone(),
+                valid_from_ms: 0,
+                valid_until_ms: 1_000_000,
+                prev_key_id: None,
+            },
+        );
+        dag.insert(bad_op);
+
+        let order = dag.topo_sort();
+
+        // issuer_admin epoch for admin_pk covering entire log
+        let mut idx = EpochIndex::default();
+        idx.entries.insert(
+            (admin_pk, "issuer_admin".to_string()),
+            vec![Epoch {
+                scope: TagSet::new(),
+                start_pos: 0,
+                end_pos: None,
+                not_before: None,
+                not_after: None,
+            }],
+        );
+
+        let tv = TrustView::build_from_dag_with_epochs_for_test(&dag, &order, &idx);
+
+        // Sanity: only "iss-ok" appears in TrustView; "iss-bad" was dropped.
+        assert!(tv.issuer_keys.contains_key(&iss_ok));
+        assert!(
+            !tv.issuer_keys.contains_key(&iss_bad),
+            "non-admin IssuerKey must not contribute to TrustView"
+        );
+
+        // Helper: build a minimal EdDSA JWT VC for given (iss, kid, signing key).
+        fn make_vc(iss: &str, kid: &str, sk: &SigningKey) -> Vec<u8> {
+            let subject_pk = pk(99);
+            let sub_hex = hex_from_bytes(&subject_pk);
+
+            let header = json!({
+                "alg": "EdDSA",
+                "kid": kid,
+            });
+            let payload = json!({
+                "iss": iss,
+                "jti": "cred-1",
+                "role": "editor",
+                "sub_pk": sub_hex,
+                "nbf": 0u64,
+                "exp": 1_000_000u64,
+                "scope": ["hv"],
+            });
+
+            let header_bytes = serde_json::to_vec(&header).unwrap();
+            let payload_bytes = serde_json::to_vec(&payload).unwrap();
+
+            let h_b64 = URL_SAFE_NO_PAD.encode(header_bytes);
+            let p_b64 = URL_SAFE_NO_PAD.encode(payload_bytes);
+            let signing_input = [h_b64.as_bytes(), b".", p_b64.as_bytes()].concat();
+
+            let sig: Signature = sk.sign(&signing_input);
+            let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+            format!("{}.{}.{}", h_b64, p_b64, sig_b64).into_bytes()
+        }
+
+        let vc_ok = make_vc(&iss_ok, &kid_ok, &admin_issuer_sk);
+        let vc_bad = make_vc(&iss_bad, &kid_bad, &bad_issuer_sk);
+
+        // VC under issuer_admin-published key must verify.
+        let res_ok = verify_vc_with_trustview(&vc_ok, &tv);
+        assert!(
+            res_ok.is_ok(),
+            "VC issued under 'iss-ok' must verify using issuer_admin-authored key"
+        );
+
+        // VC under non-admin-published key must fail with UnknownIssuer, since
+        // that issuer id is not present in the gated TrustView.
+        let res_bad = verify_vc_with_trustview(&vc_bad, &tv);
+        match res_bad {
+            Err(VcError::UnknownIssuer(s)) => {
+                assert!(
+                    s == iss_bad,
+                    "UnknownIssuer should mention the unauthorized issuer id"
+                );
+            }
+            other => panic!(
+                "expected UnknownIssuer for VC under non-admin issuer; got {:?}",
+                other
+            ),
+        }
     }
 }

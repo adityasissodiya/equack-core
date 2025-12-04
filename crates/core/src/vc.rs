@@ -218,11 +218,14 @@ pub fn verify_vc_inband(compact_jwt: &[u8], trust: &TrustView) -> Result<Verifie
 
 /// Verify a compact JWT VC using an in-band `TrustView` (M10 path).
 ///
-/// - Issuer public keys are resolved from `trust.issuer_keys` by `(iss, kid?)`.
+/// - Issuer public keys are resolved via `TrustView::select_key`, taking
+///   into account activation, expiry, and any on-log revocation. The
+///   selection uses the VC's `nbf` as the logical evaluation time.
 /// - Revocation is checked against `trust.status_lists` if a `status`
 ///   claim is present in the VC payload.
-/// - Time (`nbf` / `exp`) is *parsed* but not enforced here; gating is still
-///   done by HLC in the policy layer, same as in the filesystem-backed path.
+/// - Time (`nbf` / `exp`) is *parsed* but not enforced on the credential
+///   itself; replay/policy code is still responsible for gating ops by
+///   comparing op HLC vs. `[nbf, exp)`.
 pub fn verify_vc_with_trustview(
     compact_jwt: &[u8],
     trust: &TrustView,
@@ -298,27 +301,15 @@ pub fn verify_vc_with_trustview(
         scope_tags.insert(s.to_string());
     }
 
-    // issuer key: resolve via (iss, kid?) in TrustView.
+    // issuer key: resolve via (iss, kid?) in TrustView, taking into account
+    // key activation, expiry, and any on-log revocation. We use the VC's
+    // `nbf` as the logical evaluation time here; for replay-time policy
+    // gating, callers should instead evaluate at the consuming op's HLC
+    // physical time.
     let kid_opt = header.get("kid").and_then(|v| v.as_str());
-    let issuer_entries = trust
-        .issuer_keys
-        .get(iss)
+    let key_record = trust
+        .select_key(iss, kid_opt, nbf)
         .ok_or_else(|| VcError::UnknownIssuer(iss.to_string()))?;
-
-    let key_record = if let Some(kid) = kid_opt {
-        issuer_entries
-            .get(kid)
-            .ok_or_else(|| VcError::UnknownIssuer(iss.to_string()))?
-    } else {
-        // No kid: if exactly one key is configured for this issuer, use it.
-        if issuer_entries.len() == 1 {
-            issuer_entries.values().next().unwrap()
-        } else {
-            // Ambiguous; we could introduce a dedicated error, but UnknownIssuer
-            // is good enough for now.
-            return Err(VcError::UnknownIssuer(iss.to_string()));
-        }
-    };
 
     // Enforce algorithm label from the IssuerKey record.
     if key_record.algo != "EdDSA" {

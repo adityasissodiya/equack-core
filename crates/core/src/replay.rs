@@ -7,8 +7,6 @@
 #[cfg(feature = "audit")]
 use crate::policy::DenyDetail;
 
-use crate::status::StatusCache;
-use crate::trust::TrustStore;
 use crate::trustview::TrustView;
 
 use std::collections::{HashMap, HashSet};
@@ -65,161 +63,20 @@ pub fn apply_incremental(state: &mut State, dag: &Dag) -> (State, [u8; 32]) {
     (state.clone(), digest)
 }
 
-/// Full rebuild using in-band TrustView for VC epochs (M10 path).
+/// Legacy alias for the M10 in-band replay path.
 ///
-/// This does NOT change the default replay path; it is a separate helper
-/// that callers (e.g., CLI) can opt into when they want in-band trust.
+/// Default replay already uses TrustView for VC-backed epochs, so this is
+/// now just a thin wrapper around `replay_full`.
 pub fn replay_full_inband(dag: &Dag) -> (State, [u8; 32]) {
-    let t0 = Instant::now();
-    let order = dag.topo_sort();
-    let trust_view = TrustView::build_from_dag(dag, &order);
-
-    let mut state = State::new();
-    apply_over_order_inband(dag, &order, &trust_view, &mut state);
-
-    let digest = state.digest();
-    METRICS.observe_ms(
-        "replay_full_inband_ms",
-        t0.elapsed().as_millis() as u64,
-    );
-    (state, digest)
+    replay_full(dag)
 }
 
-/// Incremental apply using in-band TrustView for VC epochs (M10 path).
+/// Legacy alias for the M10 in-band incremental replay path.
+///
+/// Default incremental replay already uses TrustView for VC-backed epochs,
+/// so this is now just a thin wrapper around `apply_incremental`.
 pub fn apply_incremental_inband(state: &mut State, dag: &Dag) -> (State, [u8; 32]) {
-    let t0 = Instant::now();
-    let order = dag.topo_sort();
-    let trust_view = TrustView::build_from_dag(dag, &order);
-
-    apply_over_order_inband(dag, &order, &trust_view, state);
-
-    let digest = state.digest();
-    METRICS.observe_ms(
-        "replay_incremental_inband_ms",
-        t0.elapsed().as_millis() as u64,
-    );
-    (state.clone(), digest)
-}
-
-fn apply_over_order_inband(
-    dag: &Dag,
-    order: &[OpId],
-    trust_view: &TrustView,
-    state: &mut State,
-) {
-    // Detect whether any policy events exist; if none, default-allow (M2 compatibility).
-    let has_policy = order.iter().any(|id| {
-        dag.get(id)
-            .map(|op| {
-                matches!(
-                    op.header.payload,
-                    Payload::Grant { .. } | Payload::Revoke { .. }
-                )
-            })
-            .unwrap_or(false)
-    });
-
-    // Build epochs using in-band TrustView (M10).
-    let epoch_index = if has_policy {
-        policy::build_auth_epochs_with_trustview(dag, order, trust_view)
-    } else {
-        Default::default()
-    };
-
-    // Start position for incremental suffix.
-    let mut start_pos = state.processed_count();
-    if start_pos > order.len() {
-        start_pos = order.len();
-    }
-
-    // M7 counters.
-    let mut data_total: u64 = 0;
-    let mut data_applied: u64 = 0;
-    let mut data_skipped_policy: u64 = 0;
-
-    // Map op id -> global topo position (for HB oracle).
-    let _pos_index: HashMap<OpId, usize> = order
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(i, id)| (id, i))
-        .collect();
-
-    for (pos, id) in order.iter().enumerate().skip(start_pos) {
-        let Some(op) = dag.get(id) else {
-            continue;
-        };
-        // Invalid signature => skip.
-        if !op.verify() {
-            continue;
-        }
-        match &op.header.payload {
-            Payload::Data { key, value } => {
-                data_total += 1;
-                if let Some((action, obj, field, elem_opt, resource_tags)) =
-                    policy::derive_action_and_tags(key)
-                {
-                    let allowed = if has_policy {
-                        policy::is_permitted_at_pos_with_reason(
-                            &epoch_index,
-                            &op.header.author_pk,
-                            action,
-                            &resource_tags,
-                            pos,
-                            op.hlc(),
-                        )
-                        .is_ok()
-                    } else {
-                        true
-                    };
-                    if !allowed {
-                        data_skipped_policy += 1;
-                        continue;
-                    }
-
-                    match action {
-                        Action::SetField => {
-                            let mv = state.mv_field_mut(&obj, &field);
-                            mv.apply_put(*id, value.clone(), |a, b| dag_is_ancestor(dag, a, b));
-                            METRICS
-                                .observe_ms("mvreg_concurrent_winners", mv.values().len() as u64);
-                            data_applied += 1;
-                        }
-                        Action::SetAdd => {
-                            if let Some(elem) = elem_opt {
-                                let set = state.set_field_mut(&obj, &field);
-                                set.add(elem, *id, value.clone());
-                                data_applied += 1;
-                            }
-                        }
-                        Action::SetRem => {
-                            if let Some(elem) = elem_opt {
-                                let set = state.set_field_mut(&obj, &field);
-                                set.remove_with_hb(&elem, id, |add_tag, rem| {
-                                    dag_is_ancestor(dag, add_tag, rem)
-                                });
-                                data_applied += 1;
-                            }
-                        }
-                    }
-                }
-                // Unknown prefixes ignored.
-            }
-            // Policy events: consumed by epoch builder.
-            Payload::Grant { .. } | Payload::Revoke { .. } => {}
-            _ => {}
-        }
-    }
-
-    // Processed count = entire order length (we traversed all).
-    state.set_processed_count(order.len());
-
-    // Push counters once per call.
-    if data_total > 0 {
-        METRICS.inc("ops_total", data_total);
-        METRICS.inc("ops_applied", data_applied);
-        METRICS.inc("ops_skipped_policy", data_skipped_policy);
-    }
+    apply_incremental(state, dag)
 }
 
 #[cfg(not(feature = "audit"))]
@@ -236,16 +93,10 @@ fn apply_over_order(dag: &Dag, order: &[OpId], state: &mut State) {
             .unwrap_or(false)
     });
 
-    // Build epochs (cheap at our scale).
+    // Build epochs from in-band TrustView (M10 path).
     let epoch_index = if has_policy {
-        // Try to build VC-aware epochs; if trust dir missing, fall back.
-        let trust = TrustStore::load_from_dir("./trust").ok();
-        let mut status = StatusCache::load_from_dir("./trust/status");
-        if let Some(trust) = trust {
-            policy::build_auth_epochs_with(dag, order, &trust, &mut status)
-        } else {
-            policy::build_auth_epochs(dag, order)
-        }
+        let trust_view = TrustView::build_from_dag(dag, order);
+        policy::build_auth_epochs_with_trustview(dag, order, &trust_view)
     } else {
         Default::default()
     };
@@ -395,16 +246,10 @@ fn apply_over_order_with_audit(
             .unwrap_or(false)
     });
 
-    // Build epochs (cheap at our scale).
+    // Build epochs from in-band TrustView (M10 path).
     let epoch_index = if has_policy {
-        // Try to build VC-aware epochs; if trust dir missing, fall back.
-        let trust = TrustStore::load_from_dir("./trust").ok();
-        let mut status = StatusCache::load_from_dir("./trust/status");
-        if let Some(trust) = trust {
-            policy::build_auth_epochs_with(dag, order, &trust, &mut status)
-        } else {
-            policy::build_auth_epochs(dag, order)
-        }
+        let trust_view = TrustView::build_from_dag(dag, order);
+        policy::build_auth_epochs_with_trustview(dag, order, &trust_view)
     } else {
         Default::default()
     };
@@ -632,14 +477,9 @@ where
     });
 
     let epoch_index = if has_policy_like {
-        // Same trust/VC path as apply_over_order().
-        let trust = TrustStore::load_from_dir("./trust").ok();
-        let mut status = StatusCache::load_from_dir("./trust/status");
-        if let Some(trust) = trust {
-            policy::build_auth_epochs_with(dag, &order, &trust, &mut status)
-        } else {
-            policy::build_auth_epochs(dag, &order)
-        }
+        // Use in-band TrustView, same as write replay (M10).
+        let trust_view = TrustView::build_from_dag(dag, &order);
+        policy::build_auth_epochs_with_trustview(dag, &order, &trust_view)
     } else {
         policy::EpochIndex::default()
     };

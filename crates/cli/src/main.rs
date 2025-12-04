@@ -49,6 +49,8 @@
 //!       - Emit a StatusListChunk op with a status bitset chunk for revocation (M10).
 //!   12) trust-dump
 //!       - Build and print the in-band TrustView (issuer keys + status lists) from the store.
+//!   13) trust-issuer-revoke <issuer_id> <key_id> <reason> <issuer_sk_hex>
+//!       - Emit an IssuerKeyRevoke op to deactivate a previously-published issuer key.
 
 //! Notes:
 //!   - DAG ignores ops whose parents are unknown (pending); replay only uses activated ops.
@@ -197,6 +199,21 @@ enum Cmd {
         /// Not-after timestamp in ms since UNIX epoch (defaults to now + 365 days)
         #[arg(long)]
         valid_until_ms: Option<u64>,
+    },
+
+    /// Revoke an in-band issuer key on the log.
+    ///
+    /// This writes a Payload::IssuerKeyRevoke op signed by the issuer SK into
+    /// the RocksDB store selected by ECAC_DB (default ".ecac.db").
+    TrustIssuerRevoke {
+        /// Logical issuer identifier (matches VC `iss`)
+        issuer_id: String,
+        /// Logical key identifier (matches VC `kid`)
+        key_id: String,
+        /// Human-readable revocation reason (for audit/debug)
+        reason: String,
+        /// Issuer secret key (32-byte ed25519) hex
+        issuer_sk_hex: String,
     },
 
     /// Publish a single in-band status-list chunk into the store.
@@ -499,6 +516,15 @@ fn main() -> anyhow::Result<()> {
                 valid_from_ms,
                 valid_until_ms,
             )?;
+        }
+
+        Cmd::TrustIssuerRevoke {
+            issuer_id,
+            key_id,
+            reason,
+            issuer_sk_hex,
+        } => {
+            commands::cmd_trust_issuer_revoke(&issuer_id, &key_id, &reason, &issuer_sk_hex)?;
         }
 
         Cmd::TrustStatusChunk {

@@ -483,6 +483,68 @@ pub fn cmd_trust_issuer_publish(
     Ok(())
 }
 
+/// Publish an IssuerKeyRevoke op into the store to deactivate a key.
+///
+/// Semantics:
+///   - Identifies the key by (issuer_id, key_id).
+///   - The revoke point is the op's HLC physical time; from that point
+///     onwards in the total order, the key is considered inactive.
+///   - The op is authored and signed by `issuer_sk_hex`; in M10 policy,
+///     only principals with the appropriate `issuer_admin` authority
+///     should be allowed to emit these ops.
+///
+/// Environment:
+///   - ECAC_DB selects the RocksDB store (default ".ecac.db").
+pub fn cmd_trust_issuer_revoke(
+    issuer_id: &str,
+    key_id: &str,
+    reason: &str,
+    issuer_sk_hex: &str,
+) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Parse issuer SK and derive PK.
+    let issuer_sk = parse_sk_hex(issuer_sk_hex)?;
+    let issuer_pk = vk_to_bytes(&issuer_sk.verifying_key());
+
+    // Open store via ECAC_DB or default ".ecac.db".
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Parents from current DAG heads (same pattern as other trust ops).
+    let parents = store.heads(8).unwrap_or_default();
+
+    // Timestamp: wall-clock ms, logical=1.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let hlc = Hlc::new(now_ms, 1);
+
+    let op = Op::new(
+        parents,
+        hlc,
+        issuer_pk,
+        Payload::IssuerKeyRevoke {
+            issuer_id: issuer_id.to_string(),
+            key_id: key_id.to_string(),
+            reason: reason.to_string(),
+        },
+        &issuer_sk,
+    );
+
+    let bytes = canonical_cbor(&op);
+    let id = store.put_op_cbor(&bytes)?;
+    println!(
+        "issuer_revoke_op_id={} issuer_id={} key_id={} reason={}",
+        to_hex32(&id),
+        issuer_id,
+        key_id,
+        reason
+    );
+    Ok(())
+}
+
 /// Publish a single StatusListChunk op into the store.
 ///
 /// The caller must supply the SHA-256 over the COMPLETE bitset (64 hex chars).
