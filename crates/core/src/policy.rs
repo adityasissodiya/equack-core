@@ -59,7 +59,8 @@ use crate::hlc::Hlc;
 use crate::op::{OpId, Payload};
 use crate::status::StatusCache;
 use crate::trust::TrustStore;
-use crate::vc::verify_vc;
+use crate::trustview::TrustView;
+use crate::vc::{verify_vc, verify_vc_with_trustview};
 
 pub type TagSet = BTreeSet<String>;
 
@@ -827,6 +828,126 @@ pub fn build_auth_epochs_with(
             _ => {}
         }
     }
+    METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
+    if epochs_opened > 0 {
+        METRICS.inc("epochs_total", epochs_opened);
+    }
+    if revocations_seen > 0 {
+        METRICS.inc("revocations_seen", revocations_seen);
+    }
+    if keygrants_seen > 0 {
+        METRICS.inc("keygrants_seen", keygrants_seen);
+    }
+    idx
+}
+
+/// Build authorization epochs using an in-band TrustView (M10 path).
+///
+/// Differences vs `build_auth_epochs_with`:
+///   - Issuer public keys and status lists are resolved from `TrustView`
+///     instead of filesystem `TrustStore` + `StatusCache`.
+///   - VC signature + revocation are checked via `verify_vc_with_trustview`.
+pub fn build_auth_epochs_with_trustview(
+    dag: &Dag,
+    topo: &[OpId],
+    trust_view: &TrustView,
+) -> EpochIndex {
+    let t0 = Instant::now();
+    let mut epochs_opened: u64 = 0;
+    let mut revocations_seen: u64 = 0;
+    let mut keygrants_seen: u64 = 0;
+
+    // 1) verify credentials once, index by cred_hash
+    let mut vc_index: BTreeMap<[u8; 32], VerifiedClaims> = BTreeMap::new();
+    for id in topo {
+        if let Some(op) = dag.get(id) {
+            if let Payload::Credential { cred_bytes, .. } = &op.header.payload {
+                if let Ok(vc) = verify_vc_with_trustview(cred_bytes, trust_view) {
+                    vc_index.insert(
+                        vc.cred_hash,
+                        VerifiedClaims {
+                            subject_pk: vc.subject_pk,
+                            role: vc.role,
+                            scope: vc.scope_tags,
+                            nbf_ms: vc.nbf_ms,
+                            exp_ms: vc.exp_ms,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // 2) build epochs: only Grant/KeyGrant referencing a verified VC count
+    let mut idx = EpochIndex::default();
+    for (pos, id) in topo.iter().enumerate() {
+        let Some(op) = dag.get(id) else {
+            continue;
+        };
+        match &op.header.payload {
+            Payload::Grant {
+                subject_pk,
+                cred_hash,
+            } => {
+                if let Some(vc) = vc_index.get(cred_hash) {
+                    if &vc.subject_pk != subject_pk {
+                        continue;
+                    }
+                    idx.push_epoch(
+                        *subject_pk,
+                        vc.role.clone(),
+                        Epoch {
+                            scope: vc.scope.clone(),
+                            start_pos: pos,
+                            end_pos: None,
+                            not_before: Some(Hlc::new(vc.nbf_ms, 0)),
+                            not_after: Some(Hlc::new(vc.exp_ms, 0)),
+                        },
+                    );
+                    epochs_opened += 1;
+                }
+            }
+            Payload::Revoke {
+                subject_pk,
+                role,
+                scope_tags,
+                ..
+            } => {
+                revocations_seen += 1;
+                let mut s = TagSet::new();
+                for t in scope_tags {
+                    s.insert(t.clone());
+                }
+                idx.close_epochs_intersecting_scope(subject_pk, role, &s, pos);
+            }
+            Payload::KeyGrant {
+                subject_pk,
+                tag,
+                key_version,
+                cred_hash,
+            } => {
+                if let Some(vc) = vc_index.get(cred_hash) {
+                    if &vc.subject_pk != subject_pk {
+                        continue;
+                    }
+                    idx.push_key_epoch(
+                        *subject_pk,
+                        tag.clone(),
+                        *key_version,
+                        KeyGrantEpoch {
+                            tag: tag.clone(),
+                            key_version: *key_version,
+                            not_before: Some(Hlc::new(vc.nbf_ms, 0)),
+                            not_after: Some(Hlc::new(vc.exp_ms, 0)),
+                        },
+                    );
+                    keygrants_seen += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
     METRICS.observe_ms("epoch_build_ms", t0.elapsed().as_millis() as u64);
     if epochs_opened > 0 {
         METRICS.inc("epochs_total", epochs_opened);

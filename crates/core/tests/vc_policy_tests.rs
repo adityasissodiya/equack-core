@@ -5,8 +5,10 @@ use ecac_core::op::{Op, Payload};
 use ecac_core::policy::{build_auth_epochs_with, derive_action_and_tags, is_permitted_at_pos};
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
+use ecac_core::trustview::{IssuerKeyRecord, StatusList, TrustView};
+use ecac_core::vc::verify_vc_with_trustview;
 use ed25519_dalek::VerifyingKey;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 mod util;
 use util::make_credential_and_grant;
@@ -667,4 +669,147 @@ fn vc_empty_scope_denies_everything() {
         3,
         Hlc::new(nbf + 2, 7)
     ));
+}
+
+#[test]
+fn vc_inband_trustview_allows() {
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    let nbf = 10_000u64;
+    let exp = 20_000u64;
+
+    // Build a normal Credential + Grant pair using the signing key.
+    let (cred, _grant) = make_credential_and_grant(
+        &issuer_sk,
+        issuer_id,
+        user_pk,
+        "editor",
+        &["hv"],
+        nbf,
+        exp,
+        &admin_sk,
+        admin_pk,
+    );
+
+    // Construct an in-band TrustView with exactly one issuer key.
+    let issuer_vk_bytes = vk_to_bytes(&issuer_vk);
+    let mut per_issuer = HashMap::new();
+    per_issuer.insert(
+        "k1".to_string(),
+        IssuerKeyRecord {
+            issuer_id: issuer_id.to_string(),
+            key_id: "k1".to_string(),
+            algo: "EdDSA".to_string(),
+            pubkey: issuer_vk_bytes.to_vec(),
+            // For this test, make the key effectively always valid.
+            valid_from_ms: 0,
+            valid_until_ms: u64::MAX,
+            activated_at_ms: 0,
+            revoked_at_ms: None,
+        },
+    );
+
+    let mut issuer_keys = HashMap::new();
+    issuer_keys.insert(issuer_id.to_string(), per_issuer);
+
+    let tv = TrustView {
+        issuer_keys,
+        status_lists: HashMap::new(),
+    };
+
+    // Extract the compact JWT and verify using only the in-band TrustView.
+    let cred_bytes = match &cred.header.payload {
+        Payload::Credential { cred_bytes, .. } => cred_bytes,
+        _ => panic!("expected Credential payload"),
+    };
+
+    let verified =
+        verify_vc_with_trustview(cred_bytes, &tv).expect("VC must verify under in-band trust");
+
+    assert_eq!(verified.issuer, issuer_id);
+    assert_eq!(verified.subject_pk, user_pk);
+    assert_eq!(verified.role, "editor");
+    assert_eq!(verified.scope_tags.contains("hv"), true);
+}
+
+#[test]
+fn vc_inband_trustview_status_revoked_denies() {
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    let nbf = 10_000u64;
+    let exp = 20_000u64;
+
+    // This helper already issues a VC with a status entry pointing at "list-0", index 0.
+    let (cred, _grant) = make_credential_and_grant(
+        &issuer_sk,
+        issuer_id,
+        user_pk,
+        "editor",
+        &["hv"],
+        nbf,
+        exp,
+        &admin_sk,
+        admin_pk,
+    );
+
+    // In-band issuer key.
+    let issuer_vk_bytes = vk_to_bytes(&issuer_vk);
+    let mut per_issuer = HashMap::new();
+    per_issuer.insert(
+        "k1".to_string(),
+        IssuerKeyRecord {
+            issuer_id: issuer_id.to_string(),
+            key_id: "k1".to_string(),
+            algo: "EdDSA".to_string(),
+            pubkey: issuer_vk_bytes.to_vec(),
+            valid_from_ms: 0,
+            valid_until_ms: u64::MAX,
+            activated_at_ms: 0,
+            revoked_at_ms: None,
+        },
+    );
+
+    // In-band status list: list-0, bit 0 set -> revoked.
+    let mut chunks = BTreeMap::new();
+    chunks.insert(0u32, vec![0b0000_0001]);
+
+    let status_list = StatusList {
+        issuer_id: issuer_id.to_string(),
+        list_id: "list-0".to_string(),
+        version: 1,
+        chunks,
+        bitset_sha256: [0u8; 32], // digest ignored in this partial M10 impl
+    };
+
+    let mut status_lists = HashMap::new();
+    status_lists.insert("list-0".to_string(), status_list);
+
+    let tv = TrustView {
+        issuer_keys: {
+            let mut m = HashMap::new();
+            m.insert(issuer_id.to_string(), per_issuer);
+            m
+        },
+        status_lists,
+    };
+
+    let cred_bytes = match &cred.header.payload {
+        Payload::Credential { cred_bytes, .. } => cred_bytes,
+        _ => panic!("expected Credential payload"),
+    };
+
+    let res = verify_vc_with_trustview(cred_bytes, &tv);
+    assert!(matches!(res, Err(ecac_core::vc::VcError::Revoked)));
 }

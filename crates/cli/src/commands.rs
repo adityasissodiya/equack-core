@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -27,7 +28,8 @@ use ecac_core::serialize::canonical_cbor;
 use ecac_core::state::FieldValue;
 use ecac_core::status::StatusCache;
 use ecac_core::trust::TrustStore;
-use ecac_core::vc::{blake3_hash32, verify_vc};
+use ecac_core::trustview::TrustView;
+use ecac_core::vc::{blake3_hash32, verify_vc, verify_vc_with_trustview};
 use ecac_store::Store;
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +90,19 @@ fn parse_pk_hex(hex: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+fn parse_sha256_hex(hex: &str) -> Result<[u8; 32]> {
+    let s = hex.trim();
+    if s.len() != 64 {
+        return Err(anyhow!("expected 64 hex chars for SHA-256 value"));
+    }
+    let b = s.as_bytes();
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = (hex_nibble(b[2 * i])? << 4) | hex_nibble(b[2 * i + 1])?;
+    }
+    Ok(out)
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersistVerifiedVc {
     cred_id: String,
@@ -102,6 +117,26 @@ struct PersistVerifiedVc {
     status_list_id: Option<String>,
     status_index: Option<u32>,
     cred_hash: [u8; 32],
+}
+
+#[derive(Serialize)]
+struct CliIssuerKeyView {
+    algo: String,
+    valid_from_ms: u64,
+    valid_until_ms: u64,
+    activated_at_ms: u64,
+    revoked_at_ms: Option<u64>,
+    pubkey_hex: String,
+}
+
+#[derive(Serialize)]
+struct CliStatusListView {
+    issuer_id: String,
+    list_id: String,
+    version: u32,
+    num_chunks: usize,
+    bitset_sha256_hex: String,
+    digest_matches: bool,
 }
 
 /// Mint a demo VC + trust config:
@@ -186,32 +221,28 @@ pub fn cmd_vc_mint_demo() -> Result<()> {
 
 pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
     let compact = fs::read(vc_path)?;
-    // By convention, look in ./trust and ./trust/status
-    let trust =
-        TrustStore::load_from_dir("./trust").map_err(|e| anyhow!("trust load failed: {:?}", e))?;
-    let mut status = StatusCache::load_from_dir("./trust/status");
 
-    let v = verify_vc(&compact, &trust, &mut status)
-        .map_err(|e| anyhow!("VC verify failed: {:?}", e))?;
-
-    //         // Persist VC caches (M5: avoid re-verification on boot)
-    // {
-    //     // Allow override via env; falls back to ".ecac.db"
-    //     let db_dir = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
-    //     let store = Store::open(Path::new(&db_dir), Default::default())?;
-
-    //     // Raw compact JWT bytes
-    //     store.persist_vc_raw(v.cred_hash, &compact)?;
-
-    //     // Verified struct, as CBOR
-    //     let verified_cbor = serde_cbor::to_vec(&v)?;
-    //     store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
-    // }
-
-    // ---- Persist VC caches (optional but sensible) ----
     // DB path via env ECAC_DB or default ".ecac.db"
     let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
     let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Prefer in-band trust (IssuerKey / StatusListChunk ops) when available.
+    // If no usable TrustView can be built, fall back to filesystem-backed
+    // trust (issuers.toml + trust/status/*.bin) for compatibility.
+    let v = match build_trustview_from_store(&store) {
+        Ok(tv) if !tv.issuer_keys.is_empty() || !tv.status_lists.is_empty() => {
+            verify_vc_with_trustview(&compact, &tv)
+                .map_err(|e| anyhow!("VC verify failed (in-band trust): {:?}", e))?
+        }
+        _ => {
+            // By convention, look in ./trust and ./trust/status
+            let trust = TrustStore::load_from_dir("./trust")
+                .map_err(|e| anyhow!("trust load failed: {:?}", e))?;
+            let mut status = StatusCache::load_from_dir("./trust/status");
+            verify_vc(&compact, &trust, &mut status)
+                .map_err(|e| anyhow!("VC verify failed (filesystem trust): {:?}", e))?
+        }
+    };
 
     // 1) Raw compact JWT bytes
     store.persist_vc_raw(v.cred_hash, &compact)?;
@@ -233,7 +264,6 @@ pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
 
     let verified_cbor = serde_cbor::to_vec(&pv)?;
     store.persist_vc_verified(v.cred_hash, &verified_cbor)?;
-    // ---------------------------------------------------
 
     let out = json!({
         "cred_id": v.cred_id,
@@ -249,6 +279,29 @@ pub fn cmd_vc_verify(vc_path: &str) -> Result<()> {
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+/// Build an in-band `TrustView` from the current store contents.
+///
+/// This replays only the trust-related payloads (IssuerKey / IssuerKeyRevoke /
+/// StatusListChunk) via `TrustView::build_from_dag`. Callers typically prefer
+/// in-band verification when this succeeds, and fall back to legacy
+/// filesystem-backed trust otherwise.
+fn build_trustview_from_store(store: &Store) -> Result<TrustView> {
+    let ids = store.topo_ids()?;
+    if ids.is_empty() {
+        return Ok(TrustView::default());
+    }
+
+    let blobs = store.load_ops_cbor(&ids)?;
+    let mut dag = Dag::new();
+    for (i, b) in blobs.into_iter().enumerate() {
+        let op: Op = serde_cbor::from_slice(&b)
+            .map_err(|e| anyhow!("decode Op {} from store failed: {e}", i))?;
+        dag.insert(op);
+    }
+
+    Ok(TrustView::build_from_dag(&dag, &ids))
 }
 
 pub fn cmd_vc_attach(
@@ -353,6 +406,230 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
         if value { 1 } else { 0 }
     );
     println!("wrote {}", dir.display());
+    Ok(())
+}
+
+/// Publish an in-band issuer key (IssuerKey op) into the RocksDB store.
+///
+/// - ECAC_DB selects the store (default ".ecac.db").
+// - The op is signed by `issuer_sk_hex` and authored by that key.
+pub fn cmd_trust_issuer_publish(
+    issuer_id: &str,
+    key_id: &str,
+    algo: &str,
+    issuer_sk_hex: &str,
+    prev_key_id: Option<&str>,
+    valid_from_ms: Option<u64>,
+    valid_until_ms: Option<u64>,
+) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Parse issuer SK and derive PK.
+    let issuer_sk = parse_sk_hex(issuer_sk_hex)?;
+    let issuer_pk = vk_to_bytes(&issuer_sk.verifying_key());
+
+    // Open store via ECAC_DB or default ".ecac.db".
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Parents from current DAG heads.
+    let parents = store.heads(8).unwrap_or_default();
+
+    // Timestamps.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let vf = valid_from_ms.unwrap_or(now_ms);
+    // Default validity window: +365 days from "now".
+    let default_vu = now_ms
+        .checked_add(365 * 24 * 60 * 60 * 1000)
+        .unwrap_or(u64::MAX);
+    let vu = valid_until_ms.unwrap_or(default_vu);
+    if vu <= vf {
+        return Err(anyhow!(
+            "valid_until_ms ({}) must be > valid_from_ms ({})",
+            vu,
+            vf
+        ));
+    }
+
+    let op = Op::new(
+        parents,
+        Hlc::new(now_ms, 1),
+        issuer_pk,
+        Payload::IssuerKey {
+            issuer_id: issuer_id.to_string(),
+            key_id: key_id.to_string(),
+            algo: algo.to_string(),
+            pubkey: issuer_pk.to_vec(),
+            prev_key_id: prev_key_id.map(|s| s.to_string()),
+            valid_from_ms: vf,
+            valid_until_ms: vu,
+        },
+        &issuer_sk,
+    );
+
+    let bytes = canonical_cbor(&op);
+    let id = store.put_op_cbor(&bytes)?;
+
+    println!(
+        "issuer_key_op_id={} issuer_id={} key_id={}",
+        to_hex32(&id),
+        issuer_id,
+        key_id
+    );
+    println!("valid_from_ms={} valid_until_ms={}", vf, vu);
+    Ok(())
+}
+
+/// Publish a single StatusListChunk op into the store.
+///
+/// The caller must supply the SHA-256 over the COMPLETE bitset (64 hex chars).
+pub fn cmd_trust_status_chunk(
+    issuer_id: &str,
+    list_id: &str,
+    version: u32,
+    chunk_index: u32,
+    chunk_path: &PathBuf,
+    issuer_sk_hex: &str,
+    bitset_sha256_hex: Option<&str>,
+) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let chunk_bytes = fs::read(chunk_path)
+        .map_err(|e| anyhow!("failed to read chunk from {}: {e}", chunk_path.display()))?;
+
+    let bitset_sha256 = match bitset_sha256_hex {
+        Some(h) => parse_sha256_hex(h)?,
+        None => {
+            return Err(anyhow!(
+                "bitset_sha256_hex not provided; pass --bitset-sha256-hex <64-hex>"
+            ));
+        }
+    };
+
+    let issuer_sk = parse_sk_hex(issuer_sk_hex)?;
+    let issuer_pk = vk_to_bytes(&issuer_sk.verifying_key());
+
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    let parents = store.heads(8).unwrap_or_default();
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let op = Op::new(
+        parents,
+        Hlc::new(now_ms, 1),
+        issuer_pk,
+        Payload::StatusListChunk {
+            issuer_id: issuer_id.to_string(),
+            list_id: list_id.to_string(),
+            version,
+            chunk_index,
+            bitset_sha256,
+            chunk_bytes,
+        },
+        &issuer_sk,
+    );
+
+    let bytes = canonical_cbor(&op);
+    let id = store.put_op_cbor(&bytes)?;
+    println!(
+        "status_list_chunk_op_id={} issuer_id={} list_id={} version={} chunk_index={}",
+        to_hex32(&id),
+        issuer_id,
+        list_id,
+        version,
+        chunk_index
+    );
+    Ok(())
+}
+
+/// Dump the in-band TrustView derived from the RocksDB log.
+///
+/// - Source: ECAC_DB (default ".ecac.db") as the op store.
+/// - Builds a Dag from all ops, runs TrustView::build_from_dag over topo order.
+/// - Prints a deterministic JSON summary:
+///     * issuers: issuer_id -> key_id -> {algo, validity, activation, revoked_at, pubkey_hex}
+///     * status_lists: list_id -> {issuer_id, version, num_chunks, bitset_sha256_hex, digest_matches}
+///     * issuers_digest_hex: blake3 over the issuers map (CBOR-encoded)
+///     * status_lists_digest_hex: blake3 over the status_lists map (CBOR-encoded)
+pub fn cmd_trust_dump() -> Result<()> {
+    // Open store via ECAC_DB or default ".ecac.db".
+    let db_path = std::env::var("ECAC_DB").unwrap_or_else(|_| ".ecac.db".to_string());
+    let store = Store::open(Path::new(&db_path), Default::default())?;
+
+    // Load ops in deterministic topo order.
+    let ids = store.topo_ids()?;
+    let blobs = store.load_ops_cbor(&ids)?;
+
+    // Build DAG.
+    let mut dag = Dag::new();
+    for b in blobs {
+        let op: Op = serde_cbor::from_slice(&b)?;
+        dag.insert(op);
+    }
+
+    // Build TrustView from in-band trust ops.
+    let order = dag.topo_sort();
+    let tv = TrustView::build_from_dag(&dag, &order);
+
+    // ---- Summarize issuer keys ----
+    let mut issuers: BTreeMap<String, BTreeMap<String, CliIssuerKeyView>> = BTreeMap::new();
+    for (issuer_id, by_kid) in tv.issuer_keys.iter() {
+        let mut keys_map: BTreeMap<String, CliIssuerKeyView> = BTreeMap::new();
+        for (kid, rec) in by_kid.iter() {
+            keys_map.insert(
+                kid.clone(),
+                CliIssuerKeyView {
+                    algo: rec.algo.clone(),
+                    valid_from_ms: rec.valid_from_ms,
+                    valid_until_ms: rec.valid_until_ms,
+                    activated_at_ms: rec.activated_at_ms,
+                    revoked_at_ms: rec.revoked_at_ms,
+                    pubkey_hex: to_hex(&rec.pubkey),
+                },
+            );
+        }
+        issuers.insert(issuer_id.clone(), keys_map);
+    }
+
+    // ---- Summarize status lists ----
+    let mut status_lists: BTreeMap<String, CliStatusListView> = BTreeMap::new();
+    for (list_id, sl) in tv.status_lists.iter() {
+        status_lists.insert(
+            list_id.clone(),
+            CliStatusListView {
+                issuer_id: sl.issuer_id.clone(),
+                list_id: sl.list_id.clone(),
+                version: sl.version,
+                num_chunks: sl.chunks.len(),
+                bitset_sha256_hex: to_hex32(&sl.bitset_sha256),
+                digest_matches: sl.digest_matches(),
+            },
+        );
+    }
+
+    // ---- Compute digests over the summaries (deterministic) ----
+    let issuers_bytes = serde_cbor::to_vec(&issuers)?;
+    let issuers_digest = blake3_hash32(&issuers_bytes);
+
+    let status_bytes = serde_cbor::to_vec(&status_lists)?;
+    let status_digest = blake3_hash32(&status_bytes);
+
+    // ---- Emit JSON ----
+    let out = json!({
+        "issuers": issuers,
+        "status_lists": status_lists,
+        "issuers_digest_hex": to_hex32(&issuers_digest),
+        "status_lists_digest_hex": to_hex32(&status_digest),
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 

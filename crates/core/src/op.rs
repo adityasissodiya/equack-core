@@ -97,6 +97,59 @@ pub enum Payload {
         new_key: Vec<u8>,
     },
 
+    /// M10: Publish an issuer's public key on the log.
+    ///
+    /// - `issuer_id`: stable identifier for the issuer (e.g., "oem-issuer-1").
+    /// - `key_id`: JWS `kid` used in VC headers.
+    /// - `algo`: algorithm label; must be "EdDSA" in M10.
+    /// - `pubkey`: raw public key bytes (≤ 1 KiB; enforced by TrustView).
+    /// - `valid_from_ms` / `valid_until_ms`: validity window in ms since Unix epoch.
+    /// - `prev_key_id`: optional previous key in a rollover chain.
+    IssuerKey {
+        issuer_id: String,
+        key_id: String,
+        algo: String,
+        pubkey: Vec<u8>,
+        valid_from_ms: u64,
+        valid_until_ms: u64,
+        prev_key_id: Option<String>,
+    },
+
+    /// M10: Revoke a previously-published issuer key.
+    ///
+    /// A revoke takes effect immediately at its position in the total order.
+    IssuerKeyRevoke {
+        issuer_id: String,
+        key_id: String,
+        reason: String,
+    },
+
+    /// M10: Publish a chunk of a credential status list (bitset).
+    ///
+    /// - `list_id`: logical identifier of the list.
+    /// - `issuer_id`: issuer that controls this list.
+    /// - `version`: monotonically increasing version number.
+    /// - `chunk_index`: zero-based index of this chunk within the list.
+    /// - `bitset_sha256`: advertised SHA-256 of the full concatenated bitset.
+    /// - `chunk_bytes`: raw bitset chunk bytes (≤ 64 KiB; enforced by TrustView).
+    StatusListChunk {
+        list_id: String,
+        issuer_id: String,
+        version: u32,
+        chunk_index: u32,
+        bitset_sha256: [u8; 32],
+        chunk_bytes: Vec<u8>,
+    },
+
+    /// M10: Optional pointer from a credential id to a status list entry.
+    ///
+    /// This is only needed if the VC itself does not encode a status object.
+    StatusPointer {
+        cred_id: String,
+        list_id: String,
+        index: u32,
+    },
+
     #[serde(other)]
     _Reserved,
 }

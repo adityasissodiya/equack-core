@@ -9,7 +9,9 @@
 //!   3) simulate <scenario>
 //!      - Stub for now (M4 uses VC-backed grants). We'll wire a VC-backed simulator later.
 //!   4) vc-verify <vc.jwt>
-//!      - Verifies a JWT-VC using ./trust and ./trust/status.
+//!      - Verifies a JWT-VC, preferring in-band trust (IssuerKey/StatusListChunk
+//!        ops in the RocksDB store selected by ECAC_DB) and falling back to
+//!        ./trust + ./trust/status if no in-band trust is available.
 //!   5) vc-attach <vc.jwt> <issuer_sk_hex> <admin_sk_hex> [out_dir]
 //!      - Emits Credential + Grant ops (CBOR) after verifying the VC.
 //
@@ -27,7 +29,9 @@
 //!   3) simulate <scenario>
 //!      - Stub for now (M4 uses VC-backed grants). We'll wire a VC-backed simulator later.
 //!   4) vc-verify <vc.jwt>
-//!      - Verifies a JWT-VC using ./trust and ./trust/status.
+//!      - Verifies a JWT-VC, preferring in-band trust (IssuerKey/StatusListChunk
+//!        ops in the RocksDB store selected by ECAC_DB) and falling back to
+//!        ./trust + ./trust/status if no in-band trust is available.
 //!   5) vc-attach <vc.jwt> <issuer_sk_hex> <admin_sk_hex> [out_dir]
 //!      - Emits Credential + Grant ops (CBOR) after verifying the VC.
 //!   6) vc-status-set <list_id> <index> <0|1|true|false|on|off>
@@ -39,6 +43,13 @@
 //!   9) show <obj> <field> --subject-pk <hex>
 //!      - Replay from the store and print the logical field value as visible to the subject
 //!        (plaintext if decryptable; "<redacted>" otherwise).
+//!   10) trust-issuer-publish <issuer_id> <key_id> <issuer_sk_hex> [out_dir]
+//!       - Emit an IssuerKey op declaring an issuer public key on the log (M10).
+//!   11) trust-status-chunk <issuer_id> <list_id> <version> <chunk_index> <bitset_sha256_hex> <chunk.bin> <issuer_sk_hex> [out_dir]
+//!       - Emit a StatusListChunk op with a status bitset chunk for revocation (M10).
+//!   12) trust-dump
+//!       - Build and print the in-band TrustView (issuer keys + status lists) from the store.
+
 //! Notes:
 //!   - DAG ignores ops whose parents are unknown (pending); replay only uses activated ops.
 //!   - Deny-wins gate is enforced iff the log contains *any* Grant/Revoke events.
@@ -132,7 +143,13 @@ enum Cmd {
         scenario: String,
     },
 
-    /// Verify a JWT-VC under ./trust (issuers.toml) and ./trust/status
+    /// Verify a JWT-VC using in-band trust when available.
+    ///
+    /// - Preferred path: derive issuer keys and status lists from the
+    ///   RocksDB store (ECAC_DB or ".ecac.db") via TrustView, using
+    ///   IssuerKey / StatusListChunk ops.
+    /// - Fallback path: if no usable in-band trust is present, use
+    ///   ./trust/issuers.toml and ./trust/status/*.bin (legacy M4 mode).
     VcVerify {
         /// Path to compact JWS (JWT-VC)
         vc: PathBuf,
@@ -157,6 +174,58 @@ enum Cmd {
     /// - Writes ./vc.jwt
     /// - Prints JSON with issuer_vk_hex, subject_pk_hex, vc_path.
     VcMintDemo,
+
+    /// Publish an in-band issuer key (IssuerKey op) into the store.
+    ///
+    /// This writes a Payload::IssuerKey op signed by the issuer SK into the
+    /// RocksDB store selected by ECAC_DB (default ".ecac.db").
+    TrustIssuerPublish {
+        /// Logical issuer identifier (matches VC `iss`)
+        issuer_id: String,
+        /// Logical key identifier (matches VC `kid`)
+        key_id: String,
+        /// Algorithm label ("EdDSA" for ed25519 keys)
+        algo: String,
+        /// Issuer secret key (32-byte ed25519) hex
+        issuer_sk_hex: String,
+        /// Optional previous key id for rollover
+        #[arg(long)]
+        prev_key_id: Option<String>,
+        /// Not-before timestamp in ms since UNIX epoch (defaults to now)
+        #[arg(long)]
+        valid_from_ms: Option<u64>,
+        /// Not-after timestamp in ms since UNIX epoch (defaults to now + 365 days)
+        #[arg(long)]
+        valid_until_ms: Option<u64>,
+    },
+
+    /// Publish a single in-band status-list chunk into the store.
+    ///
+    /// This writes a Payload::StatusListChunk op signed by the issuer SK.
+    TrustStatusChunk {
+        /// Issuer identifier owning the list
+        issuer_id: String,
+        /// Logical status-list identifier
+        list_id: String,
+        /// Status list version
+        version: u32,
+        /// Chunk index (0-based)
+        chunk_index: u32,
+        /// Path to the chunk bytes (bitset) file
+        chunk_path: PathBuf,
+        /// Issuer secret key (32-byte ed25519) hex
+        issuer_sk_hex: String,
+        /// Hex-encoded SHA-256 over the COMPLETE status bitset (64 hex chars)
+        #[arg(long = "bitset-sha256-hex")]
+        bitset_sha256_hex: Option<String>,
+    },
+
+    /// Dump the in-band TrustView (issuer keys + status lists) from the store.
+    ///
+    /// - Reads ops from RocksDB (ECAC_DB or ".ecac.db").
+    /// - Builds TrustView from in-band IssuerKey / StatusListChunk ops.
+    /// - Prints a deterministic JSON summary (issuers, status_lists, digests).
+    TrustDump,
 
     /// Flip a bit in a local status list: 1 = revoked, 0 = not revoked
     VcStatusSet {
@@ -410,6 +479,51 @@ fn main() -> anyhow::Result<()> {
 
         Cmd::VcMintDemo => {
             commands::cmd_vc_mint_demo()?;
+        }
+
+        Cmd::TrustIssuerPublish {
+            issuer_id,
+            key_id,
+            algo,
+            issuer_sk_hex,
+            prev_key_id,
+            valid_from_ms,
+            valid_until_ms,
+        } => {
+            commands::cmd_trust_issuer_publish(
+                &issuer_id,
+                &key_id,
+                &algo,
+                &issuer_sk_hex,
+                prev_key_id.as_deref(),
+                valid_from_ms,
+                valid_until_ms,
+            )?;
+        }
+
+        Cmd::TrustStatusChunk {
+            issuer_id,
+            list_id,
+            version,
+            chunk_index,
+            chunk_path,
+            issuer_sk_hex,
+            bitset_sha256_hex,
+        } => {
+            commands::cmd_trust_status_chunk(
+                &issuer_id,
+                &list_id,
+                version,
+                chunk_index,
+                &chunk_path,
+                &issuer_sk_hex,
+                bitset_sha256_hex.as_deref(),
+            )?;
+        }
+
+        Cmd::TrustDump => {
+            // Build TrustView from the in-band trust ops in the current store.
+            commands::cmd_trust_dump()?;
         }
 
         Cmd::VcStatusSet {

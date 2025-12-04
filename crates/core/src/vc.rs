@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::PublicKeyBytes;
 use crate::status::StatusCache;
 use crate::trust::TrustStore;
+use crate::trustview::TrustView;
 
 /// VC wire format used in ops (frozen for M4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +186,187 @@ pub fn verify_vc(
             .and_then(|v| v.as_u64())
             .ok_or(VcError::BadJson)?;
         let revoked = status.is_revoked(id, idx as u32);
+        if revoked {
+            return Err(VcError::Revoked);
+        }
+        (Some(id.to_string()), Some(idx as u32))
+    } else {
+        (None, None)
+    };
+
+    let cred_hash = blake3_hash32(compact_jwt);
+
+    Ok(VerifiedVc {
+        cred_id: jti.to_string(),
+        cred_hash,
+        issuer: iss.to_string(),
+        subject_pk,
+        role: role.to_string(),
+        scope_tags,
+        nbf_ms: nbf,
+        exp_ms: exp,
+        status_list_id: status_id,
+        status_index,
+    })
+}
+
+/// Legacy alias for the M10 in-band verifier (kept for any existing call
+/// sites/tests that were using `verify_vc_inband` during the transition).
+pub fn verify_vc_inband(compact_jwt: &[u8], trust: &TrustView) -> Result<VerifiedVc, VcError> {
+    verify_vc_with_trustview(compact_jwt, trust)
+}
+
+/// Verify a compact JWT VC using an in-band `TrustView` (M10 path).
+///
+/// - Issuer public keys are resolved from `trust.issuer_keys` by `(iss, kid?)`.
+/// - Revocation is checked against `trust.status_lists` if a `status`
+///   claim is present in the VC payload.
+/// - Time (`nbf` / `exp`) is *parsed* but not enforced here; gating is still
+///   done by HLC in the policy layer, same as in the filesystem-backed path.
+pub fn verify_vc_with_trustview(
+    compact_jwt: &[u8],
+    trust: &TrustView,
+) -> Result<VerifiedVc, VcError> {
+    // split into 3 parts
+    let s = str::from_utf8(compact_jwt).map_err(|_| VcError::BadFormat)?;
+    let mut parts = s.split('.');
+    let (h_b64, p_b64, sig_b64) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(p), Some(s)) => (h, p, s),
+        _ => return Err(VcError::BadFormat),
+    };
+    if parts.next().is_some() {
+        return Err(VcError::BadFormat);
+    }
+
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(h_b64.as_bytes())
+        .map_err(|_| VcError::BadBase64)?;
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(p_b64.as_bytes())
+        .map_err(|_| VcError::BadBase64)?;
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(sig_b64.as_bytes())
+        .map_err(|_| VcError::BadBase64)?;
+    if sig_bytes.len() != 64 {
+        return Err(VcError::BadSig);
+    }
+
+    let header: Value = serde_json::from_slice(&header_bytes).map_err(|_| VcError::BadJson)?;
+    let payload: Value = serde_json::from_slice(&payload_bytes).map_err(|_| VcError::BadJson)?;
+
+    let alg = header
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("alg"))?;
+    if alg != "EdDSA" {
+        return Err(VcError::BadAlg);
+    }
+
+    // required claims
+    let iss = payload
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("iss"))?;
+    let jti = payload
+        .get("jti")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("jti"))?;
+    let role = payload
+        .get("role")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("role"))?;
+    let sub_pk_hex = payload
+        .get("sub_pk")
+        .and_then(|v| v.as_str())
+        .ok_or(VcError::MissingField("sub_pk"))?;
+    let nbf = payload
+        .get("nbf")
+        .and_then(|v| v.as_u64())
+        .ok_or(VcError::MissingField("nbf"))?;
+    let exp = payload
+        .get("exp")
+        .and_then(|v| v.as_u64())
+        .ok_or(VcError::MissingField("exp"))?;
+    let scope = payload
+        .get("scope")
+        .and_then(|v| v.as_array())
+        .ok_or(VcError::MissingField("scope"))?;
+
+    let mut scope_tags: BTreeSet<String> = BTreeSet::new();
+    for t in scope {
+        let s = t.as_str().ok_or(VcError::BadJson)?;
+        scope_tags.insert(s.to_string());
+    }
+
+    // issuer key: resolve via (iss, kid?) in TrustView.
+    let kid_opt = header.get("kid").and_then(|v| v.as_str());
+    let issuer_entries = trust
+        .issuer_keys
+        .get(iss)
+        .ok_or_else(|| VcError::UnknownIssuer(iss.to_string()))?;
+
+    let key_record = if let Some(kid) = kid_opt {
+        issuer_entries
+            .get(kid)
+            .ok_or_else(|| VcError::UnknownIssuer(iss.to_string()))?
+    } else {
+        // No kid: if exactly one key is configured for this issuer, use it.
+        if issuer_entries.len() == 1 {
+            issuer_entries.values().next().unwrap()
+        } else {
+            // Ambiguous; we could introduce a dedicated error, but UnknownIssuer
+            // is good enough for now.
+            return Err(VcError::UnknownIssuer(iss.to_string()));
+        }
+    };
+
+    // Enforce algorithm label from the IssuerKey record.
+    if key_record.algo != "EdDSA" {
+        return Err(VcError::BadAlg);
+    }
+
+    if key_record.pubkey.len() != 32 {
+        return Err(VcError::BadKeyHex);
+    }
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(&key_record.pubkey);
+    let vk = VerifyingKey::from_bytes(&key_bytes).map_err(|_| VcError::BadSig)?; // malformed key → fail
+
+    // signature over "header.payload"
+    let signing_input = [h_b64.as_bytes(), b".", p_b64.as_bytes()].concat();
+    let sig = Signature::from_slice(&sig_bytes).map_err(|_| VcError::BadSig)?;
+    vk.verify_strict(&signing_input, &sig)
+        .map_err(|_| VcError::BadSig)?;
+
+    // parse subject_pk
+    let subject_pk = {
+        let hex = sub_pk_hex.trim();
+        if hex.len() != 64 {
+            return Err(VcError::BadKeyHex);
+        }
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] =
+                (hex_nibble(hex.as_bytes()[2 * i])? << 4) | hex_nibble(hex.as_bytes()[2 * i + 1])?;
+        }
+        out
+    };
+
+    // optional status, now backed by in-band StatusList logic in TrustView.
+    let (status_id, status_index) = if let Some(st) = payload.get("status") {
+        let id = st
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(VcError::BadJson)?;
+        let idx = st
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .ok_or(VcError::BadJson)?;
+
+        // Delegate to TrustView's "latest complete version" + SHA-checked
+        // semantics for revocation.
+        let revoked = trust.is_revoked(id, idx as u32);
+
         if revoked {
             return Err(VcError::Revoked);
         }
