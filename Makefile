@@ -10,3 +10,18 @@ m7-full:
 
 plots:
 	python tools/scripts/plot.py docs/eval/out/runs/$$(git rev-parse --short HEAD) docs/eval/plots
+
+.PHONY: repro verify-golden sbom audit
+
+repro:
+	SOURCE_DATE_EPOCH=1 scripts/reproduce.sh
+
+verify-golden:
+	SOURCE_DATE_EPOCH=1 scripts/verify_golden.sh
+
+sbom:
+	cargo cyclonedx --format json --output docs/eval/out/sbom.json
+
+audit:
+	cargo audit
+	cargo deny check

@@ -103,6 +103,34 @@ fn parse_sha256_hex(hex: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
+/// Return a reproducible "now" in ms when the caller opts in.
+///
+/// Precedence:
+///   1) ECAC_TIME_MS (explicit fixed value for tests/pipelines)
+///   2) SOURCE_DATE_EPOCH (seconds; multiplied by 1000)
+///   3) wall-clock `SystemTime::now()` as a last resort.
+///
+/// M11 pipelines are expected to set ECAC_TIME_MS or SOURCE_DATE_EPOCH
+/// so trust/audit timestamps are bitwise-stable across runs.
+fn deterministic_now_ms() -> u64 {
+    if let Ok(ms_str) = std::env::var("ECAC_TIME_MS") {
+        if let Ok(ms) = ms_str.parse::<u64>() {
+            return ms;
+        }
+    }
+
+    if let Ok(sec_str) = std::env::var("SOURCE_DATE_EPOCH") {
+        if let Ok(sec) = sec_str.parse::<u64>() {
+            return sec.saturating_mul(1000);
+        }
+    }
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersistVerifiedVc {
     cred_id: String,
@@ -412,7 +440,7 @@ pub fn cmd_vc_status_set(list_id: &str, index: u32, value: bool) -> Result<()> {
 /// Publish an in-band issuer key (IssuerKey op) into the RocksDB store.
 ///
 /// - ECAC_DB selects the store (default ".ecac.db").
-// - The op is signed by `issuer_sk_hex` and authored by that key.
+/// - The op is signed by `issuer_sk_hex` and authored by that key.
 pub fn cmd_trust_issuer_publish(
     issuer_id: &str,
     key_id: &str,
@@ -422,8 +450,6 @@ pub fn cmd_trust_issuer_publish(
     valid_from_ms: Option<u64>,
     valid_until_ms: Option<u64>,
 ) -> Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     // Parse issuer SK and derive PK.
     let issuer_sk = parse_sk_hex(issuer_sk_hex)?;
     let issuer_pk = vk_to_bytes(&issuer_sk.verifying_key());
@@ -435,11 +461,8 @@ pub fn cmd_trust_issuer_publish(
     // Parents from current DAG heads.
     let parents = store.heads(8).unwrap_or_default();
 
-    // Timestamps.
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    // Timestamps (M11-friendly).
+    let now_ms = deterministic_now_ms();
     let vf = valid_from_ms.unwrap_or(now_ms);
     // Default validity window: +365 days from "now".
     let default_vu = now_ms
@@ -501,8 +524,6 @@ pub fn cmd_trust_issuer_revoke(
     reason: &str,
     issuer_sk_hex: &str,
 ) -> Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     // Parse issuer SK and derive PK.
     let issuer_sk = parse_sk_hex(issuer_sk_hex)?;
     let issuer_pk = vk_to_bytes(&issuer_sk.verifying_key());
@@ -514,11 +535,8 @@ pub fn cmd_trust_issuer_revoke(
     // Parents from current DAG heads (same pattern as other trust ops).
     let parents = store.heads(8).unwrap_or_default();
 
-    // Timestamp: wall-clock ms, logical=1.
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    // Timestamp: M11-friendly ms, logical=1.
+    let now_ms = deterministic_now_ms();
     let hlc = Hlc::new(now_ms, 1);
 
     let op = Op::new(
@@ -557,8 +575,6 @@ pub fn cmd_trust_status_chunk(
     issuer_sk_hex: &str,
     bitset_sha256_hex: Option<&str>,
 ) -> Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     let chunk_bytes = fs::read(chunk_path)
         .map_err(|e| anyhow!("failed to read chunk from {}: {e}", chunk_path.display()))?;
 
@@ -579,10 +595,7 @@ pub fn cmd_trust_status_chunk(
 
     let parents = store.heads(8).unwrap_or_default();
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let now_ms = deterministic_now_ms();
 
     let op = Op::new(
         parents,
