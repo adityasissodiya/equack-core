@@ -1418,8 +1418,7 @@ pub fn cmd_op_make_grant(author_sk_hex: &str, admin_sk_hex: &str, out_dir: &Path
 }
 
 // ---- audit-verify-full (chain + replay cross-check) ----
-#[cfg(feature = "audit")]
-use ecac_core::dag::Dag; // Op and Store are already imported at the top
+// Dag, Op and Store are already imported at the top of this module.
 
 // Replay the store and WRITE decision events to the on-disk audit sink.
 // Uses the default sink (respects ECAC_NODE_SK_HEX, writes to .audit).

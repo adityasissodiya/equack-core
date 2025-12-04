@@ -1,0 +1,61 @@
+name: M11 Reproducibility
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.80.0
+          components: clippy, rustfmt
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo tools
+        run: |
+          cargo install cargo-audit || true
+          cargo install cargo-deny || true
+          cargo install cargo-cyclonedx || true
+
+      - name: Reproduce artifacts
+        env:
+          SOURCE_DATE_EPOCH: "1"
+        run: |
+          scripts/reproduce.sh
+
+      - name: Verify golden
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        env:
+          SOURCE_DATE_EPOCH: "1"
+        run: |
+          scripts/verify_golden.sh
+
+      - name: Cargo audit
+        run: cargo audit || true  # decide if you want this to be hard-fail
+
+      - name: Cargo deny
+        run: cargo deny check || true
+
+      - name: SBOM (already produced by reproduce.sh if possible)
+        run: |
+          ls -R docs/eval/out || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecac-artifacts-${{ github.sha }}
+          path: docs/eval/out/ecac-artifacts-*.tar.gz
