@@ -60,6 +60,8 @@ mod commands;
 mod simulate; // now implemented as a safe stub for M4
               // M7: evaluation harness (implemented in a separate module)
 mod bench;
+#[cfg(feature = "serve")]
+mod server;
 
 use std::fs;
 use std::path::PathBuf;
@@ -441,6 +443,38 @@ enum Cmd {
         #[arg(long, default_value = ".ecac.db")]
         db: String,
     },
+
+    /// Start HTTP server with embedded web UI for IoT gateway demo
+    #[cfg(feature = "serve")]
+    Serve {
+        /// HTTP listen address (use 0.0.0.0 to expose on network)
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: String,
+
+        /// RocksDB database path
+        #[arg(long, short, env = "ECAC_DB")]
+        db: Option<PathBuf>,
+
+        /// Human-readable site name (displayed in UI header)
+        #[arg(long, env = "ECAC_SITE_NAME")]
+        site_name: Option<String>,
+
+        /// Project ID for gossip topic (nodes with same project sync together)
+        #[arg(long, env = "ECAC_PROJECT", default_value = "ecac-demo")]
+        project: String,
+
+        /// Allow write operations via API (disabled by default for safety)
+        #[arg(long)]
+        allow_writes: bool,
+
+        /// libp2p listen address for peer sync (e.g., /ip4/0.0.0.0/tcp/9000)
+        #[arg(long)]
+        libp2p_listen: Option<String>,
+
+        /// Bootstrap peer addresses (can be repeated)
+        #[arg(long)]
+        bootstrap: Vec<String>,
+    },
 }
 
 fn decode_op_compat(bytes: &[u8]) -> anyhow::Result<Op> {
@@ -815,6 +849,30 @@ fn main() -> anyhow::Result<()> {
         } => {
             // helper for tests: create a valid one-element Vec<Op> CBOR file
             commands::cmd_op_make_min(&author_sk_hex, &output)?;
+        }
+        #[cfg(feature = "serve")]
+        Cmd::Serve {
+            listen,
+            db,
+            site_name,
+            project,
+            allow_writes,
+            libp2p_listen,
+            bootstrap,
+        } => {
+            let config = server::ServeConfig {
+                listen,
+                db: db.unwrap_or_else(|| PathBuf::from(".ecac.db")),
+                site_name,
+                project,
+                allow_writes,
+                libp2p_listen,
+                bootstrap,
+            };
+
+            // Build a tokio runtime and run the server
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(server::run_server(config))?;
         }
     }
     Ok(())

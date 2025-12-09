@@ -1363,6 +1363,19 @@ impl Node {
         self.announce_dirty = true; // force an early publish
     }
 
+    /// Mark the node as needing to announce (e.g., after new ops are written).
+    /// The announcement will be published on the next poll cycle.
+    pub fn mark_announce_dirty(&mut self) {
+        self.announce_dirty = true;
+    }
+
+    /// Trigger an immediate announcement to peers.
+    /// Call this after writing new ops to notify peers of new data.
+    pub fn trigger_announce(&mut self) -> anyhow::Result<()> {
+        self.announce_dirty = true;
+        self.publish_announce_now()
+    }
+
     // --- helper: build+publish now ---
     fn publish_announce_now(&mut self) -> anyhow::Result<()> {
         // If nobody is subscribed yet, queue the freshly built announce; don’t publish now.
