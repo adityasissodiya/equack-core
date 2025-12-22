@@ -1,0 +1,303 @@
+% ECAC Architecture Diagram - Data-Flow Centric Design
+% Full page width (~16cm), purely architectural, abstract
+% Note: TikZ libraries loaded in main document
+
+% Color palette
+\definecolor{ingestcolor}{HTML}{9B59B6}     % Purple - Ingest
+\definecolor{validatecolor}{HTML}{3498DB}   % Blue - Validate  
+\definecolor{replaycolor}{HTML}{2ECC71}     % Green - Replay
+\definecolor{querycolor}{HTML}{1ABC9C}      % Teal - Query
+\definecolor{dagcolor}{HTML}{34495E}        % Dark gray - DAG
+\definecolor{gatecolor}{HTML}{E74C3C}       % Red - Authorization Gate
+\definecolor{crdtcolor}{HTML}{F39C12}       % Orange - CRDT State
+\definecolor{storagecolor}{HTML}{27AE60}    % Green - Storage
+\definecolor{networkcolor}{HTML}{8E44AD}    % Purple - Network
+\definecolor{cryptocolor}{HTML}{E67E22}     % Orange - Crypto
+\definecolor{clicolor}{HTML}{607D8B}        % Gray - CLI
+\definecolor{bglight}{HTML}{F8F9FA}         % Light background
+\definecolor{flowcolor}{HTML}{2C3E50}       % Dark flow arrows
+
+\begin{tikzpicture}[
+    % Node styles
+    phase/.style={
+        rectangle, rounded corners=6pt, 
+        minimum width=2.8cm, minimum height=1.4cm,
+        font=\small\sffamily\bfseries, align=center,
+        draw=#1!70!black, fill=#1!20, line width=0.8pt
+    },
+    component/.style={
+        rectangle, rounded corners=4pt,
+        minimum width=2.2cm, minimum height=0.8cm,
+        font=\scriptsize\sffamily, align=center,
+        draw=#1!60!black, fill=#1!15, line width=0.5pt
+    },
+    smallcomp/.style={
+        rectangle, rounded corners=3pt,
+        minimum width=1.6cm, minimum height=0.6cm,
+        font=\scriptsize\sffamily, align=center,
+        draw=black!50, fill=white, line width=0.4pt
+    },
+    zone/.style={
+        rectangle, rounded corners=10pt,
+        draw=#1!50!black, fill=#1!5, line width=1pt,
+        inner sep=12pt
+    },
+    zonelabel/.style={
+        font=\small\sffamily\bfseries, text=#1!70!black
+    },
+    decision/.style={
+        diamond, aspect=2,
+        minimum width=2.5cm, minimum height=1.2cm,
+        font=\scriptsize\sffamily\bfseries, align=center,
+        draw=gatecolor!70!black, fill=gatecolor!20, line width=0.8pt
+    },
+    eventnode/.style={
+        circle, minimum size=0.8cm,
+        font=\scriptsize\sffamily\bfseries,
+        draw=dagcolor!70!black, fill=dagcolor!20, line width=0.5pt
+    },
+    dataflow/.style={
+        -{Stealth[length=2.5mm, width=2mm]}, 
+        line width=1pt, draw=flowcolor
+    },
+    uses/.style={
+        -{Stealth[length=2mm, width=1.5mm]}, 
+        dashed, line width=0.6pt, draw=black!40
+    },
+    infra/.style={
+        rectangle, rounded corners=5pt,
+        minimum width=4.5cm, minimum height=3.5cm,
+        draw=#1!60!black, fill=#1!8, line width=0.8pt
+    },
+    infraitem/.style={
+        rectangle, rounded corners=2pt,
+        minimum width=3.8cm, minimum height=0.5cm,
+        font=\scriptsize\sffamily, align=left,
+        draw=black!30, fill=white, line width=0.3pt
+    },
+    clicmd/.style={
+        rectangle, rounded corners=3pt,
+        minimum width=3cm, minimum height=0.55cm,
+        font=\scriptsize\sffamily\ttfamily, align=center,
+        draw=clicolor!50!black, fill=clicolor!10, line width=0.4pt
+    }
+]
+
+% ============================================================================
+% TITLE
+% ============================================================================
+\node[font=\Large\sffamily\bfseries] at (8, 14) {ECAC Architecture};
+\node[font=\small\sffamily, text=black!60] at (8, 13.5) 
+    {Eventually Consistent Access Control --- Data Flow Overview};
+
+% ============================================================================
+% ZONE 1: EVENT LIFECYCLE (Top section)
+% ============================================================================
+
+% Background for event lifecycle
+\begin{scope}[on background layer]
+    \node[zone=dagcolor, minimum width=15.5cm, minimum height=4.2cm] 
+        (lifecyclezone) at (8, 11) {};
+\end{scope}
+\node[zonelabel=dagcolor, anchor=north west] at (0.5, 12.9) {EVENT LIFECYCLE};
+
+% Phase boxes
+\node[phase=ingestcolor] (ingest) at (2, 11) {INGEST\\[2pt]\tiny P2P Gossip};
+\node[phase=validatecolor] (validate) at (5.5, 11) {VALIDATE\\[2pt]\tiny VC + Signature};
+\node[phase=replaycolor] (replay) at (9, 11) {REPLAY\\[2pt]\tiny Topo Sort (HLC)};
+\node[phase=querycolor] (query) at (12.5, 11) {QUERY\\[2pt]\tiny State Access};
+
+% Flow arrows between phases
+\draw[dataflow] (ingest) -- (validate);
+\draw[dataflow] (validate) -- (replay);
+\draw[dataflow] (replay) -- (query);
+
+% Sub-components under phases
+\node[smallcomp, below=0.3cm of ingest] (gossip) {libp2p gossip};
+\node[smallcomp, below=0.3cm of validate] (vccheck) {Status List Check};
+\node[smallcomp, below=0.3cm of replay] (toposort) {Causal DAG Order};
+\node[smallcomp, below=0.3cm of query] (stateq) {CRDT Read};
+
+% ============================================================================
+% ZONE 2: EVENT DAG (Middle-top section)
+% ============================================================================
+
+\begin{scope}[on background layer]
+    \node[zone=dagcolor, minimum width=15.5cm, minimum height=3.2cm] 
+        (dagzone) at (8, 7.2) {};
+\end{scope}
+\node[zonelabel=dagcolor, anchor=north west] at (0.5, 8.6) {EVENT DAG (Causal Structure)};
+
+% DAG visualization
+\node[eventnode] (e1) at (2.5, 7.4) {$e_1$};
+\node[eventnode] (e2) at (4.5, 7.8) {$e_2$};
+\node[eventnode] (e3) at (4.5, 6.8) {$e_3$};
+\node[eventnode] (e4) at (6.5, 7.4) {$e_4$};
+\node[eventnode] (e5) at (8.5, 7.4) {$e_5$};
+
+% DAG edges
+\draw[-{Stealth[length=1.5mm]}, thick, dagcolor] (e1) -- (e2);
+\draw[-{Stealth[length=1.5mm]}, thick, dagcolor] (e1) -- (e3);
+\draw[-{Stealth[length=1.5mm]}, thick, dagcolor] (e2) -- (e4);
+\draw[-{Stealth[length=1.5mm]}, thick, dagcolor] (e3) -- (e4);
+\draw[-{Stealth[length=1.5mm]}, thick, dagcolor] (e4) -- (e5);
+
+% Event type legend
+\node[component=validatecolor, minimum width=2.2cm] (evdata) at (11, 8) {DATA};
+\node[component=gatecolor, minimum width=2.2cm] (evgrant) at (13.5, 8) {GRANT / REVOKE};
+\node[component=ingestcolor, minimum width=2.2cm] (evtrust) at (11, 7.2) {TRUST};
+\node[font=\scriptsize\sffamily, text=black!60, anchor=west] at (12.3, 7.2) {(keys, status)};
+
+% Event structure annotation
+\node[font=\scriptsize\sffamily, text=black!50, align=left, anchor=west] at (11, 6.5) {
+    Each event: \{header, parents,\\
+    hlc, payload, signature\}
+};
+
+% Arrow from lifecycle to DAG
+\draw[dataflow, bend right=15] ($(validate.south)+(0,-0.6)$) -- (e1.north);
+
+% ============================================================================
+% ZONE 3: AUTHORIZATION GATE (Middle section)
+% ============================================================================
+
+\begin{scope}[on background layer]
+    \node[zone=gatecolor, minimum width=15.5cm, minimum height=3.8cm] 
+        (gatezone) at (8, 3.5) {};
+\end{scope}
+\node[zonelabel=gatecolor, anchor=north west] at (0.5, 5.2) {AUTHORIZATION GATE (Deny-Wins)};
+
+% Gate components
+\node[component=validatecolor] (trustview) at (2.5, 4) {TrustView\\[1pt]\scriptsize Issuer Keys + SL};
+\node[component=replaycolor] (policy) at (6, 4) {Policy Engine\\[1pt]\scriptsize Cedar-like Rules};
+\node[component=querycolor] (epochs) at (9.5, 4) {Auth Epochs\\[1pt]\scriptsize $[t^-, t^+)$ intervals};
+
+% Decision diamond
+\node[decision] (gate) at (13, 3.5) {Gate(e)};
+
+% Flow through gate components
+\draw[dataflow] (trustview) -- (policy);
+\draw[dataflow] (policy) -- (epochs);
+\draw[dataflow] (epochs) -- (gate);
+
+% Gate formula
+\node[font=\scriptsize\sffamily, align=center, text=black!70] at (6, 2.5) {
+    $\mathsf{Gate}(e) = \mathsf{Auth}(s, a, t) \land \mathcal{P}(s, a, r) = \mathsf{allow}$
+};
+
+% Gate outputs
+\node[component=replaycolor, minimum width=1.8cm] (apply) at (11.5, 2) {APPLY\\[1pt]\scriptsize $U(s,e)$};
+\node[component=gatecolor, minimum width=1.8cm] (skip) at (14.5, 2) {SKIP\\[1pt]\scriptsize no-op};
+
+\draw[dataflow] (gate.south) -- ++(0,-0.3) -| (apply.north);
+\draw[dataflow] (gate.south) -- ++(0,-0.3) -| (skip.north);
+
+% Labels on gate outputs
+\node[font=\scriptsize\sffamily, text=replaycolor!70!black] at (11.5, 2.8) {true};
+\node[font=\scriptsize\sffamily, text=gatecolor!70!black] at (14.5, 2.8) {false};
+
+% Arrow from DAG to Gate
+\draw[dataflow] (e5.south) -- ++(0,-0.5) -- ++(4,0) -- (trustview.north);
+
+% ============================================================================
+% ZONE 4: CRDT STATE LAYER (Below gate)
+% ============================================================================
+
+\begin{scope}[on background layer]
+    \node[zone=crdtcolor, minimum width=15.5cm, minimum height=2.2cm] 
+        (crdtzone) at (8, -0.2) {};
+\end{scope}
+\node[zonelabel=crdtcolor, anchor=north west] at (0.5, 0.75) {CRDT STATE LAYER};
+
+% CRDT types
+\node[component=crdtcolor] (mvreg) at (3, -0.2) {MVReg\\[1pt]\tiny Multi-Value Register};
+\node[component=crdtcolor] (orset) at (7, -0.2) {OR-Set\\[1pt]\tiny Observed-Remove Set};
+\node[component=crdtcolor] (lwwmap) at (11, -0.2) {LWW-Map\\[1pt]\tiny Last-Writer-Wins};
+
+% Convergence annotation
+\node[font=\tiny\sffamily, text=black!50, align=center] at (14, -0.2) {
+    Converges under\\any merge order
+};
+
+% Arrow from APPLY to CRDT
+\draw[dataflow] (apply.south) -- ++(0,-0.5) -| (mvreg.north);
+
+% ============================================================================
+% ZONE 5: INFRASTRUCTURE SERVICES (Bottom section)
+% ============================================================================
+
+% Storage
+\node[infra=storagecolor] (storage) at (3, -3.8) {};
+\node[zonelabel=storagecolor, anchor=north] at (3, -2.3) {STORAGE};
+
+\node[infraitem, anchor=north] at (3, -2.7) {RocksDB (Column Families)};
+\node[infraitem, anchor=north] at (3, -3.3) {\quad ops $\vert$ state $\vert$ audit $\vert$ ckpt};
+\node[infraitem, anchor=north] at (3, -3.9) {Compression: zstd, lz4, snappy};
+\node[infraitem, anchor=north] at (3, -4.5) {Checkpoints + Compaction};
+
+% Network
+\node[infra=networkcolor] (network) at (8, -3.8) {};
+\node[zonelabel=networkcolor, anchor=north] at (8, -2.3) {NETWORK};
+
+\node[infraitem, anchor=north] at (8, -2.7) {libp2p (P2P Framework)};
+\node[infraitem, anchor=north] at (8, -3.3) {\quad gossipsub $\vert$ request-response};
+\node[infraitem, anchor=north] at (8, -3.9) {Transport: noise, yamux, tcp};
+\node[infraitem, anchor=north] at (8, -4.5) {Anti-entropy Sync Protocol};
+
+% Crypto
+\node[infra=cryptocolor] (crypto) at (13, -3.8) {};
+\node[zonelabel=cryptocolor, anchor=north] at (13, -2.3) {CRYPTOGRAPHY};
+
+\node[infraitem, anchor=north] at (13, -2.7) {Ed25519 (Signatures)};
+\node[infraitem, anchor=north] at (13, -3.3) {BLAKE3 (Hashing / State Digest)};
+\node[infraitem, anchor=north] at (13, -3.9) {XChaCha20-Poly1305 (Encrypt)};
+\node[infraitem, anchor=north] at (13, -4.5) {SHA-256 (VC Status Lists)};
+
+% Uses arrows from main components to infrastructure
+\draw[uses] ($(dagzone.south)+(-4,0)$) -- (storage.north);
+\draw[uses] ($(dagzone.south)+(0,0)$) -- (network.north);
+\draw[uses] ($(gatezone.south)+(4,0)$) -- (crypto.north);
+
+% ============================================================================
+% CLI SURFACE (Right side, vertical)
+% ============================================================================
+
+\begin{scope}[on background layer]
+    \node[zone=clicolor, minimum width=3.2cm, minimum height=6cm] 
+        (clizone) at (17.5, 5.5) {};
+\end{scope}
+\node[zonelabel=clicolor, anchor=north] at (17.5, 8.3) {CLI / API};
+
+\node[clicmd] at (17.5, 7.6) {Operations};
+\node[clicmd] at (17.5, 6.9) {Credentials};
+\node[clicmd] at (17.5, 6.2) {Trust Management};
+\node[clicmd] at (17.5, 5.5) {Node Admin};
+\node[clicmd] at (17.5, 4.8) {Sync / Gossip};
+\node[clicmd] at (17.5, 4.1) {Audit / Debug};
+\node[clicmd] at (17.5, 3.4) {Checkpoints};
+
+% Connect CLI to main flow
+\draw[uses] (clizone.west) -- ++(-1,0) |- (ingest.east);
+\draw[uses] (clizone.west) -- ++(-1,0) |- (query.east);
+
+% ============================================================================
+% KEY PROPERTIES ANNOTATION (Bottom)
+% ============================================================================
+
+\node[font=\scriptsize\sffamily, align=left, text=black!60, anchor=north west] at (0.5, -5.8) {
+    \textbf{Key Properties:} Same events $\rightarrow$ Same state (Convergence) 
+    \quad$\vert$\quad Unauthorized events skipped (Policy Safety) 
+    \quad$\vert$\quad Hash-chained audit trail (Tamper Evidence)
+};
+
+% ============================================================================
+% RUST/CARGO BADGE
+% ============================================================================
+
+\node[rectangle, rounded corners=4pt, draw=black!40, fill=black!5,
+      minimum width=2.2cm, minimum height=0.8cm,
+      font=\tiny\sffamily, align=center] at (17.5, 1.5) {
+    \textbf{Rust 2021}\\Cargo Workspace
+};
+
+\end{tikzpicture}
