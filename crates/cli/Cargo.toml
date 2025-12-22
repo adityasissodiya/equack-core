@@ -30,7 +30,7 @@ mime_guess = { version = "2", optional = true }
 rand = "0.8"
 
 [features]
-default = ["serve"]
+default = []
 audit = ["ecac-store/audit", "ecac-core/audit"]
 serve = ["axum", "tokio", "tower-http", "rust-embed", "mime_guess", "ecac-net", "libp2p"]
 
