@@ -249,8 +249,8 @@ impl EpochIndex {
     fn push_key_epoch(
         &mut self,
         subject: PublicKeyBytes,
-        tag: String,
-        key_version: u32,
+        _tag: String,
+        _key_version: u32,
         e: KeyGrantEpoch,
     ) {
         let entry = self.key_epochs.entry(subject).or_default();

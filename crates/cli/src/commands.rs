@@ -48,6 +48,7 @@ fn to_hex32(v: &[u8; 32]) -> String {
     to_hex(v)
 }
 
+#[allow(dead_code)]
 fn bytes_to_display(v: &[u8]) -> String {
     match std::str::from_utf8(v) {
         Ok(s) => s.to_string(),

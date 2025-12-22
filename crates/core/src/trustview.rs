@@ -192,8 +192,8 @@ impl TrustView {
     ///   expose only the highest `version` we have seen for each `(issuer_id,
     ///   list_id)` pair.
     pub fn build_from_dag(dag: &Dag, order: &[OpId]) -> Self {
-        let mut issuer_keys: HashMap<IssuerId, HashMap<KeyId, IssuerKeyRecord>> = HashMap::new();
-        let mut status_versions: HashMap<(IssuerId, ListId, u32), StatusList> = HashMap::new();
+        let _issuer_keys: HashMap<IssuerId, HashMap<KeyId, IssuerKeyRecord>> = HashMap::new();
+        let _status_versions: HashMap<(IssuerId, ListId, u32), StatusList> = HashMap::new();
 
         // Build epochs using the M4-style VC path so we can interpret
         // "issuer_admin" roles for gating trust ops. This path does *not*
