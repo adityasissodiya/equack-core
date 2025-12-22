@@ -197,6 +197,104 @@ if roll_points:
     savefig(OUT / "fig-rollback-rate.png")
 
 
+# -------------------- 4) E6: Replay Scaling (Linear Fit) --------------------
+# Show linear scaling with fitted line
+if by_ops_full:
+    xs_all = sorted(by_ops_full.keys())
+    ys_all = [statistics.median(by_ops_full[k]) for k in xs_all]
+
+    if len(xs_all) >= 2:
+        # Simple linear regression
+        import numpy as np
+        coeffs = np.polyfit(xs_all, ys_all, 1)
+        fit_line = np.poly1d(coeffs)
+
+        plt.figure()
+        plt.scatter(xs_all, ys_all, marker='o', s=100, label='Measured', zorder=3)
+        plt.plot(xs_all, fit_line(xs_all), '--', label=f'Linear fit: t = {coeffs[0]:.4f}n + {coeffs[1]:.1f}', zorder=2)
+        plt.xlabel("Operations")
+        plt.ylabel("Replay time (ms)")
+        plt.title("E6: Replay Time Scaling (Linear)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        savefig(OUT / "fig-e6-scaling.png")
+
+
+# -------------------- 5) E7: Throughput Comparison --------------------
+# Bar chart of throughput per scenario
+throughput_by_scenario = {}
+for _, meta, d in runs:
+    scenario = meta.get("scenario", "unknown")
+    ops_total = d.get("ops_total")
+    replay_full = pick_metric(d, "replay_full_ms", ms_suffix=True)
+
+    if isinstance(ops_total, (int, float)) and isinstance(replay_full, (int, float)) and replay_full > 0:
+        throughput = (ops_total / replay_full) * 1000  # ops/sec
+        seed = meta.get("seed", "0")
+        key = f"{scenario}-{seed}"
+        throughput_by_scenario[key] = (scenario, throughput, ops_total)
+
+if throughput_by_scenario:
+    # Group by scenario and take median
+    by_scenario = {}
+    for key, (scenario, tput, ops) in throughput_by_scenario.items():
+        by_scenario.setdefault(scenario, []).append(tput)
+
+    scenarios = sorted(by_scenario.keys())
+    medians = [statistics.median(by_scenario[s]) for s in scenarios]
+
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(range(len(scenarios)), medians, color=['#1f77b4', '#ff7f0e', '#2ca02c'][:len(scenarios)])
+    plt.xticks(range(len(scenarios)), scenarios, rotation=15, ha='right')
+    plt.ylabel("Throughput (ops/s)")
+    plt.title("E7: Replay Throughput by Scenario")
+    plt.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels on bars
+    for i, (bar, val) in enumerate(zip(bars, medians)):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(medians)*0.02,
+                f'{int(val):,}', ha='center', va='bottom', fontsize=9)
+
+    savefig(OUT / "fig-e7-throughput.png")
+
+
+# -------------------- 6) E10: Checkpoint Speedup --------------------
+# Bar chart showing speedup factors
+speedup_data = []
+for _, meta, d in runs:
+    ops_total = d.get("ops_total")
+    replay_full = pick_metric(d, "replay_full_ms", ms_suffix=True)
+    replay_incr = pick_metric(d, "replay_incremental_ms", ms_suffix=True)
+
+    if all(isinstance(x, (int, float)) for x in [ops_total, replay_full, replay_incr]) and replay_incr > 0:
+        speedup = replay_full / replay_incr
+        speedup_data.append((ops_total, speedup, replay_full, replay_incr))
+
+if speedup_data:
+    # Group by ops_total
+    by_ops_speedup = {}
+    for ops, speedup, rf, ri in speedup_data:
+        by_ops_speedup.setdefault(int(ops), []).append((speedup, rf, ri))
+
+    ops_keys = sorted(by_ops_speedup.keys())
+    avg_speedups = [statistics.median([x[0] for x in by_ops_speedup[k]]) for k in ops_keys]
+
+    plt.figure(figsize=(8, 6))
+    bars = plt.bar(range(len(ops_keys)), avg_speedups, color='#2ca02c')
+    plt.xticks(range(len(ops_keys)), [f'{k:,}' for k in ops_keys])
+    plt.xlabel("Operations")
+    plt.ylabel("Speedup Factor (x)")
+    plt.title("E10: Checkpoint Speedup (Full / Incremental)")
+    plt.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels
+    for bar, val in zip(bars, avg_speedups):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(avg_speedups)*0.02,
+                f'{val:.1f}x', ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    savefig(OUT / "fig-e10-checkpoint-speedup.png")
+
+
 # -------------------- Done --------------------
 if wrote:
     print("[plots] wrote:", " ".join(wrote))
