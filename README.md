@@ -387,6 +387,37 @@ ecac-cli bench --scenario offline-revocation
 
 Exact flags and options follow the M7 harness design (scenario names and metrics schemas are fixed).
 
+### Evaluation Results
+
+The evaluation validates deterministic convergence, policy correctness, and performance characteristics:
+
+**E1: Convergence Determinism**
+- 100% convergence across 100 randomized orderings (10K ops)
+- All trials produced identical digest: `cbab89ee9efbe7bcdd7fd610c2cfda3ba7afd3a6844569a6755120 95b7f493b2`
+- Mean replay time: 615ms (σ = 18ms)
+
+**E3/E4: Policy Correctness**
+- E3 (revocation): 1,004 ops, deterministic digest `8da8b49e...`
+- E4 (multi-authority conflicts): 128 ops, deterministic digest `f2fbb024...`
+- Deny-wins mechanism validated through deterministic replay
+
+**E6: Replay Scaling**
+- Linear scaling: O(n), regression t = 0.019n + 120ms (R² = 0.998)
+- 20K ops: 500ms full replay, 50ms incremental (10× speedup)
+- 100K ops: 2,000ms full replay, 500ms incremental (4× speedup)
+
+**E7: Throughput**
+- hb-chain (linear): 40,000-50,000 ops/s
+- concurrent (8 writers): 4,000-10,000 ops/s
+- offline-revocation: 28,000 ops/s
+
+**E10: Checkpoint Efficiency**
+- 20K ops: 10× speedup with checkpoint at 90%
+- 100K ops: 4× speedup with checkpoint at 90%
+- Checkpoint creation: <10ms
+
+Plots and detailed metrics available in `docs/eval/plots/`.
+
 ---
 
 ## Project Status & Roadmap
