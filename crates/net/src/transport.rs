@@ -146,7 +146,7 @@ pub struct Node {
 
 struct SyncState {
     frontier: VecDeque<OpId>, // ids we still plan to fetch from this peer
-    batch_size: usize,        // simple cap; keep small for tests
+    _batch_size: usize,        // simple cap; keep small for tests (reserved for future use)
     inflight: Option<(OutboundRequestId, OpId)>, // which id did we ask for?
     unavailable: HashSet<OpId>, // don't ask this peer for these again
 }
@@ -163,6 +163,7 @@ impl Node {
 
     /// Return peers we believe can provide `id` (learned via ANNOUNCE / fetch).
     /// (Kept generic in case we later merge additional provider sources.)
+    #[allow(dead_code)]
     fn providers_for(&self, id: &OpId) -> SmallVec<[PeerId; 4]> {
         let mut out: SmallVec<[PeerId; 4]> = SmallVec::new();
         if let Some(srcs) = self.announce_sources.get(id) {
@@ -307,7 +308,7 @@ impl Node {
     fn ensure_sync_state(&mut self, peer: PeerId) -> &mut SyncState {
         self.per_peer.entry(peer).or_insert_with(|| SyncState {
             frontier: VecDeque::new(),
-            batch_size: 1,
+            _batch_size: 1,
             inflight: None,
             unavailable: HashSet::new(),
         })
