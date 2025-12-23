@@ -1,0 +1,91 @@
+% ECAC System Overview - Simplified High-Level Architecture
+% Figure 1: For Section 3 introduction
+
+\begin{tikzpicture}[
+    % Common styles
+    phase/.style={
+        rectangle, rounded corners=8pt,
+        minimum width=2.6cm, minimum height=1.5cm,
+        font=\small\sffamily\bfseries, align=center,
+        draw=#1!70!black, fill=#1!20, line width=1pt
+    },
+    infra/.style={
+        rectangle, rounded corners=6pt,
+        minimum width=2.8cm, minimum height=1.2cm,
+        font=\scriptsize\sffamily\bfseries, align=center,
+        draw=#1!60!black, fill=#1!15, line width=0.8pt
+    },
+    datalayer/.style={
+        rectangle, rounded corners=10pt,
+        minimum width=12cm, minimum height=1.4cm,
+        font=\small\sffamily\bfseries, align=center,
+        draw=black!50, fill=black!8, line width=1pt
+    },
+    arrow/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        line width=1.2pt, draw=#1
+    },
+    labeltext/.style={
+        font=\tiny\sffamily, text=black!60
+    }
+]
+
+% Color definitions
+\definecolor{ingest}{HTML}{9B59B6}
+\definecolor{validate}{HTML}{3498DB}
+\definecolor{replay}{HTML}{2ECC71}
+\definecolor{query}{HTML}{1ABC9C}
+\definecolor{storage}{HTML}{27AE60}
+\definecolor{network}{HTML}{8E44AD}
+\definecolor{crypto}{HTML}{E67E22}
+\definecolor{audit}{HTML}{E74C3C}
+
+% Title
+\node[font=\large\sffamily\bfseries] at (6, 6.5) {ECAC System Overview};
+
+% Phase boxes - top row
+\node[phase=ingest] (ingest) at (1.5, 4.5) {INGEST\\[-2pt]\scriptsize\normalfont P2P / CLI};
+\node[phase=validate] (validate) at (4.5, 4.5) {VALIDATE\\[-2pt]\scriptsize\normalfont VC + Sig};
+\node[phase=replay] (replay) at (7.5, 4.5) {REPLAY\\[-2pt]\scriptsize\normalfont Deny-Wins};
+\node[phase=query] (query) at (10.5, 4.5) {QUERY\\[-2pt]\scriptsize\normalfont Projection};
+
+% Arrows between phases
+\draw[arrow=black!70] (ingest) -- (validate);
+\draw[arrow=black!70] (validate) -- (replay);
+\draw[arrow=black!70] (replay) -- (query);
+
+% Phase labels
+\node[labeltext, above=0.1cm of ingest] {receive ops};
+\node[labeltext, above=0.1cm of validate] {verify credentials};
+\node[labeltext, above=0.1cm of replay] {apply policy};
+\node[labeltext, above=0.1cm of query] {read state};
+
+% Central data layer
+\node[datalayer] (data) at (6, 2.3) {CAUSAL EVENT DAG \quad + \quad CRDT STATE};
+
+% Arrows from phases to data layer
+\draw[arrow=black!40, dashed] (ingest.south) -- ++(0,-0.5) -| ($(data.north)+(-4,0)$);
+\draw[arrow=black!40, dashed] (validate.south) -- ++(0,-0.3) -| ($(data.north)+(-1.5,0)$);
+\draw[arrow=black!40, dashed] (replay.south) -- ++(0,-0.3) -| ($(data.north)+(1.5,0)$);
+\draw[arrow=black!40, dashed] (query.south) -- ++(0,-0.5) -| ($(data.north)+(4,0)$);
+
+% Infrastructure layer
+\node[infra=storage] (stor) at (1.5, 0.3) {STORAGE\\[-2pt]\scriptsize\normalfont RocksDB};
+\node[infra=network] (net) at (4.5, 0.3) {NETWORK\\[-2pt]\scriptsize\normalfont libp2p};
+\node[infra=crypto] (crypt) at (7.5, 0.3) {CRYPTO\\[-2pt]\scriptsize\normalfont Ed25519/BLAKE3};
+\node[infra=audit] (aud) at (10.5, 0.3) {AUDIT\\[-2pt]\scriptsize\normalfont Hash-chain};
+
+% Arrows from data to infrastructure
+\draw[arrow=black!30, densely dotted] ($(data.south)+(-4,0)$) -- (stor.north);
+\draw[arrow=black!30, densely dotted] ($(data.south)+(-1.5,0)$) -- (net.north);
+\draw[arrow=black!30, densely dotted] ($(data.south)+(1.5,0)$) -- (crypt.north);
+\draw[arrow=black!30, densely dotted] ($(data.south)+(4,0)$) -- (aud.north);
+
+% Key properties annotation
+\node[font=\scriptsize\sffamily, align=center, text=black!50] at (6, -1) {
+    \textbf{Properties:} Same events $\rightarrow$ Same state (P2)
+    \quad$\bullet$\quad Unauthorized ops skipped (P3)
+    \quad$\bullet$\quad Tamper-evident log (P4)
+};
+
+\end{tikzpicture}

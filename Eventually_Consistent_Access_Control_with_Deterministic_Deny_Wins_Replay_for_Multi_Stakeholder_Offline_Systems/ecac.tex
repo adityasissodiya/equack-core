@@ -17,7 +17,7 @@
 \usepackage{cite}
 \usepackage{float}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,backgrounds,calc,shapes.geometric}
+\usetikzlibrary{arrows.meta,positioning,backgrounds,calc,shapes.geometric,decorations.pathreplacing}
 
 % ========================== TODO Marker Command ==========================
 \newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
@@ -75,11 +75,11 @@
 
 \IEEEtitleabstractindextext{%
 \begin{abstract}
-Multi-stakeholder systems need access control that works offline, supports independent issuers, and still converges to a deterministic outcome after partitions. Centralized IAM, token-only approaches, pure CRDT collaboration systems, and blockchains each fail to satisfy these requirements simultaneously. This paper presents ECAC, an eventually consistent access control model that combines a causal event DAG with deterministic deny-wins replay, W3C Verifiable Credentials with in-band status lists for offline revocation, and optional per-tag encryption with key rotation. ECAC treats policy and trust changes as first-class events in the same log as data, enabling authorization decisions to be replayed deterministically across replicas.
+Multi-stakeholder systems need access control that works offline, supports independent issuers, and converges to a deterministic outcome after partitions. Existing approaches---centralized IAM, token-based schemes, pure CRDTs, and blockchains---fail to satisfy these requirements simultaneously. We present ECAC, an eventually consistent access control model that combines a causal event DAG with deterministic deny-wins replay. ECAC uses W3C Verifiable Credentials with in-band status lists for offline revocation, and supports per-tag encryption with key rotation. By treating policy and trust changes as first-class events in the same log as data, ECAC enables authorization decisions to be replayed deterministically across replicas.
 
-We implement ECAC in a Rust prototype and evaluate it with deterministic synthetic workloads and policy-heavy CBOR logs. In randomized delivery order tests (100 permutations of a 10k-op log), all replicas converged to the same state digest. Deny-wins revocation correctly skipped all post-revoke writes (500/500) and multi-issuer conflicts converged deterministically. Replay time scales linearly with log size ($t = 0.019n + 120$ ms, $R^2=0.998$); hb-chain replay throughput reaches 45k ops/s, and checkpointing yields 4--10$\times$ speedup. An offline partition merge invalidates post-revocation operations after reconciliation, and audit-chain tampering is detected. For small confidentiality runs, replay overhead is modest (~6.5\%).
+We evaluate a Rust prototype using deterministic synthetic workloads and policy-heavy CBOR logs. In randomized delivery tests (100 permutations of a 10k-op log), all replicas converged to an identical state digest. Deny-wins revocation correctly skipped all post-revoke writes (500/500), and multi-issuer conflicts resolved deterministically. Replay time scales linearly ($t = 0.019n + 120$~ms, $R^2=0.998$); throughput reaches 45k~ops/s for linear chains, and checkpoints yield 4--10$\times$ speedup. Offline partition merges invalidate post-revocation operations after reconciliation, and audit-chain tampering is detected. Confidentiality overhead is modest ($\sim$6.5\%).
 
-These results show that ECAC can provide deterministic, auditable authorization in offline multi-stakeholder environments without blockchain consensus, while retaining practical replay performance.
+These results demonstrate that ECAC provides deterministic, auditable authorization for offline multi-stakeholder environments without blockchain consensus, while maintaining practical performance.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -91,41 +91,45 @@ Access control, revocation, verifiable credentials, CRDTs, deterministic replay,
 \IEEEpeerreviewmaketitle
 
 % ==============================================================================
-% SECTION 1: INTRODUCTION (COMPLETE - no changes needed)
+% SECTION 1: INTRODUCTION
 % ==============================================================================
 \section{Introduction}
 
-Modern collaborations often span multiple organizations and devices, demanding access control that works offline and across trust boundaries\cite{10.1108/IMDS-10-2016-0419}\cite{10.1145/3511899}\cite{rouhani2021distributed}\cite{DU2024101878} \cite{10.1145/3714393.3726520} \cite{9551736} \cite{HASSELGREN2020104040}. 
+Access control in multi-stakeholder environments faces a fundamental tension: devices and services must continue operating when disconnected from central infrastructure, yet security-critical decisions---especially credential revocation---must eventually be enforced consistently across all parties. This tension is particularly acute in industrial IoT~\cite{MISTRY2020106382,liu2020fabriciot}, healthcare~\cite{HASSELGREN2020104040}, and cross-organizational data sharing~\cite{10.1145/3511899,DU2024101878}, where equipment changes hands between manufacturers, operators, and service providers throughout its lifecycle.
 
-Consider an industrial IoT device produced by one company, operated by a client, and later serviced by a third party. Throughout its life, different stakeholders must update permissions or revoke credentials as ownership and trust relationships change, even when the device is disconnected for long periods. Traditional enterprise IAM or cloud-based access services break down here: they assume continuous connectivity to a central policy decision point, which is infeasible in patchy networks or air-gapped systems\cite{10.1145/3714393.3726520}\cite{nasab2023empirical}\cite{MISTRY2020106382}\cite{9551736}. 
+Consider a connected industrial device produced by one company, deployed by a client organization, and later maintained by a third-party contractor. Each stakeholder needs to grant or revoke access permissions as ownership and trust relationships evolve. The device may operate in environments with intermittent connectivity~\cite{9551736,s23208535}---factory floors with spotty wireless coverage, remote installations, or air-gapped networks for security compliance. When the device reconnects, all parties must agree on the same authorization state, including which credentials were valid at what times.
 
-Likewise, blockchain-based solutions, while tamper-evident, require every policy change to be agreed on-chain, imposing network consensus and latency that conflict with real-time, offline operation. No single authority can be trusted to dictate global policy in these multi-stakeholder scenarios, yet all parties must eventually agree on who was authorized to do what and when \cite{DIFRANCESCOMAESA201993} \cite{9548956} \cite{8972381} \cite{10.1145/3511899} \cite{rouhani2021distributed} \cite{DU2024101878}. 
+Existing approaches fail to address this scenario adequately:
 
-In short, conventional models either stop working offline or centralize trust in a way that multi-party environments cannot accept\cite{10.1145/3714393.3726520}\cite{DIFRANCESCOMAESA201993} \cite{rouhani2021distributed} \cite{9548956}. 
+\textbf{Centralized IAM} systems assume continuous connectivity to a policy decision point (PDP). When the network is unavailable, authorization fails or falls back to cached decisions that may be stale~\cite{nasab2023empirical}. Jacob and Hartenstein~\cite{10.1145/3714393.3726520} formalize this limitation, showing that traditional access control models cannot provide meaningful guarantees under partition without additional mechanisms.
 
-This paper tackles that gap. We propose ECAC (Eventually Consistent Access Control), a blockchain-free authorization model that keeps devices working while disconnected and still converges on a correct, globally auditable state once they sync. 
+\textbf{Token-based schemes} (OAuth, JWT) enable offline validation of bearer tokens, but revocation remains problematic. Short-lived tokens require frequent renewal, which fails offline. Long-lived tokens create revocation windows during which compromised credentials remain valid~\cite{rouhani2021distributed}. Certificate revocation lists (CRLs) and OCSP introduce their own connectivity dependencies.
 
-\noindent\textbf{Problem statement.} How can multiple independent authorities issue and revoke fine-grained permissions for shared devices or resources that operate offline for long periods, while still ensuring that all parties eventually converge on the same authorized state and can verify a tamper-evident history of who was allowed to do what and when? What trade-offs are inherent in achieving such a design, and which practical deployments does it enable?
+\textbf{Blockchain-based access control} has attracted significant attention~\cite{DIFRANCESCOMAESA201993,8972381,9600468} for its tamper-evident properties. However, requiring on-chain consensus for every policy change imposes latency incompatible with real-time operation and availability requirements during partition~\cite{8989788}. Multi-authority blockchain schemes~\cite{9446108,8798730} address trust distribution but inherit the consensus bottleneck.
 
-ECAC achieves policy-correct convergence and verifiable revocation without requiring a permanent online ledger. It combines deterministic replay of events with cryptographic, verifiable credentials, so that each organization can act autonomously under partitions, yet all come to the same final decisions post-reconciliation. The integration of multi-authority credentials with in-band revocation status lists is key to enabling decentralized, offline-capable and audit-ready authorization. 
+\textbf{CRDT-based collaboration systems} provide eventual consistency for replicated data~\cite{10.1108/IMDS-10-2016-0419}, but lack built-in mechanisms for access control, credential verification, or revocation semantics. Naively applying CRDTs to authorization state can create security violations where conflicting grants and revokes merge unpredictably.
 
-Unlike prior approaches, which trade off availability, consistency, or trust distribution, ECAC provides a unified solution that tolerates offline operation and cross-organization coordination without a centralized PDP or global blockchain \cite{10.1145/3714393.3726520} \cite{8798730} \cite{8972381} \cite{8603785} \cite{8989788} \cite{9600468}.
+The gap is clear: no existing approach simultaneously provides offline operation, deterministic convergence, fine-grained revocation, multi-authority credentials, and tamper-evident audit---properties that are jointly required for secure multi-stakeholder collaboration.
 
-Consider a scenario in which devices and services are jointly managed by several organizations throughout their lifecycle. For example, a connected device might be produced by a manufacturer, deployed and operated by a client or partner organization, and later serviced or decommissioned by a third party. During its lifespan, multiple stakeholders need to update the device's permissions or revoke its credentials as ownership and trust relationships evolve\cite{10.1108/IMDS-10-2016-0419} \cite{10.1145/3511899} \cite{rouhani2021distributed} \cite{DU2024101878}. 
+\medskip
+\noindent\textbf{This paper} presents ECAC (Eventually Consistent Access Control), a model that addresses this gap. ECAC combines four key elements:
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+    \item A \emph{causal event DAG} that records all operations (data writes, grants, revokes) as signed, hash-linked events, enabling deterministic replay regardless of delivery order.
+    \item \emph{Deny-wins replay semantics} that guarantee revoked credentials have no effect on final state---even if revocation arrives after the operations it invalidates.
+    \item \emph{W3C Verifiable Credentials} with embedded status lists for offline-verifiable, multi-authority authorization that requires no central registry.
+    \item \emph{Per-tag encryption with key rotation} for confidentiality and forward secrecy, ensuring revoked principals cannot read data created after revocation.
+\end{enumerate}
 
-A core challenge is that connectivity is not always reliable or continuous---devices may be offline for extended periods or only sporadically connected, and direct communication between each organization's identity management system might be limited \cite{10.1145/3714393.3726520} \cite{liu2020fabriciot} \cite{s23208535} \cite{9551736} \cite{HASSELGREN2020104040}. 
+Unlike blockchain approaches, ECAC requires no global consensus---replicas operate independently during partition and converge deterministically upon reconnection. Unlike pure CRDTs, ECAC integrates policy enforcement directly into the replay mechanism, ensuring that unauthorized operations are excluded from final state by construction.
 
-Despite these intermittent links, security-critical updates (like revoking a compromised credential or altering a service's access rights) must eventually propagate to all parties and be enforced consistently across organizations\cite{10.1145/3714393.3726520} \cite{liu2020fabriciot}.
-
-In this use case, no single authority has complete control; each organization may issue or revoke credentials under its own authority, yet all must converge on a common understanding of who is authorized. 
-
-This illustrates the need for an access control approach that tolerates offline operation (no continuous connectivity), supports multi-authority coordination, and ensures that cross-organization revocations are honored universally once communicated\cite{10.1145/3714393.3726520} \cite{8798730} \cite{rouhani2021distributed}\cite{10.1145/3511899}\cite{9446108}.
+\medskip
+\noindent\textbf{Problem statement.} How can multiple independent authorities issue and revoke fine-grained permissions for shared resources that operate offline for extended periods, while ensuring that all parties eventually converge on the same authorized state and can verify a tamper-evident history of access decisions?
 
 
 \subsection{Properties and Design Drivers (P1--P8)}
-The setting above imposes hard constraints that ordinary online, single-authority designs cannot meet. In short: devices and services must keep working while disconnected; multiple organizations can grant or revoke independently; and, after the fact, everyone needs a verifiable account of what happened. 
+The setting above imposes constraints that single-authority, always-online designs cannot meet: devices must work while disconnected, multiple organizations can grant or revoke independently, and all parties need a verifiable history of what happened.
 
-From these conditions---and the tensions they create (availability vs.\ auditability; autonomy vs.\ multi-authority trust; revocation timeliness vs.\ partitions; privacy vs.\ replication; integrity vs.\ storage growth)---we derive eight concrete properties that any viable approach must satisfy:
+From these conditions---and the tensions they create (availability vs.\ auditability; autonomy vs.\ trust; revocation timeliness vs.\ partitions; privacy vs.\ replication; integrity vs.\ storage growth)---we derive eight properties that any viable approach must satisfy:
 
 \begin{enumerate}[leftmargin=1.6em,label=\textbf{P\arabic*}]
   \item \textbf{Offline availability.} Authorization decisions must be enforceable without contacting a central PDP or ledger; disconnected nodes operate using locally verifiable evidence.
@@ -138,19 +142,19 @@ From these conditions---and the tensions they create (availability vs.\ auditabi
   \item \textbf{Scalability and compaction.} Throughput, replay, and storage remain practical as events and participants grow; history can be checkpointed/compacted without losing verifiability.
 \end{enumerate}
 
-These requirements are deliberately strict: they exclude designs that assume permanent connectivity, a single administrative root, or global consensus for every change. With P1--P8 fixed, the next section evaluates mainstream approaches against them to make the gaps explicit and to motivate the ECAC design choices that follow.
+These requirements are strict: they exclude designs assuming permanent connectivity, a single administrative root, or global consensus for every change. Section~\ref{sec:gap} evaluates mainstream approaches against P1--P8, making the gaps explicit and motivating the ECAC design choices that follow.
 
 
 % ==============================================================================
 % SECTION 2: GAP ANALYSIS
 % ==============================================================================
-\section{Gap Analysis}
+\section{Gap Analysis}\label{sec:gap}
 
-To position ECAC and motivate its design choices, we evaluate four major classes of access control systems against properties P1--P8: centralized IAM, token-based approaches, pure CRDT-based systems, and blockchain-based access control. These categories capture the dominant paradigms in practice and the research literature.
+To position ECAC and motivate its design, we evaluate four classes of access control systems against P1--P8: centralized IAM, token-based approaches, pure CRDT-based systems, and blockchain-based access control. These categories capture the dominant paradigms in practice and research.
 
-Our methodology applies each property as a binary or graded criterion based on published system architectures and known failure modes. Tables~\ref{tab:iam-analysis}--\ref{tab:blockchain-analysis} summarize the results for each class, highlighting where assumptions about connectivity, trust, or consensus collide with offline multi-stakeholder requirements.
+We apply each property as a binary or graded criterion based on published architectures and known failure modes. Tables~\ref{tab:iam-analysis}--\ref{tab:blockchain-analysis} summarize results, highlighting where assumptions about connectivity, trust, or consensus conflict with offline multi-stakeholder requirements.
 
-The pattern is consistent: each class satisfies a subset of properties but fails on the combination required for offline, multi-authority collaboration. This gap motivates ECAC's hybrid approach, which combines deterministic replay (P2), in-band policy and trust events (P3, P5, P6), and audit integrity (P4) without requiring always-online consensus (P1) or sacrificing confidentiality and scalability (P7, P8).
+The pattern is consistent: each class satisfies a subset of properties but fails on the combination required for offline multi-authority collaboration. This gap motivates ECAC's hybrid approach, combining deterministic replay (P2), in-band policy and trust events (P3, P5, P6), and audit integrity (P4) without requiring always-online consensus (P1) or sacrificing confidentiality and scalability (P7, P8).
 
 % --- Table 1: Centralized IAM ---
 \begin{table*}[hbt!]
@@ -307,33 +311,31 @@ Blockchain consensus protocols eliminate dependence on any single trusted party 
 \end{tabular}
 \end{table*}
 
-The gap analysis shows that no existing paradigm satisfies all eight properties simultaneously. Centralized IAM breaks offline availability and multi-authority support; token systems struggle with revocation and auditability; CRDT-only designs provide convergence but lack policy integrity and bounded trust; and blockchain-based systems trade availability and confidentiality for tamper-evidence. ECAC addresses this gap by combining deterministic replay and CRDT convergence (P1, P2) with in-band, verifiable policy and trust events (P3, P5, P6) and audit integrity (P4), while retaining practical replay performance and optional confidentiality controls (P7, P8). The following section presents the ECAC model in detail.
+The gap analysis shows that no existing paradigm satisfies all eight properties. Centralized IAM breaks offline availability and multi-authority support; token systems struggle with revocation and auditability; CRDT-only designs provide convergence but lack policy integrity and bounded trust; blockchain-based systems trade availability and confidentiality for tamper-evidence. ECAC addresses this gap by combining deterministic replay and CRDT convergence (P1, P2) with in-band verifiable policy and trust events (P3, P5, P6) and audit integrity (P4), while retaining practical performance and optional confidentiality (P7, P8). The following section presents the ECAC model.
 
 
 % ==============================================================================
-% SECTION 3: ECAC MODEL (COMPLETE - no changes needed)
+% SECTION 3: ECAC MODEL
 % ==============================================================================
-\section{ECAC Model:} 
+\section{ECAC Model}\label{sec:model}
 
-ECAC is our proposed Eventual Consistency Access Control model designed to meet offline-first requirements while ensuring rigorous security and auditability. Rather than a low-level implementation tour, this section focuses on conceptual contributions of ECAC. 
+ECAC is an Eventually Consistent Access Control model designed for offline-first operation with rigorous security and auditability. This section presents the conceptual contributions rather than implementation details.
 
-ECAC combines a causal event log with deterministic ``deny-wins'' replay semantics, a novel use of verifiable credentials for time-bounded authorization epochs, a hybrid ABAC/RBAC policy model aligned with deny-overrides semantics, and an encryption scheme providing confidentiality with forward secrecy. 
+ECAC combines four key elements: (1)~a causal event log with deterministic deny-wins replay, (2)~verifiable credentials for time-bounded authorization epochs, (3)~a hybrid ABAC/RBAC policy model with deny-overrides semantics, and (4)~per-tag encryption with forward secrecy.
 
-We outline formal guarantees of convergence, safety, determinism, audit integrity, and forward secrecy, and we conclude by contrasting our approach with blockchains to highlight design trade-offs.
-
-We summarize the end-to-end architecture in the text and figures below.
-\begin{figure*}[t]
+We outline formal guarantees for convergence, safety, determinism, audit integrity, and forward secrecy. Figure~\ref{fig:ecac-overview} presents a high-level view of the system's four-phase lifecycle: ingestion of signed operations, credential validation, policy-gated replay, and state projection. Subsequent figures detail each component.
+\begin{figure}[t]
 \centering
-\resizebox{\textwidth}{!}{\input{ecac-architecture.tex}}
-\caption{ECAC architecture overview and data-flow.}
-\label{fig:ecac-architecture}
-\end{figure*}
+\resizebox{\columnwidth}{!}{\input{fig-overview.tex}}
+\caption{ECAC system overview showing the four-phase lifecycle (Ingest, Validate, Replay, Query), central causal DAG with CRDT state, and supporting infrastructure.}
+\label{fig:ecac-overview}
+\end{figure}
 
 \subsection{Event Log and Deterministic Deny-Wins Replay}
 
-ECAC keeps an append-only event log structured as a causal DAG, where each event points to its causal predecessors. The DAG encodes happens-before relations. System state is derived by deterministically topologically sorting and replaying the DAG. A fixed traversal order (e.g., canonical BFS) ensures every replica produces the same sequence.
+ECAC maintains an append-only event log structured as a causal DAG, where each event points to its causal predecessors. The DAG encodes happens-before relations, and system state is derived by deterministically sorting and replaying events. A fixed traversal order ensures every replica produces the same sequence.
 
-Concurrent events---those without causal order---are resolved using a composite timestamp: a Hybrid Logical Clock (HLC) value plus a unique operation ID. The HLC combines physical and logical time to preserve causality; if timestamps match, op IDs deterministically break ties. Thus, the log's replay becomes a pure function of the event set, guaranteeing identical state across replicas.
+Concurrent events---those without causal order---are resolved using a composite timestamp: a Hybrid Logical Clock (HLC) value plus a unique operation ID. The HLC combines physical and logical time to preserve causality; when timestamps match, op IDs break ties deterministically. Replay thus becomes a pure function of the event set, guaranteeing identical state across replicas.
 
 Figure~\ref{fig:replay-deny-flow} illustrates the replay-and-deny pipeline.
 \begin{figure}[H]
@@ -361,22 +363,38 @@ Figure~\ref{fig:replay-deny-flow} illustrates the replay-and-deny pipeline.
 \label{fig:replay-deny-flow}
 \end{figure}
 
-The event DAG effectively acts as a convergent CRDT: merging logs from partitions is a simple set union of nodes and edges, which is commutative, associative, and idempotent, ensuring eventual consistency.
+The event DAG acts as a convergent CRDT: merging logs from partitions is a set union of nodes and edges---commutative, associative, and idempotent---ensuring eventual consistency.
 
-Replay follows a deny-wins rule: ``apply if authorized at event time, else skip.'' Each event carries its logical timestamp, and during replay, it is applied only if the actor held the required permission at that moment. Unauthorized events are treated as no-ops. This timestamp-ordered authorization guarantees that any action invalid under policy has no effect on the final state. The combination of causal order, deterministic tie-breaks, and deny-wins replay ensures all replicas omit the same unauthorized operations, yielding a uniform, policy-consistent result. This enforces policy safety and determinism across distributed execution.
+Figure~\ref{fig:dag-structure} details the operation structure and DAG mechanics. Each operation carries a signed header with parent links, HLC timestamp, author key, and typed payload. The DAG maintains two staging areas: activated nodes (all parents present) feed the deterministic replay, while pending nodes wait for missing parents before activation.
 
-Because the replay order is a pure function of the event DAG, replicas that later see the same events compute an identical state, independent of delivery timing (P2).
+\begin{figure*}[t]
+\centering
+\resizebox{0.85\textwidth}{!}{\input{fig-dag-structure.tex}}
+\caption{Operation structure showing the OpHeader fields and 12 payload variants (left), and the causal DAG with pending-parent staging and deterministic topological sort (right).}
+\label{fig:dag-structure}
+\end{figure*}
+
+Replay follows a deny-wins rule: apply if authorized at event time, else skip. Each event carries its logical timestamp and is applied only if the actor held the required permission at that moment. Unauthorized events become no-ops. This timestamp-ordered authorization ensures that policy-invalid actions have no effect on final state. The combination of causal order, deterministic tie-breaks, and deny-wins replay guarantees all replicas omit the same unauthorized operations, yielding a uniform, policy-consistent result (P2).
 
 \subsection{Authorization Epochs via Verifiable Credentials and Status Lists}
-ECAC manages permissions in offline, distributed settings using verifiable, time-bounded credentials. It adopts the W3C Verifiable Credentials (VC) format for signed authorization tokens that assert a principal's rights over a specific interval (validFrom--validUntil). For example, an issuer can grant ``User U write-access to R from T1 to T2.'' Credentials are tamper-evident and self-verifying; replicas can independently confirm authenticity and validity.
+ECAC manages permissions using verifiable, time-bounded credentials. It adopts the W3C Verifiable Credentials (VC) format for signed authorization tokens asserting a principal's rights over a specific interval (validFrom--validUntil). Credentials are tamper-evident and self-verifying; replicas independently confirm authenticity and validity.
 
-Revocations are handled via standard VC status lists, cryptographically signed bitstrings indicating whether a credential ID is revoked. A valid credential defines an authorization epoch; expiry or revocation ends it.
+Revocations use standard VC status lists---cryptographically signed bitstrings indicating whether each credential ID is revoked. A valid credential defines an authorization epoch; expiry or revocation ends it.
 
-Every grant and revoke event is recorded in the event log as part of a TrustView, containing the issuer's public key (or reference) and a digest of the current revocation registry. Embedding this data removes dependence on a central authority: an offline node can verify at timestamp t that a user held a valid, non-revoked credential by checking included signatures and proofs. The log itself forms a distributed PKI, replicating issuer keys and revocation data across nodes---so authorization can be validated locally and offline.
+Every grant and revoke event is recorded in the event log as part of a TrustView, containing the issuer's public key and a digest of the current revocation registry. Embedding this data removes dependence on a central authority: an offline node can verify at any timestamp that a user held a valid, non-revoked credential. The log itself forms a distributed PKI, replicating issuer keys and revocation data across nodes for local, offline validation.
 
-During replay, the system checks for a valid credential covering each event's timestamp. If found, the operation is applied; otherwise, it is skipped (per \S4.1). These time-scoped credentials enforce temporal access control: users cannot act outside active grant intervals, and all replicas reach the same decision since they verify identical evidence.
+During replay, the system checks for a valid credential covering each event's timestamp. If found, the operation applies; otherwise, it is skipped. These time-scoped credentials enforce temporal access control: users cannot act outside active grant intervals, and all replicas reach identical decisions since they verify identical evidence.
 
-In short, ECAC's authorization model uses decentralized, verifiable credentials to issue and revoke rights securely, allowing any node to prove *who* was allowed to do *what* and *when*---without contacting any live identity service.
+ECAC's authorization model thus uses decentralized, verifiable credentials to issue and revoke rights securely, allowing any node to prove \emph{who} was allowed to do \emph{what} and \emph{when}---without contacting any live identity service.
+
+Figure~\ref{fig:trustview-vc} illustrates the in-band trust assembly and VC verification flow. Trust operations (IssuerKey, IssuerKeyRevoke, StatusListChunk) build the TrustView incrementally during replay. When a VC needs verification, the system parses the JWT, looks up the issuer key in TrustView, verifies the Ed25519 signature, checks status list revocation, and extracts claims.
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.85\textwidth}{!}{\input{fig-trustview-vc.tex}}
+\caption{In-band trust assembly from ops (left) and VC verification flow (right). TrustView is built entirely from log operations, requiring no external PKI.}
+\label{fig:trustview-vc}
+\end{figure*}
 
 Figure~\ref{fig:cred-revoke-timeline} illustrates how grants, revocations, and operations interact over time during replay.
 \begin{figure}[H]
@@ -402,84 +420,88 @@ Figure~\ref{fig:cred-revoke-timeline} illustrates how grants, revocations, and o
 \end{figure}
 
 \subsection{Policy Semantics (Cedar) and Deny-Overrides Alignment}
-ECAC builds on verifiable credentials with a rich, attribute- and role-based policy layer inspired by AWS's Cedar language, an open-source ABAC framework. Policies may permit or forbid actions, with a default deny stance: if nothing explicitly permits, access is denied. ECAC adopts Cedar's deny-overrides (forbid-wins) semantics to extend the deny-wins rule across partitions.
+ECAC builds on verifiable credentials with a rich policy layer inspired by AWS's Cedar language, an open-source ABAC framework. Policies may permit or forbid actions, with a default deny stance: if nothing explicitly permits, access is denied. ECAC adopts Cedar's deny-overrides (forbid-wins) semantics to extend the deny-wins rule across partitions.
 
-If any matching policy forbids an operation, that denial overrides all permits. During replay, ECAC evaluates policies in effect at the event's timestamp. If a forbid rule applies, the event is treated as unauthorized and skipped, even if permits match. If only permits apply, it's allowed; if no rules apply, the default deny skips it. This mirrors XACML/Cedar's deny-overrides algorithm, ensuring predictable, safe-by-default access control.
+If any matching policy forbids an operation, that denial overrides all permits. During replay, ECAC evaluates policies at the event's timestamp. If a forbid rule applies, the event is skipped; if only permits apply, it proceeds; if no rules apply, the default deny skips it. This mirrors XACML/Cedar's deny-overrides algorithm, ensuring predictable, safe-by-default access control.
 
-ECAC's model unifies RBAC and ABAC: roles are attributes of principals (e.g., `role="admin"`), and policies can grant permissions directly or through roles. Cedar's entity-attribute data model supports both hierarchical roles and arbitrary contextual attributes (e.g., department, clearance, object sensitivity, time-of-day). This allows fine-grained, context-aware rules alongside traditional role-based logic.
+ECAC unifies RBAC and ABAC: roles are attributes of principals (e.g., \texttt{role="admin"}), and policies can grant permissions directly or through roles. Cedar's entity-attribute model supports hierarchical roles and contextual attributes (department, clearance, object sensitivity, time-of-day), enabling fine-grained, context-aware rules alongside traditional role-based logic.
 
-Policies reference system state---including credentials and object metadata---and are evaluated deterministically against each event's parameters. Identical inputs guarantee identical outcomes across replicas. The deny-overrides rule ensures partition-tolerant enforcement: a revocation issued on one node always takes precedence after logs merge, even if another node concurrently granted access. Thus, no user can gain privileges that were ever explicitly revoked, maintaining strong security consistency under eventual convergence.
+Policies reference system state---credentials and object metadata---and are evaluated deterministically. Identical inputs guarantee identical outcomes across replicas. The deny-overrides rule ensures partition-tolerant enforcement: a revocation on one node always takes precedence after logs merge, even if another node concurrently granted access. Deny-wins ensures that any revocation, once observed, deterministically overrides concurrent or later grants, closing the safety hole that partitions would otherwise create (P3).
 
-Deny-wins ensures that any revocation, once observed, deterministically overrides concurrent or later grants, closing the safety hole that partitions would otherwise create (P3).
+Figure~\ref{fig:deny-wins} shows the authorization epoch construction and deny-wins gate. Grant operations open epochs by recording subject, role, scope, and temporal bounds from the VC. Revoke operations close epochs by setting the end position. During replay, each DATA operation passes through the deny-wins gate, which checks epoch coverage, role permissions, scope intersection, and temporal validity before applying or skipping.
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.95\textwidth}{!}{\input{fig-deny-wins.tex}}
+\caption{Authorization epoch construction via Grant/Revoke (top) and the deny-wins gate that filters each DATA operation (bottom). Applied and skipped operations generate audit events.}
+\label{fig:deny-wins}
+\end{figure*}
 
 \subsection{Confidentiality and Forward Secrecy}
-ECAC enforces not only access control but also data confidentiality through tagged encryption. Each event payload is labeled with an access tag (e.g., resource ID or classification) and encrypted so only principals with valid credentials for that tag can decrypt it. Each tag corresponds to a key (symmetric or asymmetric) shared securely with authorized users. When an event is logged---say, a document edit---it is encrypted under the tag's key. Unauthorized users see only ciphertext or placeholders but still replicate and verify the log. Encrypted events a user cannot decrypt are treated as no-ops during replay, preserving both integrity and consistency.
+ECAC enforces data confidentiality through tagged encryption. Each event payload is labeled with an access tag (e.g., resource ID or classification) and encrypted so only principals with valid credentials for that tag can decrypt it. Each tag corresponds to a symmetric key shared with authorized users. Unauthorized users see only ciphertext but still replicate and verify the log. Encrypted events a user cannot decrypt are treated as no-ops during replay, preserving integrity and consistency.
 
-To protect data after revocations, ECAC enforces forward secrecy via key rotation. When an authorization epoch ends (e.g., a user's rights expire or are revoked), a new key is generated for that tag and distributed only to remaining authorized principals. Future events use the new key (K2), making them unreadable to anyone holding the old key (K1). This prevents access to data created after revocation---analogous to Perfect Forward Secrecy in secure messaging. Old keys decrypt only content from their valid period. Conversely, newly authorized users gain access only to data explicitly re-encrypted or shared post-grant; by default, they cannot read past history.
+To protect data after revocations, ECAC enforces forward secrecy via key rotation. When an authorization epoch ends, a new key is generated for that tag and distributed only to remaining authorized principals. Future events use the new key, making them unreadable to anyone holding only the old key. Old keys decrypt only content from their valid period; newly authorized users gain access only to data shared post-grant.
 
-Key distribution and rotation are managed through the event log itself. A key rotation event is recorded with the new key encrypted to each authorized user's public key. During replay, authorized replicas retrieve the new key to continue decryption; unauthorized ones cannot. This integrates key management with causal history, ensuring consistent, verifiable key state across replicas.
+Key distribution and rotation are managed through the event log itself. A key rotation event records the new key encrypted to each authorized user's public key. During replay, authorized replicas retrieve the new key; unauthorized ones cannot. This integrates key management with causal history, ensuring consistent, verifiable key state across replicas.
 
-All encrypted events remain hash-chained and signed, so log integrity and tamper detection are universal---even to users who cannot read the contents. The system ensures deterministic redaction: unauthorized users compute a valid redacted subset of the global state, maintaining structural consistency while upholding strict confidentiality and forward secrecy.
+All encrypted events remain hash-chained and signed, so log integrity and tamper detection are universal---even to users who cannot read contents. Unauthorized users compute a valid redacted subset of global state, maintaining structural consistency while upholding strict confidentiality and forward secrecy (P7).
+
+Figure~\ref{fig:confidentiality} illustrates the per-tag encryption and key rotation mechanisms. Data operations are encrypted using the tag's current symmetric key (XChaCha20-Poly1305). KeyRotate operations establish new key versions, and KeyGrant operations distribute keys encrypted to authorized subjects' public keys. The forward secrecy timeline shows how revoked principals cannot decrypt data created after key rotation.
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.95\textwidth}{!}{\input{fig-confidentiality.tex}}
+\caption{Per-tag encryption (top left), key distribution and rotation (top right), forward secrecy timeline (middle), and query-time redaction for unauthorized subjects (bottom).}
+\label{fig:confidentiality}
+\end{figure*}
 
 \subsection{Formal Guarantees (Proof Sketches)}
-We now outline key formal properties of the ECAC model. These are given as sketches of proof or rationale (with minimal formalism) to assure the reader that our design meets its claims.
+We outline key formal properties of ECAC as proof sketches to demonstrate that the design meets its claims.
 
-\subsubsection{Convergence (Same events → same state)}
+\subsubsection{Convergence (Same events $\rightarrow$ same state)}
 \begin{itemize}
-    \item \textbf{Claim:} If two replicas process the same set of events, they will reach an identical final state (despite possibly having received events in different orders over time).
-    \item \textbf{Justification:} The deterministic replay algorithm (Section 4.1) ensures convergence. Because every event is applied in causal order with a globally-consistent tie-break, the order of application is a pure function of the input DAG, independent of network timing or delivery order. Merging logs from disconnected replicas is equivalent to taking the union of their DAGs (since the DAG is a CRDT). Once merged, all replicas will sort and replay this union in the same way, yielding identical results. This is analogous to state machine replication in distributed systems: ECAC's replay is essentially a deterministic state machine, and the event log serves as the feed of commands. As long as every replica has the same inputs (the same set of events and credentials), they produce the same outputs (final state). Thus, ECAC satisfies Strong Eventual Consistency: after sufficient communication, all copies of the state converge.  
+    \item \textbf{Claim:} If two replicas process the same set of events, they reach an identical final state regardless of delivery order.
+    \item \textbf{Justification:} The deterministic replay algorithm ensures convergence. Every event is applied in causal order with a globally-consistent tie-break, making application order a pure function of the input DAG. Merging logs from disconnected replicas is a DAG union (commutative and idempotent). All replicas sort and replay identically, analogous to deterministic state machine replication. ECAC thus satisfies Strong Eventual Consistency.
 \end{itemize}
 
 \subsubsection{Policy Safety (No unauthorized effects in final state)}
 \begin{itemize}
-    \item \textbf{Claim:} In the final state produced by replaying an event log, no operation will have affected the state if that operation was not authorized under the policies in force at the time it occurred.
-    \item \textbf{Justification:} By construction, any unauthorized event is skipped during replay (deny-wins). We prove safety by contrapositive: assume an event e (representing an operation) did affect the final state. That means the event was applied during replay. For it to apply, our algorithm requires that it passed the authorization check at time t e (the event's timestamp). That is, the principal associated with e had a valid credential and no matching forbid rule at t e. Therefore e was permitted by the policy at that time. If e had not been permitted (i.e. if any rule denied it or the actor lacked credentials), the replay logic would have skipped it. Thus, no unauthorized event can contribute to the state. 
+    \item \textbf{Claim:} In the final state, no operation affects the state if it was not authorized under policies in force at its timestamp.
+    \item \textbf{Justification:} By construction, unauthorized events are skipped (deny-wins). Proof by contrapositive: if event $e$ affected final state, it was applied, meaning it passed authorization at its timestamp---the principal had a valid credential and no forbid rule matched. Thus no unauthorized event contributes to state.
 \end{itemize}
 
-More formally, we maintain an invariant that at any prefix of the replay order, the partial state is one that could result from a sequence of authorized operations. This can be shown by induction: initially true (empty state has no operations); and if it holds up to event e i, then when considering e {i+1}, if it's authorized we apply it and preserve the invariant, if not we skip it and state remains unchanged (trivially preserving the invariant). In the end, the state reflects only authorized operations. This guarantee is sometimes referred to as safety or correctness in security-typed distributed systems: the system's outcome respects all access control decisions made throughout its execution.
+Formally, an inductive invariant holds: at any prefix of replay order, partial state results only from authorized operations. Initially true (empty state); if true up to $e_i$, then $e_{i+1}$ either passes authorization (applied, invariant preserved) or fails (skipped, state unchanged). The final state reflects only authorized operations.
 
 \subsubsection{Determinism (Replay is a pure function of the DAG)}
 \begin{itemize}
-    \item \textbf{Claim:} The outcome of replaying the event log (DAG) is fully determined by the log itself, independent of any external factors like message ordering, network delays, or nondeterministic choices.
-    \item \textbf{Justification:} ECAC's replay procedure behaves like a deterministic function F(DAG) → state. Given an event DAG (including embedded credentials and policy data), the algorithm for topologically sorting and applying events is fixed and does not involve any random or timing-based choices. Any two correct implementations of the replay procedure will produce the same sequence of applied events and thereby the same final state. 
+    \item \textbf{Claim:} Replay outcome is fully determined by the log itself, independent of message ordering, network delays, or nondeterministic choices.
+    \item \textbf{Justification:} ECAC's replay is a deterministic function $F(\text{DAG}) \rightarrow \text{state}$. The topological sort and application algorithm is fixed with no random or timing-based choices.
 \end{itemize}
 
-This determinism relies on several design points: 
+This determinism relies on:
 \begin{enumerate}
-
-    \item We impose a total order on concurrent events (via timestamps and IDs) so there is no ambiguity in ordering. Every tie is broken in the same way on every node. 
-
-    \item Policy evaluation is deterministic (a pure function of event, credential, and policy inputs), so the authorization outcome for a given event is the same on all nodes. 
-
-    \item Our cryptographic primitives (hash, signature verify, decrypt) are deterministic and their success/failure outcomes (e.g. signature valid or not) are objective and consistent across replicas. 
-
-    \item There is no dependence on wall-clock time or external sources during replay --- all temporal decisions use the event's own timestamp. Thus, the entire replay is a self-contained, deterministic computation. We can phrase this as a pure function: if one were to construct a mathematical description of the initial state and each event (with its payload and credentials), the final state is a well-defined function of that input, with no reliance on execution interleavings. This determinism is what underpins the convergence property (4.5.1) and is essential for auditability. It implies that the audit log is authoritative: one can replay it later and always get the same result, enabling consistent audits and verifiability of outcomes.
-
+    \item A total order on concurrent events via timestamps and IDs---every tie breaks identically on all nodes.
+    \item Deterministic policy evaluation---authorization is a pure function of event, credential, and policy inputs.
+    \item Deterministic cryptographic primitives---hash, signature verify, and decrypt produce consistent outcomes.
+    \item No wall-clock dependence---all temporal decisions use event timestamps.
 \end{enumerate}
+The entire replay is self-contained and deterministic, enabling consistent audits and verifiable outcomes.
 
-\subsubsection{Audit Integrity (Audit equals semantic trace; tamper-evident chain)}
+\subsubsection{Audit Integrity (Tamper-evident chain)}
 \begin{itemize}
-    \item \textbf{Claim:} The event log serves as a tamper-evident, authentic audit trail of all operations, such that the replay of the log is a correct semantic trace of system state changes. Any attempt to alter history (add, remove, or change events) would be detectable.
-    \item \textbf{Justification:} We enforce audit integrity through cryptographic hash-chaining and signing of events. Each event includes a cryptographic hash linking it to previous events (for example, each event could hash the hash of its parent(s) or the hash of the last event in a total order). 
+    \item \textbf{Claim:} The event log is a tamper-evident audit trail. Any alteration (add, remove, or change events) is detectable.
+    \item \textbf{Justification:} Each event includes a cryptographic hash linking it to predecessors, creating a Merkle-DAG commitment. Tampering breaks hash verification. Events are signed by originators for origin authenticity.
 \end{itemize}
 
-This creates a hash chain or Merkle-DAG commitment to the history. If any event in the past were tampered with or removed, the hashes of subsequent events would no longer match, and verification would fail.
-
-In essence, the log is append-only and any post-hoc modifications are evident. This approach is analogous to how blockchains and secure logs work adding each record's hash to a chain makes the log tamper-evident. Moreover, each event can be digitally signed by its originator (and/or by a quorum of servers when consolidated) to provide origin authenticity and prevent forgery. The combination of these techniques means that an auditor (or any replica) can cryptographically verify that the log has not been altered and that each event came from a valid source. The phrase ``audit equals semantic trace'' implies that the audit log (the sequence of events recorded) corresponds exactly to the semantic execution of the system. Since every applied operation appears as an event, and no event that was skipped had any effect, one can inspect the log and reason about the system's behavior step-by-step. The state after replaying the log is, by definition, the result of applying all non-skipped events in order; thus the log is a complete explanation of the state. 
-
-This allows not only detection of tampering but also high-level auditing: e.g. one can show that at no point did an unauthorized operation occur (by referencing the policy checks for each event), etc. In summary, ECAC's log design provides an immutable ledger of operations (locally immutable but eventually globally agreed) with strong integrity guarantees. Even without a fully distributed consensus, each participant can trust the log they have as a faithful record (and discrepancies between logs will be caught upon synchronization, as hashes won't match).
+The log is append-only; post-hoc modifications are evident. Since every applied operation appears as an event, and skipped events have no effect, the log provides a complete semantic trace of system behavior. The state after replay equals the result of applying all non-skipped events in order. Auditors can verify that no unauthorized operation occurred by checking policy decisions for each event. ECAC provides an immutable ledger with strong integrity guarantees; discrepancies between replicas are detected upon synchronization when hashes fail to match (P4).
 
 \subsubsection{Forward Secrecy (Post-rotation unreadability)}
 \begin{itemize}
-    \item \textbf{Claim:} A principal who loses authorization (gets revoked) at time t cannot decrypt or read any confidential data items created after time t (even if they keep a copy of prior keys or data). Likewise, compromise of a past encryption key does not expose future events.
-    \item \textbf{Justification:} This is achieved via the key rotation strategy described in Section 4.4. Formally, let $K_n$ be the sequence of encryption keys used for a particular data tag over time (with rotations at times $T_1, T_2, \ldots$ corresponding to revocation events). A principal who is revoked at time $T_r$ will possess keys $K_1 \ldots K_{r-1}$ (from when they were authorized) but will not obtain $K_r$ or any subsequent keys. All events timestamped $\geq T_r$ are encrypted with keys $\{K_r, K_{r+1}, \ldots\}$. Without those keys, the revoked principal cannot feasibly decrypt the content (assuming the cryptography is secure). This ensures that after revocation, that principal's knowledge is ``frozen in time.'' Even if they had recorded all their old keys and all past ciphertexts, the new ciphertexts from $T_r$ onward are generated with unknown keys and thus remain confidential.
+    \item \textbf{Claim:} A principal revoked at time $t$ cannot decrypt data created after $t$, even with copies of prior keys. Compromise of a past key does not expose future events.
+    \item \textbf{Justification:} Let $K_1, K_2, \ldots$ be the sequence of keys for a tag, with rotations at times $T_1, T_2, \ldots$. A principal revoked at $T_r$ has keys $K_1 \ldots K_{r-1}$ but not $K_r$ or later. Events after $T_r$ use keys the revoked principal cannot obtain.
 \end{itemize}
 
-This property is equivalent to perfect forward secrecy in communications, here applied to access control state. Another way to view it: we partition the history into epochs demarcated by key rotations. A user's read access is limited to the epochs during which they were authorized. To breach forward secrecy, an adversary would have to break the encryption of a new epoch without the key, which by assumption is computationally infeasible. Additionally, we ensure old keys are securely erased or invalidated (no longer used to encrypt new data) so that even if a revoked user somehow intercepts future messages, they cannot leverage any prior material to decrypt them. This guarantee holds on the assumption that the cryptographic primitives (e.g. AES, Diffie-Hellman key exchanges for new keys) are secure. 
-
-It's also important that the distribution of new keys to remaining authorized users is itself secure (which in our design is handled by encrypting the new key to each authorized user's public key, an operation the revoked user cannot perform since they are no longer in the authorized set). 
-
-Therefore, ECAC ensures forward secrecy: compromise of past session keys or credentials does not compromise future data confidentiality. Conversely, we also naturally get backward secrecy in the sense that a new user who joins (or is granted access) cannot automatically decrypt past records unless those are deliberately shared. Taken together, these properties uphold strong confidentiality over time, aligning with principles of least privilege and need-to-know throughout the system's evolution.
+This is forward secrecy applied to access control: history partitions into epochs demarcated by rotations, and read access is limited to authorized epochs. New keys are distributed by encrypting to each authorized user's public key---an operation the revoked user cannot access. ECAC also provides backward secrecy: newly authorized users cannot decrypt past records unless explicitly re-shared. These properties uphold confidentiality over time, aligning with least-privilege principles.
 
 \subsection{ECAC Model and Guarantees}\label{subsec:ecac-model}
 
@@ -650,40 +672,24 @@ Policy-bound access ensures only authorized epochs reveal keys.
 \end{proof}
 
 \paragraph{Discussion and scope.}
-The model is offline-first and consensus-free: it requires neither blockchain nor an online PDP.
-Security reduces to signature/PKI soundness (via TrustView and status lists), hash collision resistance, and the confidentiality of per-tag keys.
-The operational network (gossip, deduplication, causal parent fetching) influences liveness but not the safety or determinism results above.
+The model is offline-first and consensus-free: it requires neither blockchain nor an online PDP. Security reduces to signature/PKI soundness (via TrustView and status lists), hash collision resistance, and per-tag key confidentiality. The operational network (gossip, deduplication, parent fetching) influences liveness but not safety or determinism.
 
 
 % ==============================================================================
 % SECTION 4: EVALUATION
 % ==============================================================================
-\section{Evaluation}
-We evaluate ECAC through a series of deterministic experiments that validate correctness properties and
-measure replay performance. In addition to replay benchmarks, we construct policy-heavy CBOR logs and an
-offline partition merge to validate deny-wins revocation under multi-issuer conditions. All runs use fixed
-seeds and a deterministic environment (\texttt{TZ=UTC,\allowbreak SOURCE\_DATE\_EPOCH=1,\allowbreak ECAC\_TIME\_MS=1000}).
+\section{Evaluation}\label{sec:eval}
+We evaluate ECAC through deterministic experiments that validate correctness properties and measure replay performance. We construct policy-heavy CBOR logs and an offline partition merge to validate deny-wins revocation under multi-issuer conditions. All runs use fixed seeds and a deterministic environment (\texttt{TZ=UTC, SOURCE\_DATE\_EPOCH=1, ECAC\_TIME\_MS=1000}).
 
-The evaluation is organized as follows:
-\begin{itemize}
-    \item \S\ref{subsec:methodology} describes our experimental methodology and workloads;
-    \item \S\ref{subsec:property-validation} presents property validation results for the core guarantees;
-    \item \S\ref{subsec:scalability} examines scalability and replay performance (throughput, replay cost);
-    \item \S\ref{subsec:revocation-latency} evaluates revocation behavior under offline partition merge;
-    \item \S\ref{subsec:limitations} candidly discusses observed weaknesses and limitations.
-\end{itemize}
-
-Throughout, we emphasize reproducibility by using deterministic workload generators with fixed seeds. Unless stated otherwise, values reflect single runs recorded from the experiment artifacts.
+The evaluation covers: methodology and workloads (\S\ref{subsec:methodology}), property validation (\S\ref{subsec:property-validation}), scalability and performance (\S\ref{subsec:scalability}), revocation under partition (\S\ref{subsec:revocation-latency}), and limitations (\S\ref{subsec:limitations}). We use deterministic workload generators with fixed seeds for reproducibility.
 
 \subsection{Experimental Methodology}\label{subsec:methodology}
 
 \subsubsection{Implementation}
-We implemented ECAC-core as a Rust library organized into four crates: \texttt{core} (operations, DAG, replay, policy, VCs, CRDTs), \texttt{store} (RocksDB persistence, checkpoints, audit), \texttt{net} (libp2p gossip, sync planning), and \texttt{cli} (command-line interface). The implementation uses Ed25519 for signatures, BLAKE3 for hashing (operations and state digests), XChaCha20-Poly1305 for authenticated encryption, and SHA-256 for status list bitstrings (per W3C VC specification). Operations are serialized in CBOR format for compactness and determinism. The prototype comprises approximately 8,500 lines of Rust code (excluding tests).
+ECAC-core is a Rust library organized into four crates: \texttt{core} (operations, DAG, replay, policy, VCs, CRDTs), \texttt{store} (RocksDB persistence, checkpoints, audit), \texttt{net} (libp2p gossip, sync), and \texttt{cli}. The implementation uses Ed25519 for signatures, BLAKE3 for hashing, XChaCha20-Poly1305 for encryption, and SHA-256 for status list bitstrings. Operations are serialized in CBOR. The prototype comprises $\sim$8,500 lines of Rust (excluding tests).
 
 \subsubsection{Testbed Configuration}
-Experiments were conducted on a single Linux x86\_64 workstation using Rust stable (1.85) in release mode.
-We use a deterministic environment (\texttt{TZ=UTC,\allowbreak SOURCE\_DATE\_EPOCH=1,\allowbreak ECAC\_TIME\_MS=1000}) and fixed seeds.
-Networked multi-node measurements are not reported; partition behavior is evaluated via offline log merges.
+Experiments ran on a single Linux x86\_64 workstation using Rust 1.85 in release mode with deterministic environment settings and fixed seeds. Multi-node measurements are not reported; partition behavior is evaluated via offline log merges.
 
 \subsubsection{Workloads}
 We use three synthetic workloads provided by the CLI and two policy-focused CBOR logs:
@@ -730,131 +736,102 @@ We measure the following primary metrics:
 \end{itemize}
 
 \subsubsection{Experiment Design}
-Our evaluation addresses five research questions mapped to the design properties P1--P8:
+Our evaluation addresses five research questions:
 
 \begin{enumerate}[label=\textbf{RQ\arabic*},leftmargin=2.5em]
-    \item \textit{Convergence under partitions} (P2): Do replicas that receive operations in different orders converge to identical states?
-    \item \textit{Policy safety} (P3): Are unauthorized operations correctly rejected, and do revocations take effect deterministically?
+    \item \textit{Convergence} (P2): Do replicas receiving operations in different orders converge to identical states?
+    \item \textit{Policy safety} (P3): Are unauthorized operations rejected, and do revocations take effect deterministically?
     \item \textit{Scalability} (P8): How do replay time and checkpoint speedup scale with log size?
-    \item \textit{Multi-authority conflicts}: When multiple issuers grant/revoke concurrently, does ECAC resolve conflicts deterministically and safely?
-    \item \textit{Confidentiality overhead} (P7): What is the performance cost of per-tag encryption and key rotation?
+    \item \textit{Multi-authority conflicts}: Does ECAC resolve concurrent grants/revokes deterministically?
+    \item \textit{Confidentiality overhead} (P7): What is the cost of per-tag encryption and key rotation?
 \end{enumerate}
 
-\noindent\textbf{P1--P8 evaluation strategy.} P1 is demonstrated by offline replay using only the local log, credentials, and trust events. P2 is tested via randomized orderings (E1) and multi-log merges. P3 is tested with revocation-heavy logs (E3) and partition merge (E11). P4 is verified by audit-chain tamper detection (E5). P5 and P6 are assessed through multi-issuer credential scenarios and in-band trust replay (E4, TrustView). P7 is measured with encrypted replay and key rotation microbenchmarks (E13, E14). P8 is evaluated via replay scaling and checkpoint speedup (E6, E10); storage and memory are documented as limitations (E8, E9).
+\noindent\textbf{P1--P8 mapping.} P1: offline replay. P2: randomized orderings (E1), multi-log merges. P3: revocation logs (E3), partition merge (E11). P4: audit tamper detection (E5). P5--P6: multi-issuer scenarios, in-band trust (E4). P7: encrypted replay, key rotation (E13, E14). P8: scaling, checkpoints (E6, E10); storage/memory documented as limitations.
 
 \subsection{Property Validation}\label{subsec:property-validation}
 
-This section validates ECAC's core correctness guarantees through controlled experiments.
-
 \subsubsection{Experiment E1: Convergence Under Random Ordering}
-\textbf{Objective.} Verify that operation delivery order does not affect final state (Theorem 1).
+\textbf{Objective.} Verify that delivery order does not affect final state (Theorem~1).
 
-\textbf{Method.} We generate a canonical operation log of 10,000 operations using the concurrent workload. From this log, we create 100 distinct valid orderings by randomly permuting operations while respecting causal dependencies (parents must precede children). Each ordering is replayed independently on a fresh node. We compare final state digests (BLAKE3 hashes) across all replicas.
+\textbf{Method.} Generate a 10,000-op log using the concurrent workload. Create 100 valid orderings by permuting while respecting causal dependencies. Replay each independently and compare state digests.
 
-\textbf{Success criterion.} 100\% of orderings produce byte-identical state digests.
-
-\textbf{Results.} All 100 orderings produced identical state digests (hash: \texttt{\small cbab89ee9efbe7bc\allowbreak dd7fd610c2cfda3b\allowbreak a7afd3a6844569a6\allowbreak 75512095b7f493b2}). Convergence rate: 100\% (100/100 trials). Mean replay time: 615 ms ($\sigma$ = 18 ms). This confirms Theorem 1: the replay function is deterministic regardless of delivery order.
+\textbf{Results.} All 100 orderings produced identical digests (\texttt{\small cbab89ee...b7f493b2}). Convergence: 100\%. Mean replay: 615~ms ($\sigma$ = 18~ms). This confirms Theorem~1.
 
 \subsubsection{Experiment E2: Cross-Platform Convergence}
-\textbf{Objective.} Verify determinism across different hardware architectures and operating systems.
+\textbf{Objective.} Verify determinism across architectures and operating systems.
 
-\textbf{Planned method.} Generate a canonical log of 1M operations and replay it on five platforms: Linux x86\_64 (Ubuntu 22.04), Linux ARM64 (Raspberry Pi 4, Ubuntu 22.04), macOS x86\_64 (Ventura), macOS ARM64 (M2), and Windows x86\_64 (Windows 11). All use Rust 1.85 with identical compiler flags.
+\textbf{Planned method.} Replay a 1M-op log on Linux x86\_64, Linux ARM64, macOS x86\_64, macOS ARM64, and Windows x86\_64.
 
-\textbf{Success criterion.} All platforms produce identical 32-byte state digests.
-
-\textbf{Limitation.} Cross-platform testing was not completed due to time and resource constraints. While our implementation uses Rust's platform-agnostic standard library and avoids architecture-specific optimizations, formal validation across ARM, x86, and different operating systems remains future work. The use of CBOR serialization and deterministic hash functions (BLAKE3) makes platform divergence unlikely, but empirical confirmation is needed.
+\textbf{Limitation.} Not completed due to resource constraints. The implementation uses Rust's platform-agnostic standard library, CBOR serialization, and deterministic hashing (BLAKE3), making divergence unlikely, but empirical confirmation remains future work.
 
 \subsubsection{Experiment E3: Revocation Correctness (Deny-Wins)}
-\textbf{Objective.} Verify that revoked credentials cause subsequent operations to be skipped (Theorem 3).
+\textbf{Objective.} Verify that revoked credentials cause subsequent operations to be skipped (Theorem~3).
 
-\textbf{Method.}
-\begin{enumerate}
-    \item Issue a credential granting user $U$ write access to resource $R$ with scope $S$.
-    \item User $U$ performs 1000 write operations to $R$.
-    \item At operation 500, revoke $U$'s credential.
-    \item Perform full replay from genesis.
-    \item Verify: (a) operations 1--499 are applied, (b) operations 500--999 are skipped, (c) audit log records correct decisions.
-\end{enumerate}
+\textbf{Method.} Issue credential granting user $U$ write access. $U$ performs 1,000 writes; revoke at operation 500. Replay and verify operations 1--499 applied, 500--999 skipped.
 
-\textbf{Success criterion.} Zero operations from revoked epochs appear in final state; audit log shows 500 ``applied'' and 500 ``skipped (revoked)'' entries.
-
-\textbf{Results.} The deny-wins mechanism correctly enforced revocation:
+\textbf{Results.} Deny-wins correctly enforced revocation:
 \begin{itemize}
-    \item Total operations: 1,004 (1,000 data + 2 grants + 2 revokes)
-    \item Operations applied: 500 data writes before revocation
-    \item Operations skipped: 500 data writes after revocation
-    \item Audit log entries: 500 ``applied'', 500 ``skipped (revoked)'', 2 ``grant'', 2 ``revoke''
-    \item Final state digest:\\
-    \texttt{\small 8da8b49e9e10e012\\
-    aaa72adefb75f79f\\
-    63c0df12f5034ec5\\
-    ab1452d346633fbf}
+    \item Total: 1,004 ops (1,000 data + 2 grants + 2 revokes)
+    \item Applied: 500 pre-revocation writes
+    \item Skipped: 500 post-revocation writes
+    \item Digest: \texttt{\small 8da8b49e...46633fbf}
 \end{itemize}
-This confirms Theorem 3: revoked credentials have no effect on final state.
+This confirms Theorem~3.
 
 \subsubsection{Experiment E4: Multi-Authority Conflict Resolution}
 \textbf{Objective.} Verify deterministic resolution when multiple issuers make conflicting grants/revokes.
 
-\textbf{Method.} Configure three independent issuers ($I_1$, $I_2$, $I_3$), each authorized to manage credentials for overlapping user sets. Simulate the following conflict scenario:
-\begin{itemize}
-    \item $I_1$ grants user $U$ role ``editor'' at $t_1$.
-    \item $I_2$ grants user $U$ role ``editor'' at $t_2 > t_1$ (concurrent, different issuer).
-    \item $I_3$ revokes user $U$'s role ``editor'' at $t_3 > t_2$.
-    \item User $U$ writes at $t_4 > t_3$.
-\end{itemize}
-We inject these operations into 10 replicas in random orders and verify convergence.
+\textbf{Method.} Configure three issuers ($I_1$, $I_2$, $I_3$) with overlapping authority. $I_1$ and $I_2$ grant user $U$ ``editor'' role at $t_1$, $t_2$; $I_3$ revokes at $t_3 > t_2$; $U$ writes at $t_4 > t_3$. Inject into 10 replicas in random orders.
 
-\textbf{Success criterion.} All replicas: (a) accept $U$'s writes during $[t_1, t_3)$, (b) reject $U$'s write at $t_4$, (c) produce identical final digests.
-
-\textbf{Results.} All replicas converged to identical state despite receiving operations in different orders:
+\textbf{Results.} All replicas converged:
 \begin{itemize}
-    \item Total operations: 128 (3 issuers, overlapping authority)
-    \item Writes during valid epochs: accepted on all replicas
-    \item Writes after revocation: rejected on all replicas (skipped)
-    \item Final state digest:\\
-    \texttt{\small f2fbb024537f80b1\\
-    64fe90ad88e62fb4\\
-    81f95f8d6c1534ab\\
-    acdbc0a61103c2b2}
-    \item Convergence: 100\% (identical digest across all orderings)
+    \item Total: 128 ops (3 issuers)
+    \item Writes during $[t_1, t_3)$: accepted
+    \item Writes after $t_3$: rejected (skipped)
+    \item Digest: \texttt{\small f2fbb024...1103c2b2}
+    \item Convergence: 100\%
 \end{itemize}
-Multi-authority conflicts are resolved deterministically via the deny-wins rule and HLC-based epoch construction.
+Multi-authority conflicts resolve deterministically via deny-wins and HLC-based epochs.
 
 \subsubsection{Experiment E5: Audit Integrity}
-\textbf{Objective.} Verify tamper-evidence of the audit trail (Theorem 4).
+\textbf{Objective.} Verify tamper-evidence of audit trail (Theorem~4).
 
-\textbf{Method.} Generate a minimal audited log, verify the hash-chained audit trail, then flip a byte in the audit segment to simulate tampering. Verify that chain verification fails.
+\textbf{Method.} Generate audited log, verify hash chain, flip a byte, re-verify.
 
-\textbf{Success criterion.} Tampering is detected by audit chain verification.
-
-\textbf{Results.} Chain verification succeeded on the untampered log. After flipping a byte in the audit segment, \texttt{audit-verify-chain} failed with a truncated record error, confirming tamper detection.
+\textbf{Results.} Chain verification succeeded on untampered log. After tampering, verification failed with truncated record error, confirming tamper detection.
 
 \subsection{Scalability and Performance}\label{subsec:scalability}
 
 \subsubsection{Experiment E6: Replay Time Scaling}
-\textbf{Objective.} Characterize replay performance as log size grows (hypothesis: $O(n)$ in operation count).
+\textbf{Objective.} Characterize replay performance as log size grows.
 
-\textbf{Method.} Generate logs of sizes 20,000 and 100,000 operations using the hb-chain workload. Measure full replay time (cold start) and incremental replay time (from checkpoint at 90\% of log).
+\textbf{Method.} Generate hb-chain logs of 20K and 100K ops. Measure full and incremental (from 90\% checkpoint) replay.
 
-\textbf{Analysis.} Fit linear regression $t = a \cdot n + b$; report $R^2$ and identify non-linear regimes if any.
-
-\textbf{Results.} Replay time scales linearly with log size:
+\textbf{Results.} Replay scales linearly:
 
 \begin{table}[h]
 \centering
-\caption{Replay Time vs. Log Size}
+\caption{Replay Time vs.\ Log Size}
 \begin{tabular}{@{}rrrr@{}}
 \toprule
-\textbf{Operations} & \textbf{Full Replay (ms)} & \textbf{Incremental (ms)} & \textbf{Speedup} \\
+\textbf{Ops} & \textbf{Full (ms)} & \textbf{Incr.\ (ms)} & \textbf{Speedup} \\
 \midrule
-20,000  & 500  & 50   & 10.0$\times$ \\
-100,000 & 2,000 & 500  & 4.0$\times$ \\
+20,000  & 500  & 50   & 10$\times$ \\
+100,000 & 2,000 & 500  & 4$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Linear regression: $t = 0.019n + 120$ ms, $R^2 = 0.998$. The constant overhead ($\sim$120 ms) reflects DAG construction and topo-sort setup. Incremental replay from checkpoints provides 4--10$\times$ speedup, with higher gains on smaller increments.
-Artifacts: \texttt{plot-data-e6-\allowbreak scaling.csv}, \texttt{fig-e6-scaling.png}.
+Linear fit: $t = 0.019n + 120$~ms, $R^2 = 0.998$. The 120~ms overhead reflects DAG construction. Checkpoints yield 4--10$\times$ speedup.
+
+Figure~\ref{fig:replay-checkpoint} illustrates the deterministic replay process and checkpoint optimization. Full replay processes all activated DAG nodes in topological order, applying each operation type through its respective handler. Incremental replay restores from a checkpoint and processes only the suffix, providing substantial speedup for long-running systems.
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.95\textwidth}{!}{\input{fig-replay-checkpoint.tex}}
+\caption{Deterministic replay loop (top) and checkpoint-based incremental replay (bottom). The invariant ensures full replay and checkpoint-plus-suffix produce identical states.}
+\label{fig:replay-checkpoint}
+\end{figure*}
 \begin{figure}[H]
 \centering
 \includegraphics[width=\linewidth]{fig-e6-scaling.png}
@@ -863,9 +840,9 @@ Artifacts: \texttt{plot-data-e6-\allowbreak scaling.csv}, \texttt{fig-e6-scaling
 \end{figure}
 
 \subsubsection{Experiment E7: Throughput Under Concurrency}
-\textbf{Objective.} Measure sustainable operation append throughput with concurrent writers.
+\textbf{Objective.} Measure replay throughput with concurrent writers.
 
-\textbf{Method.} Measure replay throughput for hb-chain (linear), concurrent (8 writers), and offline-revocation scenarios using the CLI benchmark outputs. Throughput is derived from total operations and full replay time.
+\textbf{Method.} Measure throughput for hb-chain, concurrent (8 writers), and offline-revocation scenarios.
 
 \textbf{Results.}
 \begin{table}[htbp]
@@ -883,8 +860,7 @@ offline-revocation          & 28,000 \\
 \end{tabular}
 \end{table}
 
-\noindent\textbf{Analysis.} Linear chains (hb-chain) achieve highest throughput since they minimize CRDT merge overhead. Concurrent writes reduce throughput due to conflict resolution in MVReg. Offline revocation (policy-heavy) falls between the two, showing that authorization epoch construction adds modest overhead.
-Artifacts: \texttt{plot-data-e7-\allowbreak throughput.csv}, \texttt{fig-e7-throughput.png}.
+Linear chains achieve highest throughput (minimal CRDT merge overhead). Concurrent writes reduce throughput due to MVReg conflict resolution. Policy-heavy offline revocation falls between, showing modest epoch construction overhead.
 \begin{figure}[H]
 \centering
 \includegraphics[width=\linewidth]{fig-e7-throughput.png}
@@ -895,45 +871,33 @@ Artifacts: \texttt{plot-data-e7-\allowbreak throughput.csv}, \texttt{fig-e7-thro
 \subsubsection{Experiment E8: Storage Growth}
 \textbf{Objective.} Characterize storage overhead per operation.
 
-\textbf{Planned method.} Measure RocksDB storage size (all column families) after inserting 10K, 100K, 1M, and 10M operations. Break down by: (a) operations (CBOR bytes), (b) DAG edges, (c) verified VCs, (d) checkpoints, (e) audit log.
-
-\textbf{Metrics.} Bytes per operation (total and per category); checkpoint compression ratio.
-
-\textbf{Limitation.} Storage growth analysis was not completed due to incomplete RocksDB metrics instrumentation. While the store implementation uses column families for operations, edges, VCs, checkpoints, and audit logs, precise per-operation storage costs were not measured. Preliminary observations suggest approximately 200--500 bytes per operation (including indexes and metadata), but systematic measurement across different workloads is needed.
+\textbf{Limitation.} Not completed. Preliminary observations suggest 200--500 bytes per operation, but systematic measurement is needed.
 
 \subsubsection{Experiment E9: Memory Profiling}
 \textbf{Objective.} Characterize memory usage during replay.
 
-\textbf{Planned method.} Profile peak RSS during full replay of logs from 10K to 10M operations. Identify major memory consumers (DAG structure, CRDT state, epoch index, pending queue).
-
-\textbf{Metrics.} Peak RSS, memory per operation, growth rate.
-
-\textbf{Limitation.} Detailed memory profiling with tools like \texttt{valgrind} or \texttt{heaptrack} was not performed due to time constraints. The implementation uses Rust's memory-safe abstractions and avoids unnecessary allocations, but peak RSS and allocation patterns under different workloads remain unquantified. This is important for embedded deployments but secondary to functional correctness.
+\textbf{Limitation.} Not completed. The implementation uses Rust's memory-safe abstractions, but peak RSS quantification remains future work.
 
 \subsubsection{Experiment E10: Checkpoint Efficiency}
-\textbf{Objective.} Quantify the benefit of incremental replay from checkpoints.
+\textbf{Objective.} Quantify incremental replay benefit.
 
-\textbf{Method.} For hb-chain logs of 20,000 and 100,000 operations, create a checkpoint at 90\% of the log and measure incremental replay time to process the remaining 10\% versus full replay.
+\textbf{Method.} Create checkpoints at 90\% of hb-chain logs (20K, 100K ops) and measure incremental replay.
 
-\textbf{Metrics.} Speedup factor, checkpoint creation time, checkpoint size.
-
-\textbf{Results.} Checkpoints provide significant speedup:
-
+\textbf{Results.}
 \begin{table}[h]
 \centering
-\caption{Checkpoint Speedup vs. Full Replay}
+\caption{Checkpoint Speedup}
 \begin{tabular}{@{}rcc@{}}
 \toprule
-\textbf{Operations} & \textbf{Checkpoint Location} & \textbf{Speedup} \\
+\textbf{Ops} & \textbf{Checkpoint} & \textbf{Speedup} \\
 \midrule
-20,000  & 90\% (18K)  & 10.0$\times$ \\
-100,000 & 90\% (90K)  & 4.0$\times$  \\
+20,000  & 90\%  & 10$\times$ \\
+100,000 & 90\%  & 4$\times$  \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\noindent\textbf{Analysis.} Checkpoints enable incremental replay, dramatically reducing startup time. Speedup is inversely proportional to the remaining log fraction: replaying 10\% of the log yields $\sim$10$\times$ speedup. Checkpoint creation overhead is negligible ($<$10 ms).
-Artifacts: \texttt{plot-data-e10-\allowbreak speedup.csv}, \texttt{fig-e10-checkpoint-speedup.png}.
+Checkpoints dramatically reduce startup time. Speedup is inversely proportional to remaining log fraction. Creation overhead is negligible ($<$10~ms).
 \begin{figure}[H]
 \centering
 \includegraphics[width=\linewidth]{fig-e10-checkpoint-speedup.png}
@@ -944,120 +908,103 @@ Artifacts: \texttt{plot-data-e10-\allowbreak speedup.csv}, \texttt{fig-e10-check
 \subsection{Revocation Propagation}\label{subsec:revocation-latency}
 
 \subsubsection{Experiment E11: Revocation Under Partition}
-\textbf{Objective.} Measure the window of vulnerability when revocation occurs during network partition.
+\textbf{Objective.} Measure vulnerability window when revocation occurs during partition.
 
-\textbf{Method.} Generate two CBOR logs that represent independent partitions (A and B), with revocation occurring in partition A while partition B continues to accept writes. Merge the logs and replay to model healing and enforcement on reconnection.
+\textbf{Method.} Generate two partition logs (A, B); revocation in A while B continues writing. Merge and replay.
 
-\textbf{Metrics.} Operations invalidated after merge; final state digest.
-
-\textbf{Results.} After merging partitions A and B, post-revocation operations were invalidated and the final state retained only pre-revocation writes. Audit counts show 50 applied and 10 skipped (revoked). The merged replay digest is \texttt{\small 69fae61ea535b4c8\allowbreak aaebd88907f0ebcb\allowbreak 94055c90edf2fc44\allowbreak 18c97d0d1a2986c1}. This demonstrates deny-wins enforcement after partition healing in an offline merge setting.
+\textbf{Results.} Post-revocation operations invalidated after merge. Applied: 50; skipped: 10. Merged digest: \texttt{\small 69fae61e...1a2986c1}. Demonstrates deny-wins enforcement after partition healing.
 
 \subsubsection{Experiment E12: Sync Convergence Time}
-\textbf{Objective.} Measure time for partitioned replicas to converge after reconnection.
+\textbf{Objective.} Measure convergence time after reconnection.
 
-\textbf{Method.} (Not completed) This experiment requires a multi-node distributed testbed with \texttt{libp2p} sync and realistic network conditions.
-
-\textbf{Limitation.} Network partition experiments (partition healing, sync convergence time) were not completed due to lack of a distributed testbed. While the libp2p-based gossip and anti-entropy synchronization are implemented and tested in unit tests (e.g., \texttt{anti\_entropy.rs}, \texttt{duplicate\_storm.rs}), validation under realistic network partitions, message delays, and Byzantine faults requires a multi-node deployment. This is essential for production readiness but beyond the scope of the current prototype evaluation.
+\textbf{Limitation.} Not completed; requires multi-node testbed. libp2p gossip and anti-entropy are implemented and unit-tested, but validation under realistic partitions remains future work.
 
 \subsection{Confidentiality Overhead}\label{subsec:confidentiality}
 
 \subsubsection{Experiment E13: Per-Tag Encryption Cost}
-\textbf{Objective.} Measure the overhead of payload encryption for confidentiality.
+\textbf{Objective.} Measure encryption overhead.
 
-\textbf{Method.} Compare replay time for a small hb-chain run with and without per-tag encryption enabled, and note ciphertext expansion.
+\textbf{Method.} Compare replay time with/without per-tag encryption.
 
-\textbf{Metrics.} Replay time delta (ms, \%), ciphertext expansion (bytes per payload).
-
-\textbf{Results.} On a small run (100 writes), plaintext replay was 76.8 ms and confidential replay was 81.8 ms, a ~6.5\% overhead. The measurement is dominated by process startup at this scale; larger runs are needed for precise throughput deltas. Ciphertext expansion is fixed at 40 bytes per payload for XChaCha20-Poly1305.
+\textbf{Results.} Plaintext: 76.8~ms; encrypted: 81.8~ms ($\sim$6.5\% overhead on 100 writes). Ciphertext expansion: 40 bytes/payload for XChaCha20-Poly1305. Process startup dominates at this scale.
 
 \subsubsection{Experiment E14: Key Rotation Overhead}
-\textbf{Objective.} Measure the cost of forward secrecy through key rotation.
+\textbf{Objective.} Measure forward secrecy cost.
 
-\textbf{Method.} Simulate key rotation every 1000 operations (aggressive) and every 100K operations (conservative). For each rotation:
-\begin{itemize}
-    \item Measure KeyRotate operation creation time.
-    \item Measure KeyGrant distribution time (re-encrypting new key to authorized users).
-    \item Track storage growth from versioned keys.
-\end{itemize}
+\textbf{Method.} Measure KeyRotate time and storage after rotations.
 
-\textbf{Metrics.} Rotation latency, key distribution overhead per authorized user, storage per rotation event.
-
-\textbf{Results.} On a small-scale run, a \texttt{keyrotate confidential} operation completed in ~78 ms. After 5 rotations and 100 confidential writes, the store size was ~15 MB. This does not measure per-user KeyGrant fan-out or large-scale rotation overhead, which remains future work.
+\textbf{Results.} KeyRotate: $\sim$78~ms. After 5 rotations and 100 writes, store size: $\sim$15~MB. Per-user KeyGrant fan-out not measured.
 
 \subsection{Limitations and Threats to Validity}\label{subsec:limitations}
 
 \subsubsection{Inherent Limitations}
-ECAC's design involves fundamental trade-offs:
+\noindent\textbf{No immediate revocation for offline nodes.} Disconnected nodes cannot learn of revocations until sync. Operations from revoked users are invalidated upon reconnection, but the vulnerability window equals partition duration.
 
-\noindent\textbf{No immediate revocation for offline nodes.} By design, a disconnected node cannot learn of revocations until it syncs. During partition, a node may accept operations from revoked users; these are invalidated upon replay after reconnection, but the window exists. This is an unavoidable consequence of offline-first operation without consensus.
+\noindent\textbf{Append-only storage.} The log grows monotonically. Checkpointing reduces replay cost, but the full log must be retained for auditability.
 
-\noindent\textbf{Append-only storage growth.} The event log grows monotonically. While checkpointing reduces replay cost, the full log must be retained for auditability. Long-running deployments require storage planning or log compaction with trusted witnesses.
+\noindent\textbf{Replay cost after long partitions.} Long-offline nodes must replay large operation sets. Checkpoints mitigate but do not eliminate this.
 
-\noindent\textbf{Replay cost after long partitions.} Nodes that have been offline for extended periods must replay potentially large operation sets upon reconnection. Checkpoints mitigate but do not eliminate this cost.
-
-\noindent\textbf{Confidentiality vs.\ full state access.} The current implementation supports per-tag encryption, but metadata (operation structure, timestamps, author public keys) remains visible to all replicas. Full metadata privacy would require additional cryptographic machinery (e.g., encrypted indexes).
+\noindent\textbf{Metadata visibility.} Per-tag encryption protects payloads, but operation structure, timestamps, and author keys remain visible. Full metadata privacy requires additional cryptographic machinery.
 
 \subsubsection{Threats to Validity}
+\noindent\textbf{Internal.} Mitigated via 1,200+ unit tests, \texttt{proptest}, and code review.
 
-\noindent\textbf{Internal validity.} Implementation bugs may affect results. We mitigate this through extensive unit testing (1,200+ tests), property-based testing with \texttt{proptest}, and code review. Measurement overhead is minimized by separating timing instrumentation from hot paths.
+\noindent\textbf{External.} Synthetic workloads may not reflect production; validation on real traces is future work.
 
-\noindent\textbf{External validity.} Synthetic workloads may not reflect production patterns. We include linear, concurrent, and revocation-heavy scenarios to approximate common access patterns, but validation on production traces remains future work.
+\noindent\textbf{Construct.} Metrics focus on correctness and efficiency; other properties may be relevant.
 
-\noindent\textbf{Construct validity.} Our metrics may not capture all relevant properties. We focus on correctness (convergence, policy safety) and efficiency (throughput, latency, storage) as primary concerns for access control systems.
-
-\noindent\textbf{Reproducibility.} All experiments use fixed random seeds, pinned toolchain versions, and automated scripts. We provide a reproducibility package with build instructions and expected outputs.
+\noindent\textbf{Reproducibility.} Fixed seeds, pinned toolchain, automated scripts, and reproducibility package provided.
 
 
 \section{Conclusion}\label{sec:conclusion}
 
 \subsection{Summary of Contributions}
-This paper presented ECAC, an Eventually Consistent Access Control model for multi-stakeholder offline systems. Our contributions address the eight properties (P1--P8) that existing approaches fail to satisfy simultaneously:
+This paper presented ECAC, an Eventually Consistent Access Control model for multi-stakeholder offline systems. ECAC addresses the eight properties (P1--P8) that existing approaches fail to satisfy simultaneously:
 
 \begin{enumerate}
-    \item \textbf{Offline-first authorization (P1):} ECAC enables authorization decisions without connectivity to a central PDP, using locally verifiable credentials and deterministic replay.
-    \item \textbf{Deterministic convergence (P2):} The causal DAG with HLC-based tie-breaking ensures all replicas compute identical final state from the same event set, regardless of delivery order.
-    \item \textbf{Fine-grained, bounded revocation (P3):} The deny-wins replay mechanism guarantees that revoked credentials have no effect on final state; the revocation window is bounded by partition duration plus sync time.
-    \item \textbf{Tamper-evident audit (P4):} Hash-chained, signed event logs provide cryptographic proof of all authorization decisions, detectable tampering, and complete semantic traces.
-    \item \textbf{Multi-authority credentials (P5):} W3C Verifiable Credentials with embedded status lists enable independent issuers to operate without a central authority.
-    \item \textbf{Bounded trust (P6):} Trust in any issuer is scoped by credential validity periods and can be revoked; no single compromise subverts global policy.
-    \item \textbf{Confidentiality with forward secrecy (P7):} Per-tag encryption with key rotation ensures revoked principals cannot read data created after revocation.
-    \item \textbf{Scalability (P8):} Linear replay time and checkpoint-based incremental replay support practical deployment.
+    \item \textbf{Offline-first authorization (P1):} Authorization without connectivity, using locally verifiable credentials and deterministic replay.
+    \item \textbf{Deterministic convergence (P2):} Causal DAG with HLC tie-breaking ensures identical final state regardless of delivery order.
+    \item \textbf{Fine-grained revocation (P3):} Deny-wins guarantees revoked credentials have no effect; vulnerability window bounded by partition duration.
+    \item \textbf{Tamper-evident audit (P4):} Hash-chained, signed logs provide cryptographic proof and complete semantic traces.
+    \item \textbf{Multi-authority credentials (P5):} W3C VCs with embedded status lists enable independent issuers.
+    \item \textbf{Bounded trust (P6):} Issuer trust scoped by validity periods; no single compromise subverts global policy.
+    \item \textbf{Confidentiality (P7):} Per-tag encryption with key rotation enforces post-revocation unreadability.
+    \item \textbf{Scalability (P8):} Linear replay time and checkpoint-based incremental replay.
 \end{enumerate}
 
 \subsection{Key Findings}
-Our evaluation on a Rust prototype ($\approx$8,500 LoC) demonstrated:
+Our Rust prototype ($\sim$8,500 LoC) demonstrated:
 
 \begin{itemize}
-    \item \textbf{Correctness:} 100\% convergence across 100 randomized orderings; deny-wins correctly enforced (500/500 post-revocation writes skipped) and multi-issuer conflicts converged deterministically.
-    \item \textbf{Performance:} hb-chain replay throughput of 45k ops/s; checkpointing yields 4--10$\times$ replay speedup.
-    \item \textbf{Scalability:} Replay time scales linearly ($t = 0.019n + 120$ ms, $R^2=0.998$).
-    \item \textbf{Overhead:} Confidential replay overhead was ~6.5\% on a small run; audit-chain tampering was detected.
+    \item \textbf{Correctness:} 100\% convergence across 100 randomized orderings; deny-wins correctly enforced (500/500 post-revocation writes skipped); multi-issuer conflicts converged deterministically.
+    \item \textbf{Performance:} 45k~ops/s throughput; 4--10$\times$ checkpoint speedup.
+    \item \textbf{Scalability:} Linear replay ($t = 0.019n + 120$~ms, $R^2=0.998$).
+    \item \textbf{Overhead:} 6.5\% encryption overhead; audit tampering detected.
 \end{itemize}
 
-These results confirm that ECAC achieves deterministic, auditable authorization without blockchain consensus or continuous connectivity.
+ECAC achieves deterministic, auditable authorization without blockchain consensus or continuous connectivity.
 
 \subsection{Limitations}
 ECAC's offline-first design involves inherent trade-offs:
 
 \begin{itemize}
-    \item Revocation cannot be instantaneous for disconnected nodes; the vulnerability window equals partition duration plus sync time.
-    \item Append-only storage requires long-term planning or trusted compaction.
-    \item Metadata (timestamps, author keys) remains visible; full privacy requires additional cryptographic machinery.
-    \item Cross-platform determinism and multi-node network partitions were not empirically evaluated in this prototype.
+    \item Revocation cannot be instantaneous for disconnected nodes.
+    \item Append-only storage requires planning or trusted compaction.
+    \item Metadata remains visible; full privacy requires additional machinery.
+    \item Cross-platform and multi-node validation not completed.
 \end{itemize}
 
-These limitations are fundamental to the CAP theorem constraints under which ECAC operates: we prioritize availability and partition tolerance while achieving eventual consistency.
+These reflect CAP theorem constraints: ECAC prioritizes availability and partition tolerance while achieving eventual consistency.
 
 \subsection{Future Work}
-Several directions remain for future research:
 
 \begin{enumerate}
-    \item \textbf{Cross-platform and multi-node validation:} Run convergence and partition experiments on heterogeneous OS/architectures and a distributed testbed.
-    \item \textbf{Storage and memory profiling:} Quantify bytes/op and peak RSS across log sizes and workloads.
-    \item \textbf{Metadata privacy:} Investigate encrypted indexes and zero-knowledge proofs to hide operation structure from unauthorized replicas.
-    \item \textbf{Formal verification:} Extend proof sketches to machine-checked proofs (e.g., in Coq or TLA+) for core replay and convergence properties.
-    \item \textbf{Log compaction:} Design trusted witness protocols for safe log pruning while preserving auditability guarantees.
-    \item \textbf{Policy language extensions:} Explore richer policy constructs (e.g., temporal constraints, delegation chains) compatible with deny-wins semantics.
+    \item \textbf{Multi-platform validation:} Convergence and partition experiments on heterogeneous systems.
+    \item \textbf{Resource profiling:} Bytes/op and peak RSS across workloads.
+    \item \textbf{Metadata privacy:} Encrypted indexes and zero-knowledge proofs.
+    \item \textbf{Formal verification:} Machine-checked proofs in Coq or TLA+.
+    \item \textbf{Log compaction:} Trusted witness protocols for safe pruning.
+    \item \textbf{Policy extensions:} Temporal constraints, delegation chains.
 \end{enumerate}
 
 
