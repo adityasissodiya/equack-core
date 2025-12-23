@@ -1,0 +1,153 @@
+% ECAC Operation & DAG Structure
+% Figure 2: For Section 3.1 (Event Log)
+
+\begin{tikzpicture}[
+    % Styles
+    opbox/.style={
+        rectangle, rounded corners=4pt,
+        minimum width=5.5cm,
+        font=\scriptsize\sffamily, align=left,
+        draw=black!60, fill=white, line width=0.6pt,
+        inner sep=6pt
+    },
+    fieldline/.style={
+        font=\scriptsize\ttfamily, text=black!80
+    },
+    payload/.style={
+        rectangle, rounded corners=3pt,
+        minimum width=1.6cm, minimum height=0.7cm,
+        font=\tiny\sffamily\bfseries, align=center,
+        draw=#1!60!black, fill=#1!20, line width=0.5pt
+    },
+    dagnode/.style={
+        circle, minimum size=0.9cm,
+        font=\scriptsize\sffamily\bfseries,
+        draw=#1!70!black, fill=#1!25, line width=0.7pt
+    },
+    zone/.style={
+        rectangle, rounded corners=8pt,
+        draw=black!40, fill=black!3, line width=0.8pt,
+        inner sep=10pt
+    },
+    zonetitle/.style={
+        font=\small\sffamily\bfseries, text=black!70
+    },
+    arrow/.style={
+        -{Stealth[length=2mm, width=1.5mm]},
+        line width=0.7pt, draw=black!60
+    }
+]
+
+% Colors
+\definecolor{data}{HTML}{3498DB}
+\definecolor{policy}{HTML}{E74C3C}
+\definecolor{trust}{HTML}{9B59B6}
+\definecolor{keys}{HTML}{F39C12}
+\definecolor{active}{HTML}{27AE60}
+\definecolor{pending}{HTML}{E67E22}
+
+% === LEFT SIDE: Operation Structure ===
+\node[zonetitle] at (3, 8.5) {OPERATION STRUCTURE};
+
+% Op structure box
+\node[opbox, minimum height=4.5cm] (op) at (3, 6) {};
+
+% Op fields
+\node[fieldline, anchor=west] at (0.7, 7.8) {\textbf{OpHeader}};
+\node[fieldline, anchor=west] at (1.0, 7.35) {parents: Vec<OpId>};
+\node[fieldline, anchor=west] at (1.0, 6.95) {hlc: (phys\_ms, logical, node\_id)};
+\node[fieldline, anchor=west] at (1.0, 6.55) {author\_pk: [u8; 32]};
+\node[fieldline, anchor=west] at (1.0, 6.15) {payload: Payload};
+
+\draw[black!30, line width=0.5pt] (0.6, 5.85) -- (5.4, 5.85);
+
+\node[fieldline, anchor=west] at (0.7, 5.55) {signature: [u8; 64] \textcolor{black!50}{(Ed25519)}};
+
+\draw[black!30, line width=0.5pt] (0.6, 5.25) -- (5.4, 5.25);
+
+\node[fieldline, anchor=west] at (0.7, 4.95) {op\_id: blake3(DOMAIN $\|$ cbor(header))};
+
+% Hash arrow
+\draw[arrow, bend left=30] (4.2, 6.5) to node[right, font=\tiny\sffamily, text=black!50] {hash} (4.8, 5.0);
+
+% === PAYLOAD VARIANTS ===
+\node[zonetitle] at (3, 3.5) {PAYLOAD VARIANTS};
+
+% Row 1: Core ops
+\node[payload=data] (pdata) at (1.2, 2.7) {Data\\[-1pt]\tiny key, value};
+\node[payload=policy] (pcred) at (3, 2.7) {Credential\\[-1pt]\tiny cred\_bytes};
+\node[payload=policy] (pgrant) at (4.8, 2.7) {Grant\\[-1pt]\tiny subj, hash};
+
+% Row 2: Policy ops
+\node[payload=policy] (prevoke) at (1.2, 1.7) {Revoke\\[-1pt]\tiny subj, role, t};
+\node[payload=trust] (pissuer) at (3, 1.7) {IssuerKey\\[-1pt]\tiny id, pubkey};
+\node[payload=trust] (pistatus) at (4.8, 1.7) {StatusChunk\\[-1pt]\tiny list, bits};
+
+% Row 3: Advanced ops
+\node[payload=keys] (pkeyrot) at (1.2, 0.7) {KeyRotate\\[-1pt]\tiny tag, ver};
+\node[payload=keys] (pkeygrant) at (3, 0.7) {KeyGrant\\[-1pt]\tiny subj, tag};
+\node[font=\tiny\sffamily, text=black!50] at (4.8, 0.7) {... (12 total)};
+
+% Legend
+\node[font=\tiny\sffamily, text=data!80!black] at (1.2, 0.1) {Data};
+\node[font=\tiny\sffamily, text=policy!80!black] at (2.4, 0.1) {Policy};
+\node[font=\tiny\sffamily, text=trust!80!black] at (3.5, 0.1) {Trust};
+\node[font=\tiny\sffamily, text=keys!80!black] at (4.5, 0.1) {Keys};
+
+% === RIGHT SIDE: DAG Structure ===
+\node[zonetitle] at (10, 8.5) {CAUSAL DAG WITH PENDING STAGING};
+
+% Activated zone
+\node[zone, minimum width=4.5cm, minimum height=3.2cm] (actzone) at (8.5, 6.5) {};
+\node[zonetitle, anchor=north west] at (6.5, 7.9) {ACTIVATED};
+\node[font=\tiny\sffamily, text=black!50, anchor=north west] at (6.5, 7.5) {(parents present)};
+
+% DAG nodes - activated
+\node[dagnode=active] (e1) at (7.2, 6.8) {$e_1$};
+\node[dagnode=active] (e2) at (8.5, 7.2) {$e_2$};
+\node[dagnode=active] (e3) at (8.5, 6.2) {$e_3$};
+\node[dagnode=active] (e4) at (9.8, 6.8) {$e_4$};
+
+% DAG edges
+\draw[arrow] (e1) -- (e2);
+\draw[arrow] (e1) -- (e3);
+\draw[arrow] (e2) -- (e4);
+\draw[arrow] (e3) -- (e4);
+
+% Pending zone
+\node[zone, minimum width=2.8cm, minimum height=2cm, fill=pending!5] (pendzone) at (12.5, 6.8) {};
+\node[zonetitle, anchor=north, text=pending!70!black] at (12.5, 7.7) {PENDING};
+\node[font=\tiny\sffamily, text=black!50] at (12.5, 7.3) {(waiting for parents)};
+
+% Pending node
+\node[dagnode=pending, dashed] (e5) at (12.5, 6.3) {$e_5$};
+\node[font=\tiny\sffamily, text=pending!70!black] at (12.5, 5.7) {needs $e_4$};
+
+% Activation arrow
+\draw[arrow, color=active!70!black, line width=1pt] (pendzone.west) -- node[above, font=\tiny\sffamily] {activate} (actzone.east);
+
+% Wait index
+\node[rectangle, rounded corners=3pt, draw=black!40, fill=white,
+      font=\tiny\ttfamily, inner sep=4pt, align=left] at (12.5, 4.8) {
+    wait\_index:\\
+    \quad $e_4 \rightarrow [e_5]$
+};
+
+% === TOPO SORT ===
+\node[zone, minimum width=4cm, minimum height=1.5cm] (topozone) at (8.5, 3.8) {};
+\node[zonetitle, anchor=north] at (8.5, 4.4) {TOPO SORT};
+
+\node[font=\scriptsize\sffamily, align=center] at (8.5, 3.6) {
+    Order by: (hlc.phys\_ms, hlc.logical,\\
+    hlc.node\_id, op\_id)
+};
+
+% Arrow from activated to topo
+\draw[arrow, line width=1pt] (actzone.south) -- (topozone.north);
+
+% Output
+\node[font=\scriptsize\ttfamily, text=black!70] at (8.5, 2.7) {$\Rightarrow$ [$e_1$, $e_2$, $e_3$, $e_4$, ...]};
+
+\node[font=\tiny\sffamily, text=black!50, align=center] at (8.5, 2.2) {deterministic order\\regardless of arrival};
+
+\end{tikzpicture}

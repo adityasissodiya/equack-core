@@ -1,0 +1,160 @@
+% ECAC Replay & Checkpoint Flow
+% Figure 5: For Section 3.1 and Evaluation (E6, E10)
+
+\begin{tikzpicture}[
+    % Styles
+    process/.style={
+        rectangle, rounded corners=5pt,
+        minimum width=2.5cm, minimum height=0.9cm,
+        font=\scriptsize\sffamily, align=center,
+        draw=#1!60!black, fill=#1!15, line width=0.6pt
+    },
+    optype/.style={
+        rectangle, rounded corners=3pt,
+        minimum width=1.8cm, minimum height=0.6cm,
+        font=\tiny\sffamily\bfseries, align=center,
+        draw=#1!60!black, fill=#1!20, line width=0.5pt
+    },
+    eventbox/.style={
+        rectangle, minimum width=0.6cm, minimum height=0.5cm,
+        font=\tiny\sffamily, align=center,
+        draw=black!40, fill=#1!30, line width=0.4pt
+    },
+    arrow/.style={
+        -{Stealth[length=2mm, width=1.5mm]},
+        line width=0.7pt, draw=black!60
+    },
+    zone/.style={
+        rectangle, rounded corners=8pt,
+        draw=black!40, fill=black!3, line width=0.8pt,
+        inner sep=10pt
+    },
+    zonetitle/.style={
+        font=\small\sffamily\bfseries, text=black!70
+    },
+    checkpoint/.style={
+        rectangle, rounded corners=4pt,
+        minimum width=2.5cm,
+        font=\tiny\sffamily, align=left,
+        draw=#1!60!black, fill=#1!15, line width=0.6pt,
+        inner sep=5pt
+    }
+]
+
+% Colors
+\definecolor{dag}{HTML}{34495E}
+\definecolor{trust}{HTML}{9B59B6}
+\definecolor{policy}{HTML}{E74C3C}
+\definecolor{data}{HTML}{3498DB}
+\definecolor{state}{HTML}{27AE60}
+\definecolor{ckpt}{HTML}{F39C12}
+
+% === TOP: DETERMINISTIC REPLAY ===
+\node[zonetitle] at (7, 9.5) {DETERMINISTIC REPLAY};
+
+% DAG input
+\node[process=dag] (dag) at (1.5, 8.2) {DAG\\(activated nodes)};
+
+% Topo sort
+\node[process=dag] (topo) at (4.5, 8.2) {topo\_sort()\\(HLC, op\_id)};
+\draw[arrow] (dag) -- (topo);
+
+% Ordered output
+\node[font=\scriptsize\ttfamily, text=dag!70!black] at (7.5, 8.2) {$\Rightarrow$ [$e_1$, $e_2$, $e_3$, ...]};
+\draw[arrow] (topo) -- ++(1.5, 0);
+
+% Replay loop box
+\node[zone, minimum width=12cm, minimum height=3.5cm] (loopzone) at (7, 5.8) {};
+\node[zonetitle, anchor=north west] at (1.2, 7.3) {FOR EACH op IN order:};
+
+% Op type branches
+\node[optype=trust] (trustop) at (2.5, 6.2) {TRUST op};
+\node[optype=policy] (grantop) at (5, 6.2) {GRANT op};
+\node[optype=policy] (revokeop) at (7.5, 6.2) {REVOKE op};
+\node[optype=data] (dataop) at (10.5, 6.2) {DATA op};
+
+% Actions for each type
+\node[font=\tiny\sffamily, text=trust!70!black, align=center] at (2.5, 5.4) {update\\TrustView};
+\node[font=\tiny\sffamily, text=policy!70!black, align=center] at (5, 5.4) {open epoch\\(via VC)};
+\node[font=\tiny\sffamily, text=policy!70!black, align=center] at (7.5, 5.4) {close matching\\epochs};
+\node[font=\tiny\sffamily, text=data!70!black, align=center] at (10.5, 5.4) {verify $\rightarrow$ gate\\$\rightarrow$ apply/skip};
+
+% Arrows down
+\draw[arrow, color=trust!60!black] (trustop) -- ++(0, -0.5);
+\draw[arrow, color=policy!60!black] (grantop) -- ++(0, -0.5);
+\draw[arrow, color=policy!60!black] (revokeop) -- ++(0, -0.5);
+\draw[arrow, color=data!60!black] (dataop) -- ++(0, -0.5);
+
+% Output state
+\node[process=state, minimum width=4cm] (stateout) at (7, 3.5) {STATE + processed\_count = N};
+\draw[arrow, line width=1pt] (loopzone.south) -- (stateout.north);
+
+% Digest
+\node[font=\scriptsize\ttfamily, text=state!70!black] at (7, 2.8) {digest = blake3(DOMAIN $\|$ json(state))};
+
+% === BOTTOM: CHECKPOINT COMPARISON ===
+\node[zonetitle] at (7, 1.8) {CHECKPOINT \& INCREMENTAL REPLAY};
+
+% Full replay timeline
+\node[font=\scriptsize\sffamily\bfseries, anchor=west] at (0.5, 0.8) {FULL:};
+
+% Event boxes for full replay
+\foreach \i in {1,...,10} {
+    \node[eventbox=dag] at ({1.2 + \i*0.8}, 0.8) {};
+}
+\node[font=\tiny\sffamily, text=black!50] at (6.5, 0.8) {...};
+\foreach \i in {1,...,3} {
+    \node[eventbox=dag] at ({10 + \i*0.8}, 0.8) {};
+}
+
+% Full replay bracket
+\draw[decorate, decoration={brace, amplitude=5pt, mirror}, line width=0.6pt]
+    (1.5, 0.4) -- (12.8, 0.4) node[midway, below=5pt, font=\tiny\sffamily] {replay all N ops};
+
+% Incremental replay timeline
+\node[font=\scriptsize\sffamily\bfseries, anchor=west] at (0.5, -0.8) {INCR:};
+
+% Checkpoint portion (grayed)
+\foreach \i in {1,...,7} {
+    \node[eventbox=ckpt] at ({1.2 + \i*0.8}, -0.8) {};
+}
+
+% Checkpoint marker
+\draw[line width=1.5pt, color=ckpt!80!black] (7.4, -0.3) -- (7.4, -1.3);
+\node[font=\tiny\sffamily\bfseries, text=ckpt!80!black, anchor=south] at (7.4, -0.2) {checkpoint};
+
+% Suffix portion (normal)
+\foreach \i in {1,...,3} {
+    \node[eventbox=state] at ({7.6 + \i*0.8}, -0.8) {};
+}
+\node[font=\tiny\sffamily, text=black!50] at (10.2, -0.8) {...};
+\foreach \i in {1,...,2} {
+    \node[eventbox=state] at ({10.6 + \i*0.8}, -0.8) {};
+}
+
+% Brackets
+\draw[decorate, decoration={brace, amplitude=5pt, mirror}, line width=0.6pt, color=ckpt!70!black]
+    (1.5, -1.2) -- (7.2, -1.2) node[midway, below=5pt, font=\tiny\sffamily, text=ckpt!70!black] {restore (fast)};
+\draw[decorate, decoration={brace, amplitude=5pt, mirror}, line width=0.6pt, color=state!70!black]
+    (7.6, -1.2) -- (12.4, -1.2) node[midway, below=5pt, font=\tiny\sffamily, text=state!70!black] {replay suffix};
+
+% Checkpoint data box
+\node[checkpoint=ckpt, anchor=west] at (0.5, -2.5) {
+    \textbf{Checkpoint @ pos 90:}\\
+    \quad state\_cbor\\
+    \quad state\_digest\\
+    \quad processed\_count = 90
+};
+
+% Speedup annotation
+\node[font=\scriptsize\sffamily\bfseries, text=state!70!black, align=center] at (10, -2.5) {
+    4--10$\times$ speedup\\
+    \scriptsize\normalfont (replay 10\% vs 100\%)
+};
+
+% Parity note
+\node[font=\tiny\sffamily, text=black!50, align=center] at (7, -3.5) {
+    Invariant: full\_replay(dag) $\equiv$ checkpoint\_load(ckpt) + apply\_incremental(suffix)
+};
+
+\end{tikzpicture}
