@@ -138,3 +138,88 @@ fn missing_prev_detects_gap() {
         _ => panic!("expected SeqGap, got {err:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// E5-style pinned-head tamper detection tests
+// ---------------------------------------------------------------------------
+
+/// Helper: build a 3-entry audit chain, return (audit_dir, head_digest, tempdir handle).
+fn build_chain_3() -> (std::path::PathBuf, [u8; 32], tempfile::TempDir) {
+    let tmp = tempdir().unwrap();
+    let audit_dir = tmp.path().join("audit");
+    let (sk, node_id) = gen_node();
+
+    let mut w = ecac_store::audit::AuditWriter::open(&audit_dir, sk, node_id).unwrap();
+    for i in 0u64..3 {
+        w.append(AuditEvent::Checkpoint {
+            checkpoint_id: i,
+            topo_idx: i,
+            state_digest: [i as u8; 32],
+        })
+        .unwrap();
+    }
+    let head = w.head_digest().expect("chain has entries");
+    // Verify the untampered chain matches the pinned head.
+    let r = ecac_store::audit::AuditReader::open(&audit_dir).unwrap();
+    r.verify_against_head(head).unwrap();
+    (audit_dir, head, tmp)
+}
+
+#[test]
+fn pinned_head_detects_bitflip() {
+    let (audit_dir, head, _tmp) = build_chain_3();
+
+    // Corrupt a byte inside the second record's CBOR payload.
+    let seg = audit_dir.join("segment-00000001.log");
+    let mut bytes = fs::read(&seg).unwrap();
+    let (_l1, first_total) = read_len_be(&bytes);
+    let (l2, _) = read_len_be(&bytes[first_total..]);
+    let payload_start = first_total + 4;
+    bytes[payload_start + (l2 / 2)] ^= 0xFF;
+    fs::write(&seg, &bytes).unwrap();
+
+    let r = ecac_store::audit::AuditReader::open(&audit_dir).unwrap();
+    // Must fail -- either during chain walk or at head comparison.
+    r.verify_against_head(head).unwrap_err();
+}
+
+#[test]
+fn pinned_head_detects_deletion() {
+    let (audit_dir, head, _tmp) = build_chain_3();
+
+    // Delete the first record so the file starts at seq=2.
+    let seg = audit_dir.join("segment-00000001.log");
+    let mut bytes = fs::read(&seg).unwrap();
+    let (_l1, first_total) = read_len_be(&bytes);
+    bytes.drain(0..first_total);
+    fs::write(&seg, &bytes).unwrap();
+
+    let r = ecac_store::audit::AuditReader::open(&audit_dir).unwrap();
+    r.verify_against_head(head).unwrap_err();
+}
+
+#[test]
+fn pinned_head_detects_reorder() {
+    let (audit_dir, head, _tmp) = build_chain_3();
+
+    // Swap the first two records in the segment file.
+    let seg = audit_dir.join("segment-00000001.log");
+    let bytes = fs::read(&seg).unwrap();
+    let (_l1, first_end) = read_len_be(&bytes);
+    let (_l2, second_len) = read_len_be(&bytes[first_end..]);
+    let second_end = first_end + second_len;
+
+    let rec1 = &bytes[..first_end];
+    let rec2 = &bytes[first_end..second_end];
+    let rest = &bytes[second_end..];
+
+    // Write records in swapped order: rec2, rec1, rest
+    let mut swapped = Vec::with_capacity(bytes.len());
+    swapped.extend_from_slice(rec2);
+    swapped.extend_from_slice(rec1);
+    swapped.extend_from_slice(rest);
+    fs::write(&seg, &swapped).unwrap();
+
+    let r = ecac_store::audit::AuditReader::open(&audit_dir).unwrap();
+    r.verify_against_head(head).unwrap_err();
+}
