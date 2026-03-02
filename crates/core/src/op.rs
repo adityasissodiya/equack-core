@@ -171,12 +171,15 @@ impl Op {
         payload: Payload,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
-        let header = OpHeader {
+        let mut header = OpHeader {
             parents,
             hlc,
             author_pk: author_vk_bytes,
             payload,
         };
+        // Sort parents so the same logical header always produces the same op_id
+        // regardless of parent insertion order.
+        header.parents.sort();
         let header_bytes = canonical_cbor(&header);
         let op_id = hash_with_domain(OP_HASH_DOMAIN, &header_bytes);
         let sig = crypto::sign_hash(&op_id, signing_key).to_bytes().to_vec();
@@ -249,5 +252,41 @@ mod tests {
             value.push(0);
         }
         assert!(!tampered.verify());
+    }
+
+    #[test]
+    fn op_id_stable_across_parent_orders() {
+        let (sk, vk) = generate_keypair();
+        let vk_bytes = vk_to_bytes(&vk);
+
+        let p1 = [1u8; 32];
+        let p2 = [2u8; 32];
+        let hlc = Hlc::new(42, 1);
+
+        let op1 = Op::new(
+            vec![p1, p2],
+            hlc,
+            vk_bytes,
+            Payload::Data {
+                key: "test".into(),
+                value: b"v".to_vec(),
+            },
+            &sk,
+        );
+        let op2 = Op::new(
+            vec![p2, p1], // reversed order
+            hlc,
+            vk_bytes,
+            Payload::Data {
+                key: "test".into(),
+                value: b"v".to_vec(),
+            },
+            &sk,
+        );
+
+        assert_eq!(
+            op1.op_id, op2.op_id,
+            "op_id must be stable regardless of parent order"
+        );
     }
 }

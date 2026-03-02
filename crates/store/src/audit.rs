@@ -326,6 +326,17 @@ impl AuditWriter {
 
         Ok(seq)
     }
+
+    /// Return the current chain head digest (the latest `prev_hash`).
+    /// Returns `None` if no entries have been appended yet and the head is
+    /// still the zero hash.
+    pub fn head_digest(&self) -> Option<[u8; 32]> {
+        // If prev_hash is all-zero and seq is 0, no entries were ever written.
+        if self.seq == 0 && self.prev_hash == [0u8; 32] {
+            return None;
+        }
+        Some(self.prev_hash)
+    }
 }
 
 // ---- reader & verifier ------------------------------------------------------
@@ -357,6 +368,9 @@ pub enum VerifyError {
 
     #[error("node_id mismatch inside entry at seq {seq} in {path}")]
     BadNodeId { path: String, seq: u64 },
+
+    #[error("head digest mismatch: expected {expected}, computed {computed}")]
+    HeadMismatch { expected: String, computed: String },
 }
 
 pub struct AuditReader {
@@ -395,9 +409,30 @@ impl AuditReader {
     }
 
     pub fn verify(&self) -> std::result::Result<(), VerifyError> {
+        self.verify_chain().map(|_| ())
+    }
+
+    /// Verify the full chain and, if `expected` matches the final computed
+    /// head digest, return `Ok(())`. Otherwise return `HeadMismatch`.
+    pub fn verify_against_head(
+        &self,
+        expected: [u8; 32],
+    ) -> std::result::Result<(), VerifyError> {
+        let computed = self.verify_chain()?;
+        if computed != expected {
+            return Err(VerifyError::HeadMismatch {
+                expected: hex::encode(expected),
+                computed: hex::encode(computed),
+            });
+        }
+        Ok(())
+    }
+
+    /// Internal: walk the chain, verify every entry, return the final prev_hash.
+    fn verify_chain(&self) -> std::result::Result<[u8; 32], VerifyError> {
         // If index missing, accept empty.
         if self.index.segments.is_empty() {
-            return Ok(());
+            return Ok([0u8; 32]);
         }
 
         let mut expect_seq: u64 = 1;
@@ -457,7 +492,7 @@ impl AuditReader {
                                 source: ioe,
                             });
                         }
-                        // Best effort; if sync fails we'll catch it next time.
+                        // Best effort; if sync fails we’ll catch it next time.
                         let _ = wf.sync_data();
                         break;
                     }
@@ -539,6 +574,6 @@ impl AuditReader {
             }
         }
 
-        Ok(())
+        Ok(prev_hash)
     }
 }
