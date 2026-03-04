@@ -15,10 +15,13 @@ blake3 = "1.5"
 ecac-core = { path = "../core" }
 getrandom = "0.2"
 ed25519-dalek = { version = "2.2", default-features = false }
+tempfile = "3"
+
+[[bin]]
+name = "bench_storage"
+path = "src/bin/bench_storage.rs"
 
 [dev-dependencies]
-# Temp directories for DBs in tests
-tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4"
 
