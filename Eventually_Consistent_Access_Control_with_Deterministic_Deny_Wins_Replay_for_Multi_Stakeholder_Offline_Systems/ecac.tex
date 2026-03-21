@@ -124,19 +124,7 @@ This paper makes the following contributions:
 
 The offline multi-stakeholder authorization problem arises when systems must (i) continue operating during network partitions, (ii) support multiple independent authorities that can grant and revoke permissions, and (iii) eventually converge to a consistent, auditable authorization state. This section defines the problem context, presents conceptual requirements derived from motivating use cases, and evaluates existing approaches against those requirements.
 
-%\subsection{System and Threat Context}\label{subsec:context-paperC}
-
-Before defining requirements or comparing paradigms, we state the assumptions that shape our problem space. Section~\ref{subsec:systemModel} formalizes the full system and threat model; here we state only the assumptions needed to interpret R1--R6 and the subsequent comparisons.
-
-\begin{itemize}
-    \item \textbf{Offline-first operation.} Replicas may be disconnected for extended periods (hours to days). Solutions requiring continuous connectivity to a central PDP or global consensus are excluded by construction.
-    \item \textbf{Multi-authority governance.} Multiple independent organizations issue and revoke credentials. No single root authority controls all permissions.
-    \item \textbf{Eventual delivery.} All well-formed operations are eventually delivered to all correct replicas, though delivery order is arbitrary and may be adversarially influenced.
-    \item \textbf{Adversary capabilities.} An adversary may delay, reorder, or partition messages; compromise subject credentials; and attempt to tamper with local logs. The adversary is computationally bounded.
-    \item \textbf{Out of scope.} We do not solve full Byzantine governance (colluding majorities of issuers) or physical key compromise. These require additional mechanisms.
-\end{itemize}
-
-This context explains why common fixes fail: online introspection endpoints violate offline-first; global consensus violates availability during partition; single-authority trust violates multi-stakeholder governance.
+The requirements and comparisons that follow assume an offline-first, multi-authority setting in which replicas may be disconnected for extended periods, multiple independent organizations issue and revoke credentials, and a computationally bounded adversary may delay, reorder, or partition messages. Section~\ref{subsec:threat-model-paperC} gives the complete system and threat model; the brief characterization here is sufficient to interpret R1--R6 and the subsequent gap analysis. This setting explains why common fixes fail: online introspection endpoints violate offline-first operation; global consensus violates availability during partition; single-authority trust violates multi-stakeholder governance.
 
 \subsection{The Offline Enforcement Problem}
 
@@ -161,7 +149,7 @@ A \emph{subject} (principal) is an actor that initiates operations (users, servi
 %\paragraph*{Operations and dissemination.}
 All state changes---data updates, grants, revokes, and trust updates---are represented as signed operations in a causal DAG. Replicas disseminate operations using gossip/anti-entropy and fetch missing dependencies (parents) until replay can proceed. We assume an asynchronous network: messages can be delayed, reordered, duplicated, or temporarily dropped.
 
-\subsection{Threat Model and Assumptions}
+\subsection{Threat Model and Assumptions}\label{subsec:threat-model-paperC}
 
 \equack{} targets security failures that arise specifically from \emph{offline enforcement} and \emph{multi-authority governance}: stale credentials, conflicting grants and revokes across partitions, and post-hoc manipulation of authorization history.
 
@@ -170,14 +158,14 @@ We assume an adversary may (i) compromise subject credentials (e.g., steal a val
 The following assumptions scope the guarantees claimed by \equack{}:
 
 \begin{enumerate}
+    \item \textbf{Offline-first operation.} Replicas may be disconnected for extended periods (hours to days). Solutions requiring continuous connectivity to a central PDP or global consensus are excluded by construction.
+    \item \textbf{Multi-authority governance.} Multiple independent organizations issue and revoke credentials. No single root authority controls all permissions.
     \item \textbf{Honest-but-buggy administrators.} Issuers and policy administrators follow protocols but may make configuration errors; \equack{} provides safety-by-default semantics that limit the effect of ambiguous concurrent decisions.
-    \item \textbf{Eventual delivery.} Every well-formed operation is eventually delivered to every correct replica (e.g., via anti-entropy), although delivery order is arbitrary.
-    \item \textbf{No physical compromise of key material.} Long-term private keys and tag keys are not exfiltrated via physical attacks on devices; compromise is modeled at the software/account level.
+    \item \textbf{Eventual delivery.} Every well-formed operation is eventually delivered to every correct replica (e.g., via anti-entropy), although delivery order is arbitrary and may be adversarially influenced.
     \item \textbf{Bounded partition duration.} Offline periods are finite; after reconnection, replicas reconcile by exchanging missing operations.
+    \item \textbf{No physical compromise of key material.} Long-term private keys and tag keys are not exfiltrated via physical attacks on devices; compromise is modeled at the software/account level.
+    \item \textbf{Out of scope.} \equack{} does not attempt to provide safety against a fully Byzantine ecosystem in which all participants collude, nor does it address side-channel leakage, cryptographic primitive failures, or metadata privacy (hiding access patterns or policy structure). These are treated as future work or require additional mechanisms.
 \end{enumerate}
-
-%\paragraph*{Out of scope.}
-\equack{} does not attempt to provide safety against a fully Byzantine ecosystem in which all participants collude, nor does it address side-channel leakage or cryptographic primitive failures. Metadata privacy (hiding access patterns or policy structure) is treated as future work.
 
 \subsection{Conceptual Requirements}\label{subsec:requirements-paperC}
 
@@ -191,8 +179,6 @@ From the system context and motivating use cases (Section~\ref{sec:intro-paperC}
     \item \textbf{R5---Decentralized multi-authority issuance.} Independent issuers must grant and revoke permissions without coordination; verifiers check authenticity offline using locally available evidence.
     \item \textbf{R6---Confidentiality with post-revocation protection.} Unauthorized parties should not read protected content; after revocation-triggered key rotation, revoked principals cannot decrypt data created after their access ended.
 \end{enumerate}
-
-We do not claim a general solution to Byzantine fault tolerance; \equack{} assumes honest-but-buggy administrators and does not address scenarios where a quorum of issuers collude maliciously.
 
 \subsection{Gap Analysis}\label{subsec:gap-paperC}
 
