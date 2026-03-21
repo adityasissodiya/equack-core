@@ -1,0 +1,165 @@
+\definecolor{rustcolor}{HTML}{DEA584}
+\definecolor{corecolor}{HTML}{4A90D9}
+\definecolor{storecolor}{HTML}{50C878}
+\definecolor{netcolor}{HTML}{9B59B6}
+\definecolor{clicolor}{HTML}{E74C3C}
+\definecolor{opcolor}{HTML}{F39C12}
+\definecolor{vccolor}{HTML}{1ABC9C}
+\definecolor{bglight}{HTML}{F8F9FA}
+
+\begin{tikzpicture}[
+    node distance=1.5cm and 1cm,
+    opnode/.style={rectangle split, rectangle split parts=4,
+                   draw, fill=white, rounded corners=3pt, thick,
+                   font=\footnotesize\ttfamily, align=left,
+                   minimum width=3.5cm},
+    orderidx/.style={circle, inner sep=1.5pt, font=\small\sffamily\bfseries},
+    parentlink/.style={-{Stealth[length=3mm, width=2.5mm]}, very thick, draw=opcolor, dashed}
+]
+
+% Title
+\node[font=\Large\sffamily\bfseries] (title) at (4, 11) {equack-core: Operation Structure \& Causal DAG};
+
+% Legend
+\node[draw=gray, fill=white, rounded corners, align=left, font=\scriptsize\sffamily, thick] at (13.5, 10.5) {
+    \textbf{Topological Order Tie-breaking:}\\
+    1. Parents strictly before children\\
+    2. Lowest HLC (physical\_ms, logical)\\
+    3. Lowest Op-ID (BLAKE3)
+};
+
+% ============================================================================
+% MAIN DIAGRAM STRUCTURE
+% ============================================================================
+% The user provided a snippet that seems to replace the entire tikzpicture content
+% but also included a new \begin{tikzpicture}. I'm assuming the intent is to
+% replace the content within the existing tikzpicture environment.
+% Also, 'policycolor' is used in the new code but not defined. Assuming it's
+% meant to be 'vccolor' or a new color definition is missing.
+% For now, I'll define policycolor as vccolor.
+\definecolor{policycolor}{HTML}{1ABC9C} % Assuming policycolor is equivalent to vccolor
+
+\tikzset{
+    opnode/.style={rectangle split, rectangle split parts=4,
+                   draw, fill=white, rounded corners=3pt, thick,
+                   font=\footnotesize\ttfamily, align=left,
+                   minimum width=3.5cm},
+    orderidx/.style={circle, inner sep=1.5pt, font=\small\sffamily\bfseries},
+    parentlink/.style={-{Stealth[length=3mm, width=2.5mm]}, very thick, draw=opcolor, dashed}
+}
+
+    % ========================================================================
+    % NODE DEFINITIONS
+    % Nodes placed with much broader absolute horizontal and relative vertical
+    % spacing to cleanly avoid multi-part text node overlaps.
+    % ========================================================================
+
+    \node[opnode, draw=corecolor!80!black] (op1) at (0, 8) {
+        % Base / Header
+        \textbf{Op-ID: A1B2...} \nodepart{two}
+        \texttt{Header:} \\
+        \texttt{- parents: [ ]} \\
+        \texttt{- hlc:  (1000, 0, N1)} \\
+        \texttt{- author: PK\_A} 
+        % Payload
+        \nodepart{three}
+        \texttt{Payload: Trust(IssuerKey)}
+        % Signature
+        \nodepart{four}
+         \texttt{Sig: Ed25519(...)}
+    };
+    
+    % Event order circle
+    \node[orderidx, fill=black, text=white, right=3pt] at (op1.north west) {1};
+
+    \node[opnode, draw=policycolor!80!black] (op2) at (4, 4) {
+        \textbf{Op-ID: C3D4...} \nodepart{two}
+        \texttt{Header:} \\
+        \texttt{- parents: [ A1B2... ]} \\
+        \texttt{- hlc:  (1005, 0, N1)} \\
+        \texttt{- author: PK\_A} 
+        \nodepart{three}
+        \texttt{Payload: Credential(VC)}
+        \nodepart{four}
+        \texttt{Sig: Ed25519(...)}
+    };
+    \node[orderidx, fill=black, text=white, right=3pt] at (op2.north west) {2};
+
+    \node[opnode, draw=storecolor!80!black] (op3) at (8, 8) {
+        \textbf{Op-ID: 7G8H...} \nodepart{two}
+        \texttt{Header:} \\
+        \texttt{- parents: [ A1B2... ]} \\
+        \texttt{- hlc:  (1008, 0, N3)} \\
+        \texttt{- author: PK\_C} 
+        \nodepart{three}
+        \texttt{Payload: Data(MVReg=Val1)}
+        \nodepart{four}
+        \texttt{Sig: Ed25519(...)}
+    };
+    \node[orderidx, fill=black, text=white, right=3pt] at (op3.north west) {3};
+
+    \node[opnode, draw=policycolor!80!black] (op4) at (0, 0) {
+        \textbf{Op-ID: E5F6...} \nodepart{two}
+        \texttt{Header:} \\
+        \texttt{- parents: [ C3D4... ]} \\
+        \texttt{- hlc:  (1010, 0, N2)} \\
+        \texttt{- author: PK\_B} 
+        \nodepart{three}
+        \texttt{Payload: Grant(Key, Scope)}
+        \nodepart{four}
+        \texttt{Sig: Ed25519(...)}
+    };
+    \node[orderidx, fill=black, text=white, right=3pt] at (op4.north west) {4};
+
+    \node[opnode, draw=storecolor!80!black] (op5) at (6, 0) {
+        \textbf{Op-ID: 9I0J...} \nodepart{two}
+        \texttt{Header:} \\
+        \texttt{- parents: [ E5F6..., 7G8H... ]} \\
+        \texttt{- hlc:  (1015, 0, N2)} \\
+        \texttt{- author: PK\_B} 
+        \nodepart{three}
+        \texttt{Payload: Data(MVReg=Val2)}
+        \nodepart{four}
+        \texttt{Sig: Ed25519(...)}
+    };
+    \node[orderidx, fill=black, text=white, right=3pt] at (op5.north west) {5};
+
+    % ========================================================================
+    % DAG EDGES (Parent references)
+    % Routed with explicit angles to prevent them slicing through the text nodes
+    % ========================================================================
+    \begin{scope}[on background layer]
+        % op2 -> op1
+        \draw[parentlink] (op2.north west) to[out=135, in=315] (op1.south east);
+        \node[font=\tiny\sffamily, text=black!50] at (2, 5.8) {references};
+
+        % op3 -> op1
+        \draw[parentlink] (op3.west) to[out=180, in=0] (op1.east);
+
+        % op4 -> op2
+        \draw[parentlink] (op4.north east) to[out=45, in=225] (op2.south west);
+
+        % op5 -> op4
+        \draw[parentlink] (op5.west) to[out=180, in=0] (op4.east);
+        
+        % op5 -> op3
+        \draw[parentlink] (op5.north east) to[out=45, in=225] (op3.south);
+    \end{scope}
+
+% Epoch Brackets (Right side highlighting Replay Engine logic)
+\draw[thick, draw=corecolor] (12, 7) -- (12, 3) node[midway, right=10pt, align=left, font=\footnotesize\sffamily] {
+    \textbf{Auth Epoch Builder}\\
+    Evaluates Trust, Credentials,\\
+    and Grants in order to gate\\
+    upcoming Data writes.
+};
+
+\draw[thick, draw=storecolor] (12, 2.5) -- (12, -1) node[midway, right=10pt, align=left, font=\footnotesize\sffamily] {
+    \textbf{Deny-Wins Gate}\\
+    Data Ops accepted only if\\
+    VC valid, unrevoked, inside\\
+    time window \mbox{[nbf, exp)} and\\
+    intersecting scope.
+};
+
+\end{tikzpicture}

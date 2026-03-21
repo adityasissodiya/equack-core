@@ -1,0 +1,165 @@
+% ECAC Partition-Heal Replay Semantics
+% Figure: stale local accepts during partition, deterministic repair after heal
+
+\definecolor{prefix}{HTML}{607D8B}
+\definecolor{revoke}{HTML}{E74C3C}
+\definecolor{data}{HTML}{3498DB}
+\definecolor{merge}{HTML}{8E44AD}
+\definecolor{state}{HTML}{27AE60}
+\definecolor{stale}{HTML}{E67E22}
+
+\begin{tikzpicture}[
+    every node/.style={font=\footnotesize\sffamily},
+    event/.style={
+        rectangle, rounded corners=4pt,
+        minimum width=2.0cm, minimum height=0.75cm,
+        font=\scriptsize\sffamily\bfseries, align=center,
+        draw=#1!70!black, fill=#1!15, line width=0.65pt
+    },
+    process/.style={
+        rectangle, rounded corners=4pt,
+        minimum width=2.4cm, minimum height=0.75cm,
+        font=\scriptsize\sffamily, align=center,
+        draw=#1!60!black, fill=#1!12, line width=0.6pt
+    },
+    note/.style={
+        font=\tiny\sffamily\itshape, text=black!65, align=center
+    },
+    zone/.style={
+        rectangle, rounded corners=6pt,
+        draw=black!20, fill=black!2, line width=0.7pt,
+        inner sep=8pt
+    },
+    zonetitle/.style={
+        font=\small\sffamily\bfseries, text=black!75
+    },
+    arrow/.style={
+        -{Stealth[length=2.2mm, width=1.8mm]},
+        line width=0.8pt, draw=black!60
+    },
+    skipbadge/.style={
+        rectangle, rounded corners=3pt,
+        minimum width=1.2cm, minimum height=0.45cm,
+        font=\tiny\sffamily\bfseries,
+        draw=revoke!65!black, fill=revoke!12, line width=0.5pt
+    }
+]
+
+% ══════════════════════════════════════════════════════════════════════
+% ZONE BACKGROUNDS
+% ══════════════════════════════════════════════════════════════════════
+\begin{scope}[on background layer]
+    \node[zone, minimum width=7.8cm, minimum height=5.6cm]
+        (partzone) at (3.6, 4.45) {};
+    \node[zone, minimum width=8.6cm, minimum height=7.0cm]
+        (healzone) at (12.8, 3.75) {};
+\end{scope}
+
+\node[zonetitle] at (3.6, 7.05) {DURING PARTITION};
+\node[zonetitle] at (12.8, 7.05) {AFTER HEAL};
+
+% ══════════════════════════════════════════════════════════════════════
+% SHARED PREFIX (spans both zones conceptually, placed in partition zone)
+% ══════════════════════════════════════════════════════════════════════
+\node[event=prefix, minimum width=6.0cm, font=\scriptsize\sffamily]
+    (prefixbox) at (3.6, 6.35)
+    {Shared prefix: \texttt{IssuerKey} $\to$ \texttt{Credential} $\to$ \texttt{Grant} $\to$ pre-revoke DATA};
+
+% ══════════════════════════════════════════════════════════════════════
+% PARTITION ZONE — two replica columns
+% ══════════════════════════════════════════════════════════════════════
+
+% Column headers
+\node[font=\scriptsize\sffamily\bfseries, text=black!75] at (1.8, 5.55) {Replica A};
+\node[font=\scriptsize\sffamily\bfseries, text=black!75] at (5.4, 5.55) {Replica B};
+
+% Branching arrows from prefix
+\draw[arrow, draw=prefix!60!black]
+    ([xshift=-18pt]prefixbox.south) -- (1.8, 5.72);
+\draw[arrow, draw=prefix!60!black]
+    ([xshift=18pt]prefixbox.south) -- (5.4, 5.72);
+
+% Replica A: receives Revoke
+\node[event=revoke] (rev) at (1.8, 4.7) {\texttt{Revoke(U)}};
+\node[process=state, minimum width=2.2cm] (areject)
+    at (1.8, 3.55) {A now rejects\\new writes by U};
+\draw[arrow, draw=revoke!70!black] (rev) -- (areject);
+
+% Replica B: keeps writing under stale evidence
+\node[event=data] (b1) at (5.4, 4.85) {\texttt{Data(U,b1)}};
+\node[event=data] (b2) at (5.4, 3.85) {\texttt{Data(U,b2)}};
+\draw[arrow, draw=data!70!black] (b1) -- (b2);
+
+\node[note, text=stale!80!black] (stalemark) at (5.4, 2.95)
+    {locally accepted under stale\\partition-time evidence};
+
+% "No sync" annotation between the two columns
+\draw[dashed, draw=black!25, line width=0.5pt]
+    (3.6, 5.35) -- (3.6, 3.0);
+\node[note, text=black!50] at (3.6, 3.15) {no sync path};
+
+% ══════════════════════════════════════════════════════════════════════
+% ANTI-ENTROPY BRIDGE (between zones)
+% ══════════════════════════════════════════════════════════════════════
+\node[process=merge, minimum width=2.0cm] (ae)
+    at (8.0, 4.3) {anti-entropy\\set union};
+
+% Arrows from each partition to anti-entropy
+\draw[arrow, draw=merge!70!black]
+    (rev.east) to[out=0, in=160] (ae.west);
+\draw[arrow, draw=merge!70!black]
+    (b2.east) to[out=0, in=200] (ae.west);
+
+% ══════════════════════════════════════════════════════════════════════
+% HEAL ZONE — merge, replay, outcome
+% ══════════════════════════════════════════════════════════════════════
+
+% Union log
+\node[process=merge, minimum width=5.6cm] (unionlog) at (12.8, 6.25)
+    {Union log = prefix $\cup$ \{\texttt{Revoke(U)}, \texttt{Data(U,b1)}, \texttt{Data(U,b2)}\}};
+
+\draw[arrow, draw=merge!70!black] (ae.east) to[out=0, in=180] (unionlog.west);
+
+% Deterministic replay
+\node[process=merge, minimum width=3.4cm] (replay) at (12.8, 5.20)
+    {deterministic topo replay\\by $(\mathrm{HLC}, \mathrm{op\_id})$};
+\draw[arrow, draw=merge!70!black] (unionlog) -- (replay);
+
+% ── Replay strip ─────────────────────────────────────────────────────
+% Horizontal chain: prefix → Revoke → b1 → b2 (spaced for visible arrows)
+\node[event=prefix, minimum width=1.5cm] (rp0) at (9.8, 3.85) {prefix};
+\node[event=revoke, minimum width=1.5cm] (rp1) at (11.8, 3.85) {Revoke};
+\node[event=data, minimum width=1.3cm]   (rp2) at (13.8, 3.85) {b1};
+\node[event=data, minimum width=1.3cm]   (rp3) at (15.8, 3.85) {b2};
+
+\draw[arrow] (replay.south) -- (12.8, 4.22);
+\draw[arrow] (rp0) -- (rp1);
+\draw[arrow] (rp1) -- (rp2);
+\draw[arrow] (rp2) -- (rp3);
+
+% Epoch-close marker: vertical tick under Revoke node
+\draw[line width=1.2pt, draw=revoke!70!black]
+    (11.8, 3.38) -- (11.8, 3.50);
+\node[note, text=revoke!75!black, font=\tiny\sffamily, anchor=north]
+    at (11.8, 3.30) {epoch closes};
+
+% SKIP badges under b1 and b2
+\node[skipbadge] at (13.8, 2.90) {SKIP};
+\node[skipbadge] at (15.8, 2.90) {SKIP};
+
+% ── Final outcome ────────────────────────────────────────────────────
+\node[process=state, minimum width=5.6cm] (finalstate) at (12.8, 1.85)
+    {Final CRDT state excludes \texttt{b1}, \texttt{b2};\\all replicas converge to the same digest};
+
+% Green arrow from the SKIP badges down to the final state
+\draw[arrow, draw=state!70!black]
+    (13.8, 2.65) -- (13.8, 2.35) -| (finalstate.north);
+\draw[-,draw=state!70!black, line width=0.8pt]
+    (15.8, 2.65) -- (15.8, 2.35) -- (13.8, 2.35);
+
+% ── Takeaway annotation ──────────────────────────────────────────────
+\node[font=\tiny\sffamily\itshape, text=black!55]
+    at (12.8, 0.95)
+    {repair-on-heal: stale local accepts do not survive merged replay};
+
+\end{tikzpicture}

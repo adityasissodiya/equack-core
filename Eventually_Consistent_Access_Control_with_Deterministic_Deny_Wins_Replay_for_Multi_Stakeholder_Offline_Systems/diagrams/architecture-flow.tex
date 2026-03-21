@@ -1,0 +1,194 @@
+% TikZ reproduction of 2.drawio.png — ECAC single-node architecture flow.
+% This file is a TikZ fragment and is intended to be included via \input{...}.
+% The parent document must load: tikz, arrows.meta, positioning, fit,
+% backgrounds, shapes.geometric, calc.
+
+% ── Colour palette ──────────────────────────────────────────────────
+\definecolor{ingressbg}{HTML}{FFF3E0}      % warm cream for Ingress group
+\definecolor{ingressborder}{HTML}{E67E22}  % orange
+\definecolor{storebg}{HTML}{E8F5E9}        % light green for Store group
+\definecolor{storeborder}{HTML}{27AE60}    % green
+\definecolor{replaybg}{HTML}{ECEFF1}       % cool grey for middle group
+\definecolor{replayborder}{HTML}{455A64}   % dark slate
+\definecolor{readbg}{HTML}{E8EAF6}         % light indigo for Read Path
+\definecolor{readborder}{HTML}{5C6BC0}     % indigo
+
+\definecolor{netcolor}{HTML}{8E44AD}       % purple  – libp2p Sync
+\definecolor{clicolor}{HTML}{C0392B}       % red     – CLI / ServerAPI
+\definecolor{ingestcolor}{HTML}{E67E22}    % orange  – Ingest & Verify
+\definecolor{storecolor}{HTML}{27AE60}     % green   – RocksDB
+\definecolor{dagcolor}{HTML}{34495E}       % slate   – Activated DAG
+\definecolor{trustcolor}{HTML}{A66D4F}     % brown   – TrustView + VC Check
+\definecolor{policycolor}{HTML}{E74C3C}    % crimson – Epoch Builder + Gate
+\definecolor{statecolor}{HTML}{2E86C1}     % blue    – CRDT State
+\definecolor{querycolor}{HTML}{5C6BC0}     % indigo  – Query / Projection
+\definecolor{auditcolor}{HTML}{607D8B}     % grey    – Audit Log
+
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.4cm,
+    every node/.style={font=\small\sffamily},
+    % ── node styles ──
+    phase/.style={
+        rectangle, rounded corners=5pt,
+        minimum width=3.4cm, minimum height=1.4cm,
+        align=center,
+        draw=#1!70!black, fill=#1!14,
+        line width=0.9pt
+    },
+    inputbox/.style={
+        rectangle, rounded corners=4pt,
+        minimum width=2.8cm, minimum height=1.2cm,
+        align=center,
+        draw=#1!70!black, fill=#1!12,
+        line width=0.85pt
+    },
+    datastore/.style={
+        cylinder, shape border rotate=90,
+        aspect=0.25,
+        minimum width=3.2cm, minimum height=2.2cm,
+        align=center,
+        draw=#1!75!black, fill=#1!16,
+        line width=0.9pt
+    },
+    % ── group (dashed box) ──
+    group/.style={
+        rectangle, rounded corners=8pt,
+        inner sep=12pt,
+        draw=#1!50!black, fill=#1!6,
+        dashed, line width=0.85pt
+    },
+    % ── arrow styles ──
+    flow/.style={
+        -{Stealth[length=2.8mm, width=2.2mm]},
+        line width=0.95pt, draw=#1
+    },
+    dflow/.style={  % dashed flow
+        -{Stealth[length=2.6mm, width=2.0mm]},
+        line width=0.85pt, dashed, draw=#1
+    },
+    elabel/.style={
+        font=\scriptsize\sffamily,
+        fill=white, inner sep=1.2pt,
+        text=black!70
+    },
+    glabel/.style={
+        font=\small\sffamily\bfseries,
+        text=#1!70!black
+    }
+]
+
+% =====================================================================
+%  NODES  (positions derived from the draw.io XML coordinates)
+% =====================================================================
+
+% ── Ingress ──
+\node[inputbox=netcolor] (net) at (1.2, 5.0)
+    {\textbf{libp2p Sync}\\[-1pt]\scriptsize gossip announce + fetch};
+
+\node[inputbox=clicolor] (cli) at (6.2, 5.0)
+    {\textbf{CLI/ServerAPI}\\[-1pt]\scriptsize submit local op};
+
+\node[phase=ingestcolor] (ingest) at (3.8, 3.0)
+    {\textbf{Ingest \& Verify}\\[-1pt]\scriptsize sig check, canonical\\[-1pt]\scriptsize CBOR, op\_id};
+
+% ── Store ──
+\node[datastore=storecolor] (store) at (14.5, 4.2)
+    {\textbf{RocksDB}\\[-1pt]\scriptsize ops, edges, vc,\\[-1pt]\scriptsize keys, checkpoints};
+
+% ── Middle processing ──
+\node[phase=trustcolor] (trust) at (7.0, 1.2)
+    {\textbf{TrustView + VC Check}\\[-1pt]\scriptsize IssuerKey / StatusListChunk\\[-1pt]\scriptsize verify JWT-VC claims};
+
+\node[phase=dagcolor] (dag) at (12.5, 1.2)
+    {\textbf{Activated DAG}\\[-1pt]\scriptsize pending-parent staging\\[-1pt]\scriptsize topo by (HLC, op\_id)};
+
+\node[phase=policycolor] (gate) at (7.0, -1.2)
+    {\textbf{Epoch Builder + Gate}\\[-1pt]\scriptsize Grant / KeyGrant open\\[-1pt]\scriptsize Revoke closes, deny-wins skip};
+
+\node[phase=statecolor] (state) at (12.5, -1.2)
+    {\textbf{CRDT State}\\[-1pt]\scriptsize MVReg / OR-Set\\[-1pt]\scriptsize processed count + digest};
+
+% ── Read Path ──
+\node[phase=querycolor] (query) at (17.5, -0.5)
+    {\textbf{Query / Projection}\\[-1pt]\scriptsize state + KeyGrant + keyring\\[-1pt]\scriptsize decrypt EncV1 or redact};
+
+% ── Audit Log ──
+\node[datastore=auditcolor] (audit) at (1.5, -1.0)
+    {\textbf{Audit Log}\\[-1pt]\scriptsize Ingested / Applied /\\[-1pt]\scriptsize Skipped\\[-1pt]\scriptsize ViewEvent, SyncEvent};
+
+% =====================================================================
+%  GROUP BACKGROUNDS
+% =====================================================================
+\begin{scope}[on background layer]
+    \node[group=ingressborder, fit=(net)(cli)(ingest),
+          label={[glabel=ingressborder, anchor=south west]north west:Ingress}] {};
+
+    \node[group=storeborder, fit=(store),
+          label={[glabel=storeborder, anchor=south west]north west:Store}] {};
+
+    \node[group=replayborder, fit=(trust)(dag)(gate)(state)] (midgroup) {};
+
+    \node[group=readborder, fit=(query),
+          label={[glabel=readborder, anchor=south west]north west:Read Path}] {};
+\end{scope}
+
+% =====================================================================
+%  EDGES
+% =====================================================================
+
+% ── Ingress flows ──
+% CLI → Ingest  (local op)
+\draw[flow=clicolor]
+    (cli.south) -- ++(0,-0.4) -| node[elabel, pos=0.25, above] {local op} ([xshift=-4pt]ingest.north);
+
+% libp2p → Ingest  (remote op)
+\draw[flow=netcolor]
+    (net.south) -- ++(0,-0.8)
+    |- node[elabel, pos=0.65, above, xshift=-2pt] {remote op} (ingest.west);
+
+% Ingest → RocksDB  (canonical op)
+\draw[flow=ingestcolor]
+    (ingest.east) -- node[elabel, above] {canonical op} (store.west);
+
+% ── Store → DAG ──
+\draw[flow=storecolor]
+    (store.south) -- ++(0,-0.6) -| node[elabel, pos=0.25, right] {ops + edges} (dag.north);
+
+% ── DAG → TrustView  (dashed, trust/credential ops) ──
+\draw[dflow=dagcolor]
+    (dag.west) -- node[elabel, above, yshift=3pt] {trust/credential ops} (trust.east);
+
+% ── DAG → Epoch Builder  (ordered ops) — routed LEFT of CRDT State ──
+\draw[flow=dagcolor]
+    ([yshift=-4pt]dag.west) -- ++(-1.5, 0)
+    |- node[elabel, pos=0.30, right] {ordered ops} ([yshift=4pt]gate.east);
+
+% ── TrustView → Epoch Builder  (dashed, verified claims) ──
+\draw[dflow=trustcolor]
+    (trust.south) -- node[elabel, right] {verified claims} (gate.north);
+
+% ── Epoch Builder → CRDT State  (applied data) ──
+\draw[flow=policycolor]
+    (gate.east) -- node[elabel, below, pos=0.5] {applied data} (state.west);
+
+% ── CRDT State → Query  (subject view) ──
+\draw[flow=statecolor]
+    (state.east) -- node[elabel, above, pos=0.45] {subject view} (query.west);
+
+% ── Audit Log flows (all dashed) ──
+% Ingest → Audit Log  (IngestedOp)
+\draw[dflow=auditcolor]
+    ([xshift=-8pt]ingest.south) -- ++(0,-1.2)
+    -| node[elabel, pos=0.55, left] {IngestedOp} (audit.north);
+
+% Epoch Builder → Audit Log  (Applied/Skipped)
+\draw[dflow=auditcolor]
+    (gate.west) -- node[elabel, above, pos=0.45] {Applied/Skipped} (audit.east);
+
+% Query → Audit Log  (ViewEvent)  — long path along the bottom
+\draw[dflow=auditcolor]
+    (query.south) -- ++(0,-1.5) -|
+    node[elabel, pos=0.52, below] {ViewEvent}
+    ([yshift=-4pt]audit.south);
+
+\end{tikzpicture}
