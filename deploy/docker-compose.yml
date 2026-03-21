@@ -1,0 +1,55 @@
+# EQUACK multi-node deployment scaffold
+# Launches 3 EQUACK nodes on a shared network for testing
+# convergence, partition tolerance, and deny-wins replay.
+
+version: "3.9"
+
+networks:
+  equack-net:
+    driver: bridge
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: equack-node1
+    environment:
+      NODE_ID: node1
+      PEERS: "equack-node2:9000,equack-node3:9000"
+    ports:
+      - "9001:9000"
+    networks:
+      - equack-net
+    cap_add:
+      - NET_ADMIN          # required for tc qdisc in partition tests
+
+  node2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: equack-node2
+    environment:
+      NODE_ID: node2
+      PEERS: "equack-node1:9000,equack-node3:9000"
+    ports:
+      - "9002:9000"
+    networks:
+      - equack-net
+    cap_add:
+      - NET_ADMIN
+
+  node3:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: equack-node3
+    environment:
+      NODE_ID: node3
+      PEERS: "equack-node1:9000,equack-node2:9000"
+    ports:
+      - "9003:9000"
+    networks:
+      - equack-net
+    cap_add:
+      - NET_ADMIN

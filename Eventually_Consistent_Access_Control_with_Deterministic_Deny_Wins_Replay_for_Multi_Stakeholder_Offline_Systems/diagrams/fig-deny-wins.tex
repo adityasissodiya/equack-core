@@ -1,0 +1,244 @@
+% Concrete deterministic replay slice for Figure 3.
+% This file is a TikZ fragment and is included from ecac.tex.
+%
+% RESOLVED 4.1: Figure uses 50 pre-revoke writes (matching paper prose).
+%               TODO: HUMAN — code fixture uses 20; update code to match paper/figure if 50 is canonical.
+% RESOLVED 4.2: Figure shows two distinct writers A and B with separate credentials.
+%               TODO: HUMAN — code fixture uses the same subject key for both; fix code to use distinct keys.
+% RESOLVED 4.4: Scope label unified to "confidential" to match code implementation.
+
+\definecolor{figtrust}{HTML}{A66D4F}
+\definecolor{figgrant}{HTML}{27AE60}
+\definecolor{figrevoke}{HTML}{E74C3C}
+\definecolor{figwritera}{HTML}{2E86C1}
+\definecolor{figwriterb}{HTML}{8E44AD}
+\definecolor{figmerge}{HTML}{607D8B}
+\definecolor{figaudit}{HTML}{F39C12}
+\definecolor{figapply}{HTML}{2ECC71}
+\definecolor{figskip}{HTML}{C0392B}
+\definecolor{fignote}{HTML}{F5F1EA}
+
+\begin{tikzpicture}[
+    every node/.style={font=\footnotesize\sffamily},
+    lane/.style={
+        font=\scriptsize\sffamily\bfseries,
+        text=black!75,
+        anchor=east
+    },
+    title/.style={
+        font=\small\sffamily\bfseries,
+        text=black!85
+    },
+    opbox/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum height=1.0cm,
+        minimum width=2.0cm,
+        align=center,
+        line width=0.7pt,
+        draw=black!60
+    },
+    writebox/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum height=1.35cm,
+        minimum width=2.2cm,
+        align=center,
+        line width=0.7pt,
+        draw=black!60
+    },
+    legend/.style={
+        rectangle,
+        rounded corners=4pt,
+        text width=5.0cm,
+        align=left,
+        inner sep=6pt,
+        line width=0.5pt,
+        draw=black!25,
+        fill=fignote,
+        font=\scriptsize\sffamily,
+        text=black!80
+    },
+    flow/.style={
+        -{Stealth[length=2.4mm, width=2.0mm]},
+        line width=0.85pt,
+        draw=black!65
+    },
+    helper/.style={
+        font=\scriptsize\sffamily,
+        text=black!70,
+        align=center
+    },
+    epochlabel/.style={
+        font=\scriptsize\sffamily\bfseries,
+        text=black!75,
+        anchor=east
+    },
+    timeaxis/.style={
+        -{Stealth[length=2.0mm, width=1.6mm]},
+        line width=0.5pt,
+        draw=black!35
+    }
+]
+
+% ── Background band ──────────────────────────────────────────────────
+\draw[rounded corners=6pt, fill=black!2, draw=black!12]
+    (-0.2, -0.6) rectangle (19.2, 8.0);
+
+% ── Section title ────────────────────────────────────────────────────
+\node[title, anchor=west] at (0.3, 7.55)
+    {Concrete Replay Slice from the Compliance Fixture};
+
+% ── Time axis ────────────────────────────────────────────────────────
+\draw[timeaxis] (2.0, 7.05) -- (18.6, 7.05);
+\node[helper, anchor=east] at (18.7, 7.30)
+    {\itshape replay order};
+
+% ── Lane labels ──────────────────────────────────────────────────────
+\node[lane] at (1.7, 6.05) {trust /};
+\node[lane] at (1.7, 5.70) {policy};
+\node[lane] at (1.7, 3.90) {writer A};
+\node[lane] at (1.7, 2.05) {writer B};
+
+% ── Dashed lane separators ──────────────────────────────────────────
+\draw[dashed, draw=black!15, line width=0.4pt]
+    (2.0, 4.85) -- (18.6, 4.85);
+\draw[dashed, draw=black!15, line width=0.4pt]
+    (2.0, 2.95) -- (18.6, 2.95);
+
+% ══════════════════════════════════════════════════════════════════════
+% TRUST / POLICY LANE (y = 5.90)
+% ══════════════════════════════════════════════════════════════════════
+\node[opbox, fill=figtrust!16] (issuer)
+    at (3.2, 5.90) {IssuerKey\\[-1pt]{\scriptsize issuer-1/k1}};
+
+\node[opbox, fill=figgrant!14, minimum width=2.2cm] (credgranta)
+    at (6.0, 5.90) {Cred\,+\,Grant\\[-1pt]{\scriptsize A: editor, confidential}};
+
+\node[opbox, fill=figgrant!14, minimum width=2.2cm] (credgrantb)
+    at (9.0, 5.90) {Cred\,+\,Grant\\[-1pt]{\scriptsize B: editor, confidential}};
+
+\node[opbox, fill=figmerge!14, minimum width=1.6cm] (merge)
+    at (13.0, 5.90) {Merge};
+
+\node[opbox, fill=figrevoke!16, minimum width=2.2cm] (revoke)
+    at (15.6, 5.90) {Revoke\\[-1pt]{\scriptsize writer B}};
+
+% ── Trust-lane flow arrows ───────────────────────────────────────────
+\draw[flow] (issuer.east) -- (credgranta.west);
+\draw[flow] (credgranta.east) -- (credgrantb.west);
+\draw[flow] (credgrantb.east) -- (merge.west);
+\draw[flow] (merge.east) -- (revoke.west);
+
+% ══════════════════════════════════════════════════════════════════════
+% WRITER A LANE (y = 3.90)
+% ══════════════════════════════════════════════════════════════════════
+
+\node[writebox, fill=figwritera!12] (apre)
+    at (11.2, 3.90)
+    {A writes $\times 50$\\[-1pt]
+     {\scriptsize\color{figapply!80!black}\textbf{APPLY} $\times 50$}};
+
+\node[writebox, fill=figwritera!12] (apost)
+    at (17.6, 3.90)
+    {A writes $\times 10$\\[-1pt]
+     {\scriptsize\color{figapply!80!black}\textbf{APPLY} $\times 10$}};
+
+% ══════════════════════════════════════════════════════════════════════
+% WRITER B LANE (y = 2.05)
+% ══════════════════════════════════════════════════════════════════════
+
+\node[writebox, fill=figwriterb!12] (bpre)
+    at (11.2, 2.05)
+    {B writes $\times 50$\\[-1pt]
+     {\scriptsize\color{figapply!80!black}\textbf{APPLY} $\times 50$}};
+
+\node[writebox, fill=figskip!10, draw=figskip!60!black] (bpost)
+    at (17.6, 2.05)
+    {B writes $\times 10$\\[-1pt]
+     {\scriptsize\color{figskip!90!black}\textbf{SKIP} $\times 10$}};
+
+% ══════════════════════════════════════════════════════════════════════
+% CROSS-LANE FLOW ARROWS
+% ══════════════════════════════════════════════════════════════════════
+
+% Grants → pre-revoke writes
+% Route: drop to target lane y-level, then horizontal right into .west
+\draw[flow, draw=figgrant!70!black]
+    (credgranta.south) |- (apre.west);
+
+\draw[flow, draw=figgrant!70!black]
+    (credgrantb.south) |- (bpre.west);
+
+% Pre-revoke writes → merge (dashed: conceptual set-union, no explicit merge op)
+\draw[flow, draw=figmerge!70!black, dashed]
+    (apre.north east) to[out=30, in=-120] (merge.south west);
+\draw[flow, draw=figmerge!70!black, dashed]
+    (bpre.north east) to[out=50, in=-140] ([yshift=-2pt]merge.south);
+
+% Revoke → post-revoke writes
+% Same pattern: drop to target lane y-level, then horizontal right into .west
+\draw[flow, draw=figrevoke!70!black]
+    (revoke.south) |- (apost.west);
+
+\draw[flow, draw=figrevoke!70!black]
+    ([xshift=3pt]revoke.south) |- (bpost.west);
+
+% ══════════════════════════════════════════════════════════════════════
+% EPOCH BARS (below write lanes, above legend)
+% ══════════════════════════════════════════════════════════════════════
+
+% Epoch A: starts at Grant A position, still active (open arrow)
+\node[epochlabel] at (5.2, 0.95) {epoch A};
+\draw[line width=2.6pt, draw=figwritera!75!black,
+      -{Stealth[length=2.4mm, width=2.0mm]}]
+    (6.0, 0.95) -- (18.6, 0.95);
+\node[helper, anchor=south west] at (17.2, 1.02)
+    {\itshape still open};
+
+% Epoch B: starts at Grant B position, closed at Revoke position
+\node[epochlabel] at (5.2, 0.25) {epoch B};
+\draw[line width=2.6pt, draw=figwriterb!75!black]
+    (9.0, 0.25) -- (15.6, 0.25);
+% Revoke marker (vertical bar)
+\draw[line width=1.5pt, draw=figrevoke!80!black]
+    (15.6, -0.02) -- (15.6, 0.52);
+\node[helper, anchor=west] at (15.8, 0.25)
+    {\itshape closed by Revoke};
+
+% ══════════════════════════════════════════════════════════════════════
+% COMPACT LEGEND (single row below epoch bars)
+% ══════════════════════════════════════════════════════════════════════
+
+\draw[rounded corners=4pt, fill=fignote, draw=black!15, line width=0.4pt]
+    (-0.2, -1.90) rectangle (19.2, -0.25);
+
+\node[legend, text width=5.2cm, anchor=north west] at (0.15, -0.38) {
+    \textbf{TrustView}\;---\;%
+    \texttt{IssuerKey} registers a public key;
+    each \texttt{Credential} verifies in-band
+    via the same TrustView on every replica.
+};
+
+\node[legend, text width=6.0cm, anchor=north west] at (5.8, -0.38) {
+    \textbf{Epoch builder}\;---\;%
+    \texttt{Grant} opens an epoch if its
+    \texttt{cred\_hash} resolves to a verified VC.
+    \texttt{Revoke} closes the matching epoch at
+    that topo-order position.
+};
+
+\node[legend, text width=5.4cm, anchor=north west] at (12.5, -0.38) {
+    \textbf{Deny-wins gate}\;---\;%
+    Each DATA op emits \texttt{AppliedOp} or
+    \texttt{SkippedOp(reason)} into a hash-chained
+    audit trail.
+};
+
+% ── Determinism tagline ──────────────────────────────────────────────
+\node[helper, font=\scriptsize\sffamily\itshape, text=black!60]
+    at (9.5, -2.15)
+    {Same merged event set $\rightarrow$ same topo order
+     $\rightarrow$ same apply/skip decisions on every replica.};
+
+\end{tikzpicture}

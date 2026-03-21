@@ -2,9 +2,9 @@
 //! Minimal metrics core for M7.
 //!
 //! - Lock-free increments/observations (atomics) after first-time registration.
-//! - Fixed millisecond histogram buckets + quantile extraction (p50/p95).
+//! - Fixed millisecond histogram buckets + quantile extraction (p50/p95/p99).
 //! - Stable CSV order: keys are sorted lexicographically; each histogram expands
-//!   to columns: *_count,*_sum_ms,*_p50_ms,*_p95_ms,*_max_ms.
+//!   to columns: *_count,*_sum_ms,*_p50_ms,*_p95_ms,*_p99_ms,*_max_ms.
 //! - No wall clock dependency. You pass ms you measured elsewhere.
 //!
 //! Intended use:
@@ -86,8 +86,8 @@ impl Histo {
         self.max_ms.store(0, Ordering::Relaxed);
     }
 
-    /// Return (count, sum_ms, p50_ms, p95_ms, max_ms).
-    fn snapshot(&self) -> (u64, u64, u64, u64, u64) {
+    /// Return (count, sum_ms, p50_ms, p95_ms, p99_ms, max_ms).
+    fn snapshot(&self) -> (u64, u64, u64, u64, u64, u64) {
         let counts: Vec<u64> = self
             .buckets
             .iter()
@@ -99,8 +99,9 @@ impl Histo {
 
         let p50 = quantile_ms(&counts, 0.50);
         let p95 = quantile_ms(&counts, 0.95);
+        let p99 = quantile_ms(&counts, 0.99);
 
-        (total, sum_ms, p50, p95, max_ms)
+        (total, sum_ms, p50, p95, p99, max_ms)
     }
 }
 
@@ -189,7 +190,7 @@ impl Metrics {
     ///
     /// Counter columns are the plain keys.
     /// Histogram columns are expanded as:
-    ///   <key>_count,<key>_sum_ms,<key>_p50_ms,<key>_p95_ms,<key>_max_ms
+    ///   <key>_count,<key>_sum_ms,<key>_p50_ms,<key>_p95_ms,<key>_p99_ms,<key>_max_ms
     ///
     /// Keys are sorted for a stable schema.
     pub fn snapshot_csv(&self) -> String {
@@ -212,6 +213,7 @@ impl Metrics {
             header.push(format!("{}_sum_ms", k));
             header.push(format!("{}_p50_ms", k));
             header.push(format!("{}_p95_ms", k));
+            header.push(format!("{}_p99_ms", k));
             header.push(format!("{}_max_ms", k));
         }
 
@@ -222,11 +224,12 @@ impl Metrics {
             row.push(v.to_string());
         }
         for k in &histo_keys {
-            let (cnt, sum, p50, p95, maxv) = histos_map.get(k).unwrap().snapshot();
+            let (cnt, sum, p50, p95, p99, maxv) = histos_map.get(k).unwrap().snapshot();
             row.push(cnt.to_string());
             row.push(sum.to_string());
             row.push(p50.to_string());
             row.push(p95.to_string());
+            row.push(p99.to_string());
             row.push(maxv.to_string());
         }
 

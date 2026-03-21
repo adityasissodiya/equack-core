@@ -1,0 +1,893 @@
+\documentclass[10pt,journal,compsoc]{IEEEtran}
+
+% ========================== Packages ==========================
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs,multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[hypertexnames=false,hidelinks]{hyperref}
+\usepackage[nameinlink,capitalize]{cleveref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\usepackage{siunitx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{balance}
+\usepackage{cite}
+\usepackage{float}
+\usepackage{tikz}
+\usepackage{adjustbox}
+\usepackage{rotating}
+\usetikzlibrary{arrows.meta,positioning,backgrounds,calc,shapes.geometric,shapes.multipart,fit,decorations.pathreplacing}
+
+% ========================== TODO Marker Command ==========================
+\newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\PLACEHOLDER}[1]{\textcolor{blue}{\textit{#1}}}
+
+\raggedbottom
+\setlength{\emergencystretch}{1em}
+\hbadness=10000
+\vbadness=10000
+\vfuzz=2pt
+
+% ========================== Listings (Rust/JSON) ==========================
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{orange},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  captionpos=b
+}
+
+\lstdefinelanguage{Rust}{
+  keywords={fn, let, if, else, return, match, struct, impl, pub, use, mod, 
+            self, true, false, mut, ref, move, where, for, in, loop, while},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+  sensitive=true
+}
+
+% ========================== Theorems & Invariants ==========================
+\newtheorem{invariant}{Invariant}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{definition}{Definition}
+
+% ========================== Macros ==========================
+\newcommand{\ecac}{\textsc{ECAC}}
+\newcommand{\equack}{\textsc{EQuack}}
+\newcommand{\crdt}{\textsc{CRDT}}
+\newcommand{\vc}{\textsc{VC}}
+\newcommand{\dagg}{\textsc{DAG}}
+\newcommand{\cedar}{\textsc{Cedar}}
+\newcommand{\denywins}{\textit{deny-wins}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% ========================== Title & Authors ==========================
+\begin{document}
+\title{Eventually Consistent Access Control with Deterministic Deny-Wins Replay for Multi-Stakeholder Offline Systems}
+
+\author{Aditya Sissodiya, Johan Kristiansson, Eric Chiquito, Ulf Bodin \\
+\texttt{Luleå University of Technology, Sweden}}
+
+\IEEEtitleabstractindextext{%
+\begin{abstract}
+Offline maintenance, federated data sharing, and similar settings need authorization decisions that can be made locally and later reconciled after partitions heal. We present \equack{}, an eventually consistent access-control model that represents data updates, grants/revokes, and trust updates in a single signed causal event log. Replicas merge logs by set union and compute the same materialized state by deterministic replay of the causal DAG using a deterministic linearization and a deny-wins authorization gate.
+
+Authorization evidence is carried in-band using W3C Verifiable Credentials and time-versioned status-list updates, enabling offline verification without a central PDP. When confidentiality is required, payloads can be encrypted per tag and key-rotated; ciphertext remains replicated for convergence, while decryption and redaction occur at query time.
+
+We evaluate \equack{}, a Rust prototype, using deterministic synthetic workloads and policy-heavy CBOR logs. In randomized delivery tests (100 topological permutations of a 10k-op log), all replicas converged to an identical state digest. Deny-wins revocation skipped all post-revocation writes (500/500), and multi-issuer conflicts resolved deterministically. Replay scales approximately linearly with log size; linear chains reach up to 45k~ops/s in our implementation and checkpoints yield 8--11$\times$ speedup. We also demonstrate partition-merge invalidation of post-revocation operations and audit tamper detection relative to a pinned checkpoint digest. Encryption adds $\sim$6.5\% overhead in small-scale tests.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Access control, revocation, verifiable credentials, CRDTs, deterministic replay, audit, offline systems, industrial IoT, data spaces.
+\end{IEEEkeywords}}
+
+\maketitle
+\IEEEdisplaynontitleabstractindextext
+\IEEEpeerreviewmaketitle
+
+  
+  \section{Introduction}
+  \label{sec:intro-paperC}
+  Access control in multi-stakeholder environments faces a fundamental tension; devices and services must continue operating when disconnected from central infrastructure, yet security-critical decisions---especially credential revocation---must eventually be enforced consistently across all parties. This tension is particularly acute in industrial IoT\cite{MISTRY2020106382,liu2020fabriciot}, healthcare\cite{HASSELGREN2020104040}, and cross-organizational data sharing\cite{10.1145/3511899,DU2024101878}, where equipment changes hands between manufacturers, operators, and service providers throughout its lifecycle.
+
+  A factory operates hundreds of programmable controllers on a restricted network. Maintenance is performed by engineers from different vendors who are granted temporary access to specific machines. Controllers may run for days without reliable connectivity\cite{9551736,s23208535}. An engineer can update a safety parameter while offline using a credential issued by their employer; hours later, that credential may be revoked after a safety incident. When logs from different controllers are later synchronized, the system must deterministically agree on which parameter changes were authorized and produce an audit trail showing who changed what, under which permission, and when.
+
+  Similar tensions arise in federated research data sharing~\cite{HASSELGREN2020104040,10.1145/3511899} and disaster response coordination, where independent authorities, offline devices, and evolving permissions create the same enforcement gap. Across these settings, authorization is an \emph{offline-first} problem: nodes must decide locally, yet the overall system must later reconcile those decisions into a consistent and auditable authorization state.
+
+Kleppmann et al.~\cite{kleppmann2019localfirst} identify access control as a fundamental open problem for local-first software built on CRDTs, observing that enforcing access rights in a decentralized setting---particularly revoking access---remains unsolved. This results in the following problem statement.
+
+How can multiple independent authorities issue and revoke fine-grained permissions for shared resources that operate offline for extended periods, while ensuring that all parties eventually converge on the same authorized state and can verify a tamper-evident history of access decisions?
+
+We call the model \equack{} (Eventually Consistent Access Control). Our Rust prototype implementation is \textit{equack-core}, which we use for all experiments.
+
+This paper makes the following contributions:
+  \begin{enumerate}
+      \item \textit{Problem analysis} (Section~\ref{sec:problem-analysis-paperC}): Conceptual requirements derivation for offline multi-stakeholder authorization, gap analysis of four existing paradigms, and a mechanism-level comparison across five axes (Section~\ref{sec:mech-compare}).
+      \item \textit{\equack{} model} (Section~\ref{sec:model-paperC}): An eventually consistent access-control model with formal guarantees for determinism, convergence, policy safety, audit integrity, and leaver security.
+      \item \textit{Deny-wins replay semantics} (Section~\ref{sec:model-paperC}): Causal DAG ordering with deny-wins enforcement ensuring revoked credentials have no post-reconciliation effect.
+      \item \textit{Implementation and evaluation} (Sections~\ref{sec:impl-paperC}--\ref{sec:eval-paperC}): The \equack{} Rust prototype with empirical validation across 14 experiments covering convergence, revocation, audit, performance, and multi-node sync.
+  \end{enumerate}
+
+  %Section~\ref{sec:problem-analysis-paperC} analyzes the problem space and derives requirements. Section~\ref{sec:threat-model-paperC} defines our system and threat model. Section~\ref{sec:model-paperC} presents the EQuack model and its formal guarantees. Section~\ref{sec:impl-paperC} describes the implementation. Section~\ref{sec:eval-paperC} evaluates the prototype, and Section~\ref{sec:related-work-paperC} situates EQuack in the broader literature.
+
+
+\section{Problem Analysis}\label{sec:problem-analysis-paperC}
+
+The offline multi-stakeholder authorization problem arises when systems must (i) continue operating during network partitions, (ii) support multiple independent authorities that can grant and revoke permissions, and (iii) eventually converge to a consistent, auditable authorization state. This section defines the problem context, presents conceptual requirements derived from motivating use cases, and evaluates existing approaches against those requirements.
+
+%\subsection{System and Threat Context}\label{subsec:context-paperC}
+
+Before defining requirements or comparing paradigms, we state the assumptions that shape our problem space. Section~\ref{subsec:systemModel} formalizes the full system and threat model; here we state only the assumptions needed to interpret R1--R6 and the subsequent comparisons.
+
+\begin{itemize}
+    \item \textbf{Offline-first operation.} Replicas may be disconnected for extended periods (hours to days). Solutions requiring continuous connectivity to a central PDP or global consensus are excluded by construction.
+    \item \textbf{Multi-authority governance.} Multiple independent organizations issue and revoke credentials. No single root authority controls all permissions.
+    \item \textbf{Eventual delivery.} All well-formed operations are eventually delivered to all correct replicas, though delivery order is arbitrary and may be adversarially influenced.
+    \item \textbf{Adversary capabilities.} An adversary may delay, reorder, or partition messages; compromise subject credentials; and attempt to tamper with local logs. The adversary is computationally bounded.
+    \item \textbf{Out of scope.} We do not solve full Byzantine governance (colluding majorities of issuers) or physical key compromise. These require additional mechanisms.
+\end{itemize}
+
+This context explains why common fixes fail: online introspection endpoints violate offline-first; global consensus violates availability during partition; single-authority trust violates multi-stakeholder governance.
+
+\subsection{The Offline Enforcement Problem}
+
+Consider a set of replicas $R = \{r_1, \ldots, r_n\}$ operated by multiple stakeholders, maintaining shared resources under access control. Each replica may be offline for extended periods, during which it must make local authorization decisions. When replicas reconnect, they must reconcile their local states into a globally consistent outcome.
+
+The core difficulty is not issuing permissions---standard PKI and token mechanisms suffice for that---but ensuring that all replicas eventually agree on \emph{which operations were authorized at the time they occurred}, despite:
+\begin{itemize}
+    \item \textbf{Partition-time divergence}: Different replicas may observe different subsets of grants, revokes, and data operations during a partition.
+    \item \textbf{Out-of-order delivery}: A revocation may arrive at a replica after operations it should have invalidated.
+    \item \textbf{Multi-authority conflicts}: Independent issuers may make conflicting decisions (e.g., one grants while another revokes) that must be resolved deterministically.
+\end{itemize}
+
+Jacob and Hartenstein~\cite{jacob2024eventuallyac} formalize this limitation by defining \emph{Eventually Consistent Access Control} (ECAC) as a conceptual model in which system entities autonomously decide and enforce access control to the best of their knowledge and belief, replacing up-front coordination with subsequent reconciliation. Their ECAC model distinguishes causal authorization (immutable, based on predecessor history) from topological authorization (mutable, based on the total execution order), and provides formal safety and liveness properties---including app state confluence under non-monotonic revocations---proven on an abstract algorithm derived from Matrix's state resolution. However, Jacob and Hartenstein do not propose a concrete mechanism for credential-based authorization epochs, deny-wins replay semantics, or in-band trust evidence; their authorization model is based on Matrix's level- and attribute-based access control (LeABAC) rather than verifiable credentials with policy-engine evaluation. Furthermore, they provide no implementation or experimental evaluation. \equack{} addresses these gaps: it instantiates the ECAC paradigm with a concrete deny-wins replay mechanism over VC-based authorization epochs, Cedar policy evaluation, a tamper-evident audit trail, and an evaluated Rust prototype.
+
+\subsection{System Model}\label{subsec:systemModel}
+
+We consider a set of replicas operated by multiple stakeholders (organizations) that jointly maintain a replicated log of operations over shared resources. Replicas are deployed in environments with intermittent connectivity (e.g., edge and industrial deployments) and may be offline for extended periods. Each replica locally stores all received operations and materializes application state by deterministic replay.
+
+%\paragraph*{Principals and authorities.}
+A \emph{subject} (principal) is an actor that initiates operations (users, services, devices). One or more independent \emph{issuers} create and revoke time-bounded credentials for subjects. Each replica hosts a policy enforcement point (PEP) that admits subject requests only when locally authorized. The PEP then emits a signed log event that carries the subject identity and authorization evidence (e.g., the VC). Importantly, the event timestamp (HLC) and the event signature are produced by the replica/PEP, not by the subject, preventing a compromised subject from forging or backdating log entries under our threat model.
+
+%\paragraph*{Operations and dissemination.}
+All state changes---data updates, grants, revokes, and trust updates---are represented as signed operations in a causal DAG. Replicas disseminate operations using gossip/anti-entropy and fetch missing dependencies (parents) until replay can proceed. We assume an asynchronous network: messages can be delayed, reordered, duplicated, or temporarily dropped.
+
+\subsection{Threat Model and Assumptions}
+
+\equack{} targets security failures that arise specifically from \emph{offline enforcement} and \emph{multi-authority governance}: stale credentials, conflicting grants and revokes across partitions, and post-hoc manipulation of authorization history.
+
+We assume an adversary may (i) compromise subject credentials (e.g., steal a valid VC or authentication token) and attempt to request unauthorized operations, (ii) control the network to delay, reorder, or partition replicas, and (iii) attempt to tamper with stored history or audit records on one or more replicas. However, the adversary cannot forge replica/PEP signing keys or arbitrarily choose the HLC timestamps of accepted log events. The adversary is computationally bounded and cannot break standard cryptographic primitives.
+
+The following assumptions scope the guarantees claimed by \equack{}:
+
+\begin{enumerate}
+    \item \textbf{Honest-but-buggy administrators.} Issuers and policy administrators follow protocols but may make configuration errors; \equack{} provides safety-by-default semantics that limit the effect of ambiguous concurrent decisions.
+    \item \textbf{Eventual delivery.} Every well-formed operation is eventually delivered to every correct replica (e.g., via anti-entropy), although delivery order is arbitrary.
+    \item \textbf{No physical compromise of key material.} Long-term private keys and tag keys are not exfiltrated via physical attacks on devices; compromise is modeled at the software/account level.
+    \item \textbf{Bounded partition duration.} Offline periods are finite; after reconnection, replicas reconcile by exchanging missing operations.
+\end{enumerate}
+
+%\paragraph*{Out of scope.}
+\equack{} does not attempt to provide safety against a fully Byzantine ecosystem in which all participants collude, nor does it address side-channel leakage or cryptographic primitive failures. Metadata privacy (hiding access patterns or policy structure) is treated as future work.
+
+\subsection{Conceptual Requirements}\label{subsec:requirements-paperC}
+
+From the system context and motivating use cases (Section~\ref{sec:intro-paperC}), we derive six conceptual requirements for offline multi-stakeholder access control. These serve as criteria for comparing existing paradigms and guiding \equack{}'s design.
+
+\begin{enumerate}
+    \item \textbf{R1---Offline enforceability.} Authorization decisions must be enforceable without contacting a central PDP or ledger; disconnected nodes operate using locally verifiable evidence.
+    \item \textbf{R2---Deterministic post-partition convergence.} Given the same set of events, all parties must compute the same final authorization state regardless of message arrival order.
+    \item \textbf{R3---Revocation safety under partition.} Revocations must deterministically invalidate effects in the replicated state after reconciliation, even if the revocation arrives after the operations it should have blocked. Revocation applies to the digital state; irreversible physical-world actions require compensating controls at the application layer.
+    \item \textbf{R4---Tamper-evident accountability.} The history of grants, revokes, and authorization decisions must form an append-only, verifiable trace.
+    \item \textbf{R5---Decentralized multi-authority issuance.} Independent issuers must grant and revoke permissions without coordination; verifiers check authenticity offline using locally available evidence.
+    \item \textbf{R6---Confidentiality with post-revocation protection.} Unauthorized parties should not read protected content; after revocation-triggered key rotation, revoked principals cannot decrypt data created after their access ended.
+\end{enumerate}
+
+We do not claim a general solution to Byzantine fault tolerance; \equack{} assumes honest-but-buggy administrators and does not address scenarios where a quorum of issuers collude maliciously.
+
+\subsection{Gap Analysis}\label{subsec:gap-paperC}
+
+Table~\ref{tab:gap-summary-paperC} evaluates five dominant approaches against R1--R6. Centralized IAM couples enforcement to online coordination, failing R1 and R3 under partition~\cite{jacob2024eventuallyac,nasab2023empirical,7442163}. Token-based schemes enable offline checks but lack deterministic reconciliation and timely revocation~\cite{rouhani2021distributed,SINGH2022102503,s21206815,8386853}. CRDTs provide data convergence but do not define authorization semantics or revocation rollback~\cite{shapiro2011crdt,gomes2017_sec}. Blockchains offer total ordering and auditability but require online consensus incompatible with offline enforcement~\cite{8989788,9020182,9446108,8798730,9548956,DIFRANCESCOMAESA201993,s20010282,s22031271}. Capability-based systems~\cite{birgisson2014macaroons,ucan2022,andersen2019wave} enable offline verification of delegated authority but lack deterministic convergence of conflicting authorization state and retroactive revocation. No existing approach simultaneously satisfies R1--R6, motivating \equack{}'s design.
+
+
+\begin{table*}[htbp]
+\centering
+\caption{Gap analysis against conceptual requirements R1--R6. ``Partial'' indicates the requirement can be achieved only with additional coordination or significant residual risk.}
+\label{tab:gap-summary-paperC}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{p{3.8cm} cccccc}
+\toprule
+\textbf{Requirement} & \textbf{Centralized IAM} & \textbf{Token-based} & \textbf{CRDT-only} & \textbf{Blockchain} & \textbf{Capability-based} \\
+\midrule
+R1 Offline enforceability        & No      & Partial & Yes     & No       & Yes     \\
+R2 Deterministic convergence     & Yes     & No      & Yes     & Yes      & No      \\
+R3 Revocation safety             & No      & No      & No      & Partial  & Partial \\
+R4 Tamper-evident audit          & No      & No      & No      & Yes      & Partial \\
+R5 Multi-authority issuance      & No      & No      & No      & Yes      & Yes     \\
+R6 Confidentiality               & Partial & Partial & No      & No       & No      \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Mechanism-Level Comparison}\label{sec:mech-compare}
+
+To clarify \equack{}'s positioning, Table~\ref{tab:mech-compare} compares it against the closest design patterns along five standard axes~\cite{bamakan2020criteria,fan2020perf_eval,touloupou2022benchmark,xiao2020consensus_survey,wang2019consensus_survey,ferdous2021_consensus_survey,nguyen2019_pos,li2021_multilayer_pbft}: ordering model, revocation semantics, trust distribution, audit model, and offline availability.
+
+\begin{table*}[t]
+\centering
+\caption{Mechanism-level comparison of \equack{} to closest design alternatives. Each column represents a design paradigm; rows correspond to the five comparison axes.}
+\label{tab:mech-compare}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{p{1.6cm} p{2.4cm} p{2.4cm} p{2.4cm} p{2.4cm} p{3.0cm}}
+\toprule
+\textbf{Axis} & \textbf{CRDT-only replication} & \textbf{Token/VC offline checks} & \textbf{Ledger-based AC} & \textbf{Capability-based} & \textbf{\equack{}} \\
+\midrule
+Ordering model &
+  Partial order / join-semilattice merge; no global history &
+  No shared history; decisions are local + issuer freshness &
+  Total order via consensus / finality &
+  No shared history; delegation chains are acyclic but unordered &
+  Causal DAG + deterministic linear extension (Alg.~\ref{alg:linearize-paperC}) \\
+\addlinespace
+Revocation semantics &
+  Not encoded into merge; revoked effects may persist post-merge &
+  Depends on freshness/online status; partition window persists &
+  Globally ordered but requires online consensus to commit &
+  Expiry-based or propagation-dependent; no retroactive invalidation &
+  Deny-wins epochs: REVOKE deterministically terminates prior/concurrent GRANT epochs; post-revoke effects skipped on reconciliation \\
+\addlinespace
+Trust distribution &
+  Out-of-band PKI; data convergence only &
+  Out-of-band issuer infra (status endpoints, OCSP) &
+  Trust anchored in ledger membership / consensus &
+  Delegation chains from root capabilities; offline-verifiable &
+  In-band TrustView: issuer keys + status evidence replicated as events; offline validation from pinned genesis \\
+\addlinespace
+Audit model &
+  Data history not necessarily reconstructible; depends on app-level logging &
+  Depends on external logging; hard to reconstruct distributed decisions &
+  Immutable ledger provides auditability (at consensus cost) &
+  Token chain provides delegation provenance; no operation-level audit &
+  Signed + hash-chained audit records; decisions reproducible from the log against pinned checkpoint digest \\
+\addlinespace
+Offline availability &
+  Yes for writes, but no safe authorization rollback &
+  Partial (offline permit) but revocation timeliness requires online checks &
+  No (must reach consensus to commit) &
+  Yes for authorization checks; freshness-limited for revocation &
+  Yes: local enforcement continues; safety repaired deterministically on merge \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\equack{} fills the gap between these approaches: CRDT replication provides data convergence but not authorization convergence~\cite{shapiro2011crdt,gomes2017_sec}; ledgers provide total order but require consensus; token/VC designs support offline checks but lack deterministic reconciliation~\cite{rouhani2021distributed}. \equack{}'s causal DAG linearization plus deny-wins gate makes authorization a reproducible function of the reconciled event set without online consensus.
+
+\paragraph{Capability-based authorization.}
+Capability-based authorization constitutes a fifth paradigm not captured by earlier versions of Tables~\ref{tab:gap-summary-paperC} and~\ref{tab:mech-compare}. Systems such as Macaroons~\cite{birgisson2014macaroons}, UCAN~\cite{ucan2022}, Biscuit~\cite{biscuit2023}, ZCAP-LD, and WAVE~\cite{andersen2019wave} enable offline verification of delegated authority via cryptographic token chains: a holder can attenuate and present capabilities without contacting the issuer. The Willow Protocol~\cite{willow2024} couples peer-to-peer data synchronization with Meadowcap, a capability system supporting read/write authorization with delegation and attenuation. These designs satisfy R1 (offline verification) and R5 (multi-authority delegation) but do not address R2 (deterministic convergence of conflicting authorization state across partitions) or R3 (retroactive invalidation of effects authorized under stale evidence). Revocation in capability systems either relies on expiry, requiring short-lived tokens and frequent re-issuance, or on propagation of revocation lists, which faces the same freshness problem as VC status lists. \equack{}'s contribution is orthogonal: it provides the conflict-resolution and replay mechanism that deterministically reconciles divergent authorization decisions after partition healing---a problem that capability chains alone do not address.
+
+\paragraph{Zanzibar-family and policy engines.}
+Zanzibar~\cite{zanzibar2019} and its derivatives (SpiceDB, OpenFGA~\cite{openfga}) provide relationship-based authorization backed by strongly consistent stores (Spanner in Zanzibar's case). The Zookie mechanism ensures that a check never returns stale results by encoding a consistency token tied to the latest write---an approach that requires always-on connectivity and globally consistent infrastructure, violating R1 by construction. Policy engines such as OPA and Cedar~\cite{cutler2024cedar} support offline policy \emph{evaluation} via pre-loaded policy bundles, but not offline policy \emph{modification} with deterministic convergence: when two disconnected nodes independently modify authorization state (e.g., one grants while another revokes), these engines provide no reconciliation mechanism. \equack{} occupies the gap between these: it supports offline operation (like capability tokens) while providing deterministic post-partition convergence of authorization state (like centralized systems), without requiring global consensus.
+
+\paragraph{Matrix State Resolution.}
+The closest deployed system solving a structurally similar problem is Matrix's state resolution algorithm (v2)~\cite{matrix_stateresv2}. Like \equack{}, Matrix maintains a DAG of events and deterministically resolves state across federated servers. However, Matrix's authorization model is power-level-based: authorization events are prioritized by event type and sender power level, with specific tie-breaking rules (lexicographic event ID comparison). \equack{} differs in using CRDT formalism for data convergence, deny-wins semantics for authorization safety, and VC-based authorization epochs rather than power-level assignments. Jacob and Hartenstein~\cite{jacob2024eventuallyac} provide a formal analysis of Matrix's approach as an instance of ECAC; \equack{} builds on this conceptual foundation with a concrete mechanism targeting industrial multi-stakeholder settings.
+
+\section{\equack{} Model}
+\label{sec:model-paperC}
+
+\equack{} is an Eventually Consistent Access Control model designed for offline-first operation with rigorous security and auditability. This section presents the conceptual model and its formal guarantees.
+
+\equack{} combines four key elements: (1)~a causal event log with deterministic deny-wins replay, (2)~verifiable credentials for time-bounded authorization epochs, (3)~a hybrid ABAC/RBAC policy model with deny-overrides semantics, and (4)~per-tag encryption with key rotation.
+
+We outline formal guarantees for convergence, safety, determinism, audit integrity, and leaver security (post-revocation confidentiality under key rotation). The system's four-phase lifecycle (Ingest, Validate, Replay, Query) is summarized in Figure~\ref{fig:ecac-overview-paperC}. The remainder of this section expands each phase and uses subsequent figures to clarify how the causal event log, in-band trust, deny-wins gating, and (optional) confidentiality interact to produce a deterministic authorization outcome.
+
+\begin{figure*}[t]
+  \centering
+  % allow the TikZ to expand to the column-spanning width, but cap vertical height
+  \adjustbox{max width=\textwidth, max totalheight=\textheight, center}{
+    \input{diagrams/architecture-flow.tex}
+  }
+  \caption{\equack{} prototype overview showing the \equack{} four-phase lifecycle (Ingest, Verify, Activated DAG, Epoch/Gate, CRDT state, Query) and supporting infrastructure.}
+  \label{fig:ecac-overview-paperC}
+\end{figure*}
+
+% \begin{figure}[!htb]
+%   \centering
+%   % Rotate the diagram by 90 degrees counter-clockwise
+%   \rotatebox{90}{%
+%     \begin{minipage}{\textheight}% width = page height -> gives lots of horizontal space
+%       \centering
+%       \adjustbox{max width=\textheight, max totalheight=0.95\columnwidth,center}{%
+%         \input{diagrams/architecture-flow.tex}%
+%       }
+%     \end{minipage}%
+%   }
+%   \vspace{2pt} % small gap between rotated picture and caption
+%   \caption{(Rotated) \equack{} prototype overview showing the \equack{} lifecycle.}
+%   \label{fig:ecac-overview-rotated}
+% \end{figure}
+
+% \begin{sidewaysfigure*}
+%   \centering
+%   \adjustbox{max width=\textheight, max totalheight=0.9\textwidth, center}{%
+%     \input{diagrams/architecture-flow.tex}
+%   }
+%   \caption{Landscape overview of the \equack{} prototype and \equack{} lifecycle.}
+%   \label{fig:ecac-overview-sideways}
+% \end{sidewaysfigure*}
+
+\subsection{Event Log and Deterministic Deny-Wins Replay}
+
+\equack{} maintains an append-only event log structured as a causal DAG, where each event points to its causal predecessors. The DAG encodes happens-before relations, and system state is derived by deterministically sorting and replaying events. A fixed traversal order ensures every replica produces the same sequence.
+
+Concurrent events---those without causal order---are resolved using a composite key: a Hybrid Logical Clock (HLC) value plus a unique operation ID. The HLC combines physical and logical time to preserve causality; when timestamps match, op IDs break ties deterministically. Replay thus becomes a pure function of the event set, guaranteeing identical state across replicas (R2). 
+
+\textbf{Separation of DAG and CRDT roles.} A common point of confusion in offline access control is the overlapping role of causal graphs and Data CRDTs. In \equack{}, the pipeline follows a strict separation of concerns: the DAG and topological sort fix a deterministic, totally-ordered sequence of events to evaluate \textit{authorization and policy validity}. Meanwhile, the CRDT state (e.g., MVReg, OR-Set) strictly handles \textit{data payload convergence}. The policy engine evaluates the strict ordered DAG to build epochs and TrustViews; only authorized DATA events are then handed off to the CRDTs. 
+
+
+The event DAG acts as a convergent CRDT: merging logs is a set union---commutative, associative, idempotent. Operation structure and DAG mechanics are shown in Figure~\ref{fig:dag-structure-paperC}. Each operation carries a signed header with parent links, HLC timestamp, producer key, and typed payload. Replicas accept events opportunistically but only replay them once causal predecessors are present (activated/pending staging), ensuring every replica topologically sorts the same DAG prefix.
+
+\begin{figure*}[htbp]
+\centering
+\resizebox{\textwidth}{!}{\input{diagrams/causal-dag.tex}}
+\caption{Operation structure showing the OpHeader fields and payload variants, and the causal DAG deterministic topological sort breaking ties according to HLC and BLAKE3 Op-ID.}
+\label{fig:dag-structure-paperC}
+\end{figure*}
+
+Replay follows a deny-wins rule: each event is applied only if the actor held the required permission at that moment; unauthorized events become no-ops. Operations are disseminated via gossip and anti-entropy (libp2p); this affects liveness but not safety or determinism.
+
+\subsection{Authorization Epochs via Verifiable Credentials and Status Lists}
+
+\equack{} manages permissions using verifiable, time-bounded credentials. It adopts the W3C Verifiable Credentials (VC) format for signed authorization tokens asserting a principal's rights over a specific interval (validFrom--validUntil). Credentials are tamper-evident and self-verifying; replicas independently confirm authenticity and validity~\cite{8603785}.
+
+Revocations use standard VC status lists---cryptographically signed bitstrings indicating whether each credential ID is revoked. A valid credential defines an authorization epoch; expiry or revocation ends it.
+
+Trust evidence is carried in-band as TRUST events (issuer keys and status-list updates) and replayed into a local TrustView, anchored by a pinned, cross-signed genesis checkpoint. The log forms a distributed PKI: an offline node can verify at any timestamp that a user held a valid, non-revoked credential without contacting a central authority.
+
+During replay, the system checks for a valid credential covering each event's timestamp; if found, the operation applies, otherwise it is skipped.
+
+Trust operations (IssuerKey, IssuerKeyRevoke, StatusListChunk) build the TrustView incrementally during replay. When a VC must be checked, replicas parse the JWT, look up the issuer key in TrustView, verify the Ed25519 signature, check status-list revocation, and extract claims---all from in-band log state, with no online PKI lookups.
+
+\paragraph{Status propagation without external endpoints.}
+Unlike the W3C Bitstring Status List specification, which assumes HTTP-accessible status endpoints, \equack{} propagates status-list updates as in-band $\mathsf{TRUST}$ events in the causal DAG. This sidesteps the need for always-online StatusList URLs: status freshness is bounded by event propagation latency rather than HTTP polling intervals. The trade-off is that status information is only as fresh as the latest $\mathsf{TRUST}$ event a replica has received. \equack{}'s design is compatible with W3C Bitstring Status List at the data-format level; deployments with partial connectivity can supplement in-band propagation with periodic HTTP fetches when available.
+
+\subsection{Policy Semantics (Cedar) and Deny-Overrides Alignment}
+
+\equack{} uses a policy layer inspired by AWS's Cedar language (open-source ABAC). Policies may permit or forbid actions with a default deny stance; deny-overrides semantics ensure any matching forbid overrides all permits. The framework unifies RBAC and ABAC: roles are principal attributes, and Cedar's entity-attribute model supports hierarchical roles and contextual attributes. Policies are evaluated deterministically at each event's timestamp; identical inputs guarantee identical outcomes across replicas.
+
+A REVOKE event deterministically terminates any authorization epoch opened by a prior or concurrent GRANT, so earlier permits cannot ``win'' due to message reordering. Importantly, revocation is not irreversible: a GRANT \emph{after} a REVOKE in the replay order opens a fresh epoch (re-grant). For concurrent GRANT/REVOKE pairs, the deterministic linearization chooses a single order.
+
+\textbf{Replay Example.} Our compliance fixture contains an in-band \texttt{IssuerKey}, credential-and-grant pairs for two writers, 50 concurrent pre-revoke writes from each writer, a merge point, a \texttt{REVOKE} for one writer, and 10 post-revoke writes from each writer. Replay first builds the in-band TrustView, verifies both credentials, and opens epochs for both writers. The later \texttt{REVOKE} closes only writer~B's epoch in the deterministic replay order. As a result, all replicas apply both writers' pre-revoke writes, skip writer~B's post-revoke writes, and continue applying writer~A's writes.
+
+\paragraph{Cedar property transfer under eventual consistency.}
+Cedar's formal verification~\cite{cutler2024cedar} establishes decidability, totality, and soundness of authorization evaluation under a single consistent context---all entity data and policies are available and coherent at decision time. In \equack{}'s eventually consistent setting, this assumption holds locally (each replica evaluates deterministically given its local state) but not globally during partitions: two replicas may reach different permit/deny outcomes for the same request if one has received a forbid policy or revocation that the other has not. The deny-wins replay mechanism restores global consistency after convergence: once all replicas hold the same event set, replay re-evaluates every operation under the converged policy set, and the final materialized state $s^\star$ satisfies Cedar's deny-overrides semantics. Cedar's verified properties thus hold for $s^\star$ but not for the transient local decisions made during partitions. Formal verification of the replay mechanism itself---specifically, that deterministic linearization plus deny-wins gating preserves the intended authorization invariants---is future work and would require extending Cedar's Lean~4 proofs or independent mechanized checking.
+
+\paragraph{Deny-overrides as the combining algorithm.}
+The current model uses deny-overrides as the sole combining algorithm: any matching \texttt{forbid} policy overrides all \texttt{permit} policies. This is a deliberate safe default for multi-authority settings where no single authority should be able to override another authority's denial. Priority-based or temporal-precedence combining (e.g., last-writer-wins for policy updates) would require extending the epoch model to track policy precedence across authorities and is left as future work.
+
+\paragraph{Entity hierarchy staleness.}
+Entity attributes used in Cedar policy evaluation (e.g., role assignments, group memberships) may be stale during partitions: a replica that has not yet received an attribute-update event evaluates policies against outdated entity state. Because attribute changes are events in the causal DAG, they are replayed deterministically on convergence, and the final state $s^\star$ reflects the correct attribute values. Transient local decisions based on stale attributes are corrected during replay.
+
+Figure~\ref{fig:deny-wins-paperC} shows this replay slice and the epochs and gate outcomes it induces.
+
+\begin{figure*}[htbp]
+\centering
+\resizebox{\textwidth}{!}{\input{diagrams/fig-deny-wins.tex}}
+\caption{Deterministic replay slice from the compliance fixture. An in-band \texttt{IssuerKey} seeds TrustView, verified \texttt{Credential}+\texttt{Grant} pairs open epochs for writers A and B, and \texttt{Revoke(B)} closes only B's epoch. The deny-wins gate therefore applies both writers' pre-revoke data, skips B's post-revoke data, continues applying A's post-revoke data, and emits matching audit events.}
+\label{fig:deny-wins-paperC}
+\end{figure*}
+
+
+\subsection{Tamper-Evident Audit Trail}
+
+During replay, each replica emits a signed \emph{audit record} per DATA operation indicating applied/skipped status and reason. Records are linked in an append-only hash chain; any inconsistency is detectable relative to a pinned chain head digest (e.g., cross-signed checkpoint). Because replay is deterministic, independent replicas with the same event set compute identical audit traces and can validate each other after reconciliation (R4).
+
+\subsection{Confidentiality and Key Rotation}
+
+\equack{} supports an optional per-tag payload encryption layer. Each DATA operation carries ciphertext $c := \mathsf{Enc}_{K_{\tau}^{(v)}}(m)$ with key version $v$ (XChaCha20-Poly1305). Ciphertext is replicated for convergence; access control is enforced at \emph{query time} via the deny-wins gate, with unauthorized subjects receiving a redacted view. On revocation, a KeyRotate event advances to $K_{\tau}^{(v+1)}$, distributed in-band via KeyGrant records encrypted to authorized subjects' public keys. This provides \emph{leaver security}: revoked subjects lacking $K_{\tau}^{(v+1)}$ cannot decrypt post-rotation ciphertexts. This component is experimental; we treat confidentiality results as indicative.
+
+\subsection{Formal Model and Guarantees}\label{subsec:ecac-model-paperC}
+
+Let $\mathsf{Subj}$ be subjects (principals), $\mathsf{Res}$ resources, $\mathsf{Act}$ actions, and $\mathsf{Attr}$ attribute valuations.
+Physical time is measured in milliseconds as $(T_{\mathrm{ms}}=\mathbb{N}, \le)$.
+Let $\mathsf{NodeId}$ be replica identifiers, and let hybrid logical clock timestamps range over
+$T_{\mathrm{hlc}} := T_{\mathrm{ms}} \times \mathbb{N} \times \mathsf{NodeId}$ ordered lexicographically.
+Let $\mathrm{phys} : T_{\mathrm{hlc}} \to T_{\mathrm{ms}}$ project the physical millisecond component.
+We use $T_{\mathrm{ms}}$ for credential validity intervals and status freshness, and $T_{\mathrm{hlc}}$ (via lexicographic order) only for deterministic linearization.
+Let $\mathsf{H}$ be a collision-resistant hash and $\mathsf{Sig}_k(\cdot)$ a secure signature scheme.
+
+\medskip
+\noindent\textbf{Verifiable credentials and trust.}
+A verifiable credential (VC) is a tuple
+\[
+  c = \langle s,\, \alpha,\, V,\, \mathrm{nb},\, \mathrm{na},\, \sigma_I\rangle
+\]
+where $s\!\in\!\mathsf{Subj}$, $\alpha\!\in\!\mathsf{Attr}$ (roles/scopes), $V$ issuer identifier,
+and $\mathrm{nb},\mathrm{na}\!\in\!\mathbb{T}$ are not-before/after bounds.
+$\sigma_I$ is a signature under issuer key $K_V$.
+A status list is a signed, time-versioned snapshot published by issuer $V$ that maps credential identifiers to $\{\mathsf{good},\mathsf{revoked}\}$.
+We model status evidence as a sequence of $\mathsf{TRUST}$ events that carry status-list updates (or chunks).
+Let $\mathsf{SL}^{i}_{V}$ denote the status map materialized by replaying all $\mathsf{TRUST}$ events with $\mathrm{pos}(e) \le i$ and taking the latest published status for each credential id.
+When validating a credential for an event $e$, we query $\mathsf{SL}^{\mathrm{pos}(e)}_{\mathrm{iss}(c)}(\mathrm{id}(c))$.
+A \emph{TrustView} event carries (i) issuer keys $\{K_V\}$ and (ii) status-list updates, recorded in-band so replicas can validate VCs offline using the latest status snapshot up to $t$ in the replay order.
+
+\medskip
+\noindent\textbf{Events and log.}
+Events are partitioned as
+\[
+  \mathsf{Ev} \;=\; \mathsf{DATA}\;\uplus\;\mathsf{GRANT}\;\uplus\;\mathsf{REVOKE}\;\uplus\;\mathsf{TRUST}\;\uplus\;\mathsf{KEY}.
+\]
+The subset $\mathsf{KEY}$ contains key-management events (e.g., \textsc{KeyRotate}, \textsc{KeyGrant}) that update per-tag key state used for query-time decryption.
+Each event $e\in\mathsf{Ev}$ has an \emph{unsigned} header $h_0(e)$ containing domain fields, causal parents $\mathsf{par}(e)\subseteq\mathsf{Ev}$, a hybrid logical clock $\mathrm{hlc}(e)\in\mathbb{T}$ assigned by the producing replica, the producer public key $\mathrm{pk}_r$, and the payload (or a payload hash). We define the event identifier as
+\[
+  \mathsf{op\_id}(e) := \mathsf{H}(\mathrm{domain}\,\|\,\mathrm{CBOR}(h_0(e))).
+\]
+The producing replica signs this identifier:
+\[
+  \sigma_e := \mathrm{Sig}_{\mathrm{sk}_r}(\mathsf{op\_id}(e)).
+\]
+Signing $\mathsf{op\_id}(e)$ is sufficient because $\mathsf{op\_id}(e)$ commits to the canonical bytes of $h_0(e)$ under collision resistance of $\mathsf{H}$.
+The full header is $h(e) := (h_0(e), \sigma_e)$. This avoids any circularity: $\mathsf{op\_id}(e)$ is derived from the unsigned header, and $\sigma_e$ covers $\mathsf{op\_id}(e)$.
+The \emph{signed, hash-linked op log} is an append-only bag of events with edges $e'\!\to\! e$ for $e'\in\mathsf{par}(e)$.
+The induced graph $G=(\mathsf{Ev},E)$ must be a DAG; this causal DAG defines the partial order $\prec$ as the transitive closure of $E$.
+
+\medskip
+\noindent\textbf{Deterministic linearization.}
+Let the deterministic key be
+\[
+  k(e) := \big(\mathrm{hlc}(e),\mathsf{op\_id}(e)\big),
+\]
+ordered lexicographically. Define the replay sequence $\langle e\rangle_{\triangleleft}$ as the output of Algorithm~\ref{alg:linearize-paperC} applied to the causal DAG $G$. We then define $e_i \triangleleft e_j$ iff $e_i$ appears before $e_j$ in $\langle e\rangle_{\triangleleft}$.
+
+\begin{algorithm}[t]
+\caption{Deterministic linearization of a causal DAG}
+\label{alg:linearize-paperC}
+\begin{algorithmic}[1]
+\Require DAG $G=(V,E)$, key $k(e)=(\mathrm{hlc}(e),\mathsf{op\_id}(e))$
+\Ensure Sequence $L$ that is a deterministic linear extension of $\prec$
+\State $\mathrm{indeg}[v] \gets |\{(u,v)\in E\}|$ for all $v\in V$
+\State $Q \gets$ min-priority queue ordered by $k(\cdot)$
+\ForAll{$v\in V$ with $\mathrm{indeg}[v]=0$}
+  \State $Q.\mathrm{push}(v)$
+\EndFor
+\State $L \gets [\ ]$
+\While{$Q$ not empty}
+  \State $v \gets Q.\mathrm{pop\_min}()$
+  \State append $v$ to $L$
+  \ForAll{$(v,w)\in E$}
+    \State $\mathrm{indeg}[w] \gets \mathrm{indeg}[w]-1$
+    \If{$\mathrm{indeg}[w]=0$}
+      \State $Q.\mathrm{push}(w)$
+    \EndIf
+  \EndFor
+\EndWhile
+\State \Return $L$
+\end{algorithmic}
+\end{algorithm}
+
+\noindent Let $\langle e \rangle_{\triangleleft} = [e_0,\dots,e_{n-1}]$ be the output of Algorithm~\ref{alg:linearize-paperC}.
+Define the deterministic replay position $\mathrm{pos}(e_i) := i$.
+
+If two events $e_A$ and $e_B$ are concurrent and both are ready (zero indegree) at some step, Algorithm~\ref{alg:linearize-paperC} selects the smaller key: if $\mathrm{hlc}(e_A)<\mathrm{hlc}(e_B)$ then $e_A$ is chosen first; if equal, the smaller $\mathsf{op\_id}$ is chosen.
+
+
+\medskip
+\noindent\textbf{Authorization epochs.}
+Epochs are computed deterministically by replaying non-\textsc{DATA} events in $\langle e \rangle_{\triangleleft}$.
+A \textsc{GRANT} event $g$ at position $p_g := \mathrm{pos}(g)$ that references a valid credential opens an epoch record
+$\mathsf{ep} = \langle s,a,\mathrm{scope}, p_{\mathrm{start}}{=}p_g, p_{\mathrm{end}}{=}\infty, \mathrm{nb}, \mathrm{na} \rangle$.
+A \textsc{REVOKE} event $r$ at position $p_r := \mathrm{pos}(r)$ closes matching open epochs by setting
+$p_{\mathrm{end}} := \min(p_{\mathrm{end}}, p_r)$.
+We write $\mathsf{ep}\in \mathsf{Epochs}(s,a)$ for epochs associated with subject $s$ and action $a$.
+
+\medskip
+For subject $s$, scope $a\!\in\!\mathsf{Act}$, and event $e$, define the authorization predicate
+\[
+\begin{aligned}
+\mathsf{Auth}(s,a,e) := \exists c\ \text{s.t.}\ & \mathrm{phys}(\mathrm{hlc}(e)) \in [\mathrm{nb},\mathrm{na})\ \land\ c \text{ grants }(s,a)\\
+& \land\ \mathsf{SL}^{\mathrm{pos}(e)}_{\mathrm{iss}(c)}(\mathrm{id}(c))=\mathsf{good}.
+\end{aligned}
+\]
+Status-list TTL is a freshness hint for operational policy; our determinism guarantees assume replicas replay the same TrustView history, while deployments may additionally deny decisions when status evidence is older than a configured threshold.
+
+\medskip
+\noindent\textbf{Policy engine and deny-wins gate.}
+Let $\mathcal{P}$ denote the Cedar policy, modeled as a total function
+\[
+  \mathcal{P} : \mathsf{Subj}\times\mathsf{Act}\times\mathsf{Res}\times\mathsf{Attr}\to\{\mathsf{allow},\mathsf{deny}\},
+\]
+with \emph{deny-overrides} semantics.
+For a $\mathsf{DATA}$ event $e$ with tuple $(s,a,r,\alpha_e)$, define:
+% \[
+% \mathsf{Gate}(e) := \Big(\exists \mathsf{ep}\in \mathsf{Epochs}(s,a)\; \text{s.t.}\;
+% \mathrm{pos}(e)\in [p_{\mathrm{start}}, p_{\mathrm{end}})
+% \;\wedge\; 
+% \mathrm{phys}(\mathrm{hlc}(e))\in [\mathrm{nb},\mathrm{na})
+% \Big)\;\wedge\; \mathcal{P}(s,a,r,\alpha_e)=\mathsf{allow}.
+% \]
+\[
+\begin{aligned}
+\mathsf{Gate}(e) :=\;&
+\Big(
+    \exists\, \mathsf{ep} \in \mathsf{Epochs}(s,a)
+    \;\text{s.t.}\; \\
+&\qquad
+    \mathrm{pos}(e) \in [p_{\mathrm{start}}, p_{\mathrm{end}})
+    \;\wedge \\
+&\qquad
+    \mathrm{phys}(\mathrm{hlc}(e))
+    \in [\mathrm{nb}, \mathrm{na})
+\Big) \\
+&\wedge\;
+\mathcal{P}(s,a,r,\alpha_e) = \mathsf{allow}.
+\end{aligned}
+\]
+If \emph{any} deny applies, $\mathcal{P}$ returns $\mathsf{deny}$ and the DATA op is skipped (deny-wins).
+
+\medskip
+\noindent\textbf{CRDT layer and state.}
+Let $(\mathcal{S},\bullet)$ be the state space with a deterministic update function
+$U:\mathcal{S}\times\mathsf{DATA}\to\mathcal{S}$.
+We assume the DATA payloads target CRDTs such as $\mathrm{MVReg}$ and $\mathrm{OR\!-\!Set}$ whose effect under the same total order is deterministic.
+Given initial state $s_0$, define \emph{deterministic replay} over the sequence $\langle e\rangle_{\triangleleft}$:
+\[
+\begin{aligned}
+\mathsf{Replay}(s_0, \langle e\rangle_{\triangleleft}) :=\ &
+\mathrm{fold}\Big(s_0,\ \lambda(s,e).\\
+& \begin{cases}
+  U(s,e) & \text{if } e\in\mathsf{DATA}\ \land\ \mathsf{Gate}(e)\\
+  s      & \text{otherwise}
+  \end{cases}\Big).
+\end{aligned}
+\]
+The \emph{materialized state} is $s^\star := \mathsf{Replay}(s_0,\langle e\rangle_{\triangleleft})$.
+Checkpoints store $(\mathsf{H}(s^\star),\mathrm{meta})$ periodically together with the append-only event store.
+
+\medskip
+\noindent\textbf{Audit trail.}
+Define the audit stream as a sequence of records
+\[
+\begin{aligned}
+\mathsf{Aud}(i) &= \big\langle e_i,\ \mathsf{Gate}(e_i),\ \mathsf{H}(s_i)\big\rangle,\\
+\mathrm{ch}_0 &:= \bot,\quad
+\mathrm{ch}_{i+1} := \mathsf{H}\!\big(\mathrm{ch}_i \,\|\, \mathsf{Aud}(i)\big),
+\end{aligned}
+\]
+signed by the auditing replica (producer) to yield a tamper-evident chain $(\mathrm{ch}_i)$ of applied/skipped decisions.
+
+\medskip
+\noindent\textbf{Confidentiality and key rotation.}
+Let $\mathsf{Tag}$ denote data tags; each tag $\tau$ has a versioned symmetric key $K_{\tau}^{(v)}$. A DATA payload $m$ is stored as $(c,v)$ where $c := \mathsf{Enc}_{K_{\tau}^{(v)}}(m)$. Ciphertexts are replayed and replicated for convergence; authorization controls \emph{decryption} at query time. On a KeyRotate event for $\tau$ at time $t_r$, the current key version advances to $v{+}1$ and subsequent writes use $v{+}1$; KeyGrant records distribute $K_{\tau}^{(v+1)}$ only to subjects authorized to read $\tau$ after $t_r$.
+
+Events are disseminated via secure anti-entropy gossip; missing parents are fetched until $G$ is complete.
+This affects \emph{when} a replica can replay but not \emph{what} $s^\star$ is, once the same set of events is present.
+
+\paragraph{Pre-convergence safety window.} Let $r$ be a revocation event created at physical time $t_r$ on some replica. Define the \emph{safety window} $W(r)$ as the interval $[t_r, t_{\text{heal}}]$ where $t_{\text{heal}}$ is the earliest time at which all correct replicas have received $r$ via anti-entropy. During $W(r)$, replicas that have not yet received $r$ may accept operations from the revoked principal under stale authorization evidence. Under the bounded partition assumption (Section~2.3, item~4), $W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$ is finite.
+
+\equack{} does not prevent tentative authorization during $W(r)$; it guarantees that the materialized state $s^\star$ computed after reconciliation reflects $r$. Specifically, any $\mathsf{DATA}$ event $e$ from the revoked subject with $\mathrm{pos}(e) \geq \mathrm{pos}(r)$ in the deterministic order $\triangleleft$ is skipped by the deny-wins gate, regardless of which replica originally accepted $e$. This provides \emph{retroactive revocation safety}: the final digital state is consistent with the revocation, even though individual replicas may have temporarily acted on stale evidence. In contrast, Zanzibar's Zookie mechanism~\cite{zanzibar2019} provides real-time revocation at the cost of availability during partition (consistent with CAP theorem constraints). \equack{} trades real-time revocation for availability, repairing safety on merge.
+
+\subsubsection{Main Theorems (Formal Guarantees)}
+
+\noindent\textbf{Requirements vs.\ formal guarantees.}
+R1--R6 in Section~\ref{subsec:requirements-paperC} are \emph{system-level requirements} (deployability and security objectives) for offline-first, multi-stakeholder settings.
+The theorems below are \emph{formal guarantees} about \equack{}'s deterministic replay semantics and audit/confidentiality mechanisms under the model assumptions.
+The gap analysis (Table~\ref{tab:gap-summary-paperC}) maps R1--R6 to paradigm coverage; the theorems below formalize the guarantees, and the evaluation (Section~\ref{sec:eval-paperC}) provides empirical evidence.
+
+\noindent\textbf{Theorem~1 (Determinism).}
+\textit{For any DAG $G$ and initial state $s_0$, the order $\triangleleft$ is unique and
+$\mathsf{Replay}(s_0,\langle e\rangle_{\triangleleft})$ yields a unique $s^\star$.}
+
+
+Algorithm~\ref{alg:linearize-paperC} is Kahn's topological sort with a deterministic min-heap over the ready set. For a fixed DAG $G$ and a total key order $k$, it produces a unique linear extension $\langle e\rangle_{\triangleleft}$. Replay is a pure fold over this sequence with a deterministic update function, hence yields a unique $s^\star$.
+
+\medskip
+\noindent\textbf{Theorem~2 (Convergence).}
+\textit{Fix bootstrap anchors $B$ consisting of a pinned, cross-signed genesis checkpoint digest (and the stakeholder public keys used to validate it).
+Let two replicas start from the same anchors $B$ and ingest the same multiset of well-formed events (including $\mathsf{TRUST}$ and $\mathsf{KEY}$ events).
+Then their materialized states are byte-identical: $s^\star_1 = s^\star_2$.}
+
+
+Both replicas begin from the same anchored initial trust/policy state implied by $B$, ingest the same event set, and thus compute the same causal DAG $G$.
+Algorithm~\ref{alg:linearize-paperC} yields the same $\triangleleft$ order, hence the same $\mathrm{pos}(\cdot)$ assignments, the same epoch construction, and the same deny-wins gate decisions.
+Applying the same ordered sequence of authorized \textsc{DATA} updates under deterministic $U$ yields identical $s^\star$.
+
+\medskip
+\noindent\textbf{Theorem~3 (Policy-Safety, deny-wins).}
+\textit{Every effect in $s^\star$ originates from a $\mathsf{DATA}$ event $e$ such that $\mathsf{Gate}(e)$ held at position $\mathrm{pos}(e)$.
+If any deny applies (policy or missing epoch), $e$ has no effect.}
+
+
+By definition of $\mathsf{Replay}$: unauthorized DATA are skipped; deny overrides return $\mathsf{deny}$, hence no state transition occurs.
+
+\medskip
+\noindent\textbf{Theorem~4 (Audit tamper-evidence).}
+\textit{Let $\mathrm{ch}_N$ be a pinned audit-chain head digest for the first $N$ records (obtained out-of-band or via cross-signing). If the audit chain verifies and the computed head equals $\mathrm{ch}_N$, then any modification to the first $N$ audit records (deletion, insertion, reordering, or bit-flip) is detectable with overwhelming probability.}
+
+
+The head digest is a collision-resistant hash of the prefix. Any change to the prefix changes the computed head unless the adversary finds a collision/second preimage or forges a signature.
+
+\medskip
+\noindent\textbf{Theorem~5 (Leaver security).}
+\textit{Fix a tag $\tau$ and a rotation event at time $t_r$ that advances to key version $v{+}1$. Assume IND-CPA encryption and that $K_{\tau}^{(v+1)}$ is delivered only to subjects authorized for $\mathrm{read}_\tau$ at times $\ge t_r$. Then any subject not authorized for $\mathrm{read}_\tau$ at times $\ge t_r$ cannot decrypt ciphertexts produced under version $v{+}1$, except with negligible probability.}
+
+
+By assumption, unauthorized subjects do not obtain $K_{\tau}^{(v+1)}$. Under IND-CPA security, ciphertexts under an unknown key reveal no information about plaintext beyond negligible probability.
+
+
+\section{Implementation}\label{sec:impl-paperC}
+
+\equack{}-core is a Rust library organized into four crates that map directly to the conceptual model:
+
+\begin{itemize}
+    \item \texttt{core}: Operations, DAG construction, deterministic replay, policy evaluation (Cedar), VC parsing and verification, and CRDT state (MVReg, OR-Set). This crate implements the formal model from Section~\ref{subsec:ecac-model-paperC}.
+    \item \texttt{store}: RocksDB persistence, checkpoint creation and restoration, and audit chain management. Implements the checkpoint and audit mechanisms.
+    \item \texttt{net}: libp2p-based gossip dissemination and anti-entropy synchronization. Implements the liveness layer.
+    \item \texttt{cli}: Command-line interface for workload generation, log manipulation, and experiment execution.
+\end{itemize}
+
+The implementation uses Ed25519 for signatures, BLAKE3 for hashing, XChaCha20-Poly1305 for encryption, and SHA-256 for status list bitstrings. Operations are serialized in CBOR. The prototype comprises approximately 8,500 lines of Rust (excluding tests).
+
+Table~\ref{tab:impl-mapping-paperC} maps conceptual elements to implementation modules.
+
+\begin{table}[htbp]
+\centering
+\caption{Mapping from conceptual model to implementation modules.}
+\label{tab:impl-mapping-paperC}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Conceptual Element} & \textbf{Implementation Module} \\
+\midrule
+Causal DAG ($G$, $\prec$) & \texttt{core::dag} \\
+Deterministic order ($\triangleleft$) & \texttt{core::replay::topo\_sort} \\
+Authorization epochs & \texttt{core::epoch} \\
+Deny-wins gate ($\mathsf{Gate}$) & \texttt{core::policy::gate} \\
+TrustView assembly & \texttt{core::trust} \\
+VC verification & \texttt{core::vc} \\
+CRDT state ($\mathcal{S}$, $U$) & \texttt{core::crdt} \\
+Audit chain & \texttt{store::audit} \\
+Checkpoints & \texttt{store::checkpoint} \\
+Per-tag encryption & \texttt{core::crypto} \\
+Gossip/sync & \texttt{net::gossip} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Evaluation}
+\label{sec:eval-paperC}
+
+We evaluate \equack{} through deterministic experiments that provide empirical evidence for the formal guarantees (R2--R5) and quantify replay cost. All experiments use fixed seeds and a deterministic environment (\texttt{TZ=UTC, SOURCE\_DATE\_EPOCH=1}), and assume offline operation without continuous global consensus (R1).
+
+\subsection{Methodology}\label{subsec:methodology-paperC}
+
+Experiments ran on a single Linux x86\_64 workstation using Rust 1.85 in release mode. Multi-node convergence (E12) uses in-process deterministic simulation; partition behavior is validated via offline log merges. State digests are computed as $\mathrm{blake3}(\mathrm{DOMAIN}\,\|\,\mathrm{canon}(\textit{state}))$, where $\mathrm{canon}(\cdot)$ is a deterministic byte serialization with stable key ordering.
+
+We use three synthetic workloads (Table~\ref{tab:workloads-paperC}) and two policy-focused CBOR logs. The \emph{hb-chain} workload is a single writer appending sequentially to one key, giving a baseline with no concurrency or policy overhead. The \emph{concurrent} workload has eight writers modifying the same key, stressing the MVReg CRDT's conflict resolution. The \emph{offline-revocation} workload mixes writes with mid-workload revocations, forcing epoch recalculation during replay. Two additional logs exercise deny-wins behavior: \texttt{e3-policy.cbor} (grant, 500 writes, revoke, 500 writes) and \texttt{e4-policy.cbor} (multi-issuer grants, revoke, post-revoke writes). For the partition scenario, logs \texttt{partition-A.cbor} and \texttt{partition-B.cbor} were generated and merged to model revocation propagation on reconnection.
+
+\begin{table}[htbp]
+\centering
+\caption{Synthetic Workload Characteristics}
+\label{tab:workloads-paperC}
+
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.1}
+
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Workload} & \textbf{Writers} & \textbf{Policy Ops} & \textbf{Key Dist.} & \textbf{Purpose} \\
+\midrule
+hb-chain                    & 1 & 0\%   & Single & Baseline \\
+concurrent                  & 8 & 0\%   & Single & CRDT stress \\
+offline-\allowbreak revocation & 8 & Mixed & Single & Policy overhead \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Correctness}\label{subsec:correctness-paperC}
+
+\paragraph*{\textit{Convergence (E1, R2)}}
+A 10{,}000-op concurrent-workload log was permuted into 100 valid orderings (respecting causal dependencies) and each was replayed independently. All 100 produced the same digest (\texttt{\small cbab89ee\ldots b7f493b2}), with mean replay time 615~ms ($\sigma=18$~ms).
+
+\paragraph*{\textit{Deny-wins revocation (E3, R3)}}
+User $U$ was granted write access, performed 1{,}000 writes, and had the credential revoked after write~500. The 1{,}004-op log (1{,}000 Data + IssuerKey, Credential, Grant, Revoke) was replayed: the first 500 writes applied, the remaining 500 skipped. Digest: \texttt{\small 8da8b49e\ldots 46633fbf}.
+
+\paragraph*{\textit{Revocation under partition (E11, R3)}}
+In partition~A a user is revoked; partition~B, which has not yet received the revocation, contains further writes from the same user. After merging both logs and replaying, the 50 pre-revocation writes (both partitions) were applied and all 10 post-revocation writes from partition~B were skipped (merged digest: \texttt{\small 69fae61e\ldots 1a2986c1}). This is the scenario \equack{} was designed for.
+Figure~\ref{fig:partition-heal-paperC} visualizes this repair-on-heal semantics: a partitioned replica may locally accept stale writes, but those writes are not part of the final digital state unless they remain authorized after the union log is replayed.
+
+\begin{figure*}[t]
+\centering
+\resizebox{\textwidth}{!}{\input{diagrams/fig-partition-heal.tex}}
+\caption{Partition-heal semantics of deterministic deny-wins replay. Replicas share a common prefix before partition. During the partition, replica~A receives \texttt{Revoke(U)} while replica~B, still missing that event, locally accepts subsequent writes by $U$ under stale evidence. After anti-entropy, all replicas replay the union log in the same deterministic order; the revoke closes $U$'s epoch, the post-revoke writes are skipped, and every replica converges to the same final state digest.}
+\label{fig:partition-heal-paperC}
+\end{figure*}
+
+\paragraph*{\textit{Multi-authority conflict (E4, R5)}}
+Three issuers ($I_1$, $I_2$, $I_3$) with overlapping authority grant user $U$ the ``editor'' role at $t_1$, $t_2$; $I_3$ revokes at $t_3>t_2$. The resulting 128-op log was injected into 10 replicas in random orders. All converged to the same digest (\texttt{\small f2fbb024\ldots 1103c2b2}): writes during $[t_1,t_3)$ accepted, writes after $t_3$ skipped.
+
+\paragraph*{\textit{Audit integrity (E5, R4)}}
+An audited log was generated and the chain head digest $\mathrm{ch}_N$ was recorded. Three tamper modes were applied: (1)~a byte flip in one record's payload, (2)~deletion of one record from the pinned prefix, and (3)~a swap of two adjacent records. Chain verification against $\mathrm{ch}_N$ succeeded on the untampered log and failed on all three mutations, detecting each at the exact tampered record.
+
+\paragraph*{\textit{Cross-platform determinism (E2)}}
+A 127-op CBOR fixture exercises all event categories (Data, Grant, Revoke, Trust) and includes true concurrency. A CI test replays it and asserts the final digest equals a hardcoded constant (\texttt{\small 4ea9684a\ldots bdc2b9}, blake3). Any replay-engine change that alters the digest breaks the build, following the approach of cross-environment consistency verification~\cite{7163066}. Full cross-platform validation (aarch64, macOS, Windows) awaits CI infrastructure.
+
+\paragraph*{\textit{Multi-node sync (E12)}}
+In an in-process simulation, three nodes each generated 1{,}000 ops independently, then synced; all converged. A second scenario partitioned node~C while A issued a Revoke targeting C. After healing and full sync, all three nodes held the same digest, with C's post-revoke ops gated out (Table~\ref{tab:e12-sync-paperC}).
+
+\begin{table}[htbp]
+\centering
+\caption{Multi-node sync convergence (E12)}
+\label{tab:e12-sync-paperC}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Scenario} & \textbf{Ops} & \textbf{Sync (ms)} & \textbf{Bytes} & \textbf{Msgs} & \textbf{Replay (ms)} \\
+\midrule
+No partition     & 3,000 & 13  & 2.5\,MB & 6,000 & 411 \\
+Partition + heal & 3,000 & 7   & 1.3\,MB & 3,201 & 368 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Performance}\label{subsec:performance-paperC}
+
+\paragraph*{\textit{Replay scaling (E6)}}
+Hb-chain logs at six sizes (10K--500K ops) were each replayed in 5 trials, measuring both full replay and incremental replay from a 90\% checkpoint (Table~\ref{tab:e6-replay-paperC}).
+
+\begin{table}[htbp]
+\centering
+\caption{Replay time vs.\ log size (mean $\pm$ std, 5 trials)}
+\label{tab:e6-replay-paperC}
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+\textbf{Ops} & \textbf{Full (ms)} & \textbf{Incr.\ (ms)} & \textbf{Speedup} \\
+\midrule
+10,000  & $949 \pm 395$   & $98 \pm 37$     & 9.7$\times$ \\
+20,000  & $1{,}294 \pm 79$  & $147 \pm 21$    & 8.8$\times$ \\
+50,000  & $3{,}328 \pm 233$ & $404 \pm 54$    & 8.2$\times$ \\
+100,000 & $6{,}071 \pm 92$  & $708 \pm 86$    & 8.6$\times$ \\
+250,000 & $13{,}689 \pm 1{,}814$ & $1{,}644 \pm 232$ & 8.3$\times$ \\
+500,000 & $26{,}616 \pm 2{,}091$ & $3{,}137 \pm 310$ & 8.5$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Full replay scales linearly ($\approx$0.052~ms/op, $R^2>0.99$), giving $\approx$19K~ops/s sustained throughput on the hb-chain workload. Incremental replay from a 90\% checkpoint yields 8--11$\times$ speedup across all sizes; the factor is stable because checkpoint restore is $O(1)$ and the suffix cost is proportional to 10\% of the log. Checkpoint creation overhead is under 10~ms.
+
+\paragraph*{\textit{Throughput by workload (E7)}}
+Throughput varies with workload complexity (Table~\ref{tab:e7-throughput-paperC}). Linear chains achieve the highest rate; concurrent writes reduce throughput because of MVReg conflict resolution; policy-heavy workloads show modest epoch-construction overhead.
+
+\begin{table}[htbp]
+\centering
+\caption{Replay throughput by scenario}
+\label{tab:e7-throughput-paperC}
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Scenario} & \textbf{Throughput (ops/s)} \\
+\midrule
+hb-chain (linear)           & 45,000 \\
+concurrent (8 writers)      & 7,000  \\
+offline-revocation          & 28,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph*{\textit{Storage and memory (E8, E9)}}
+CBOR log size grows linearly at $\approx$430~bytes/op; RocksDB write amplification brings the on-disk cost to $\approx$800~B/op (Table~\ref{tab:e8-storage-paperC}). Checkpoint state remains under 200~bytes for the single-key workload. Peak RSS during replay grows at $\approx$1.7~KB/op (Table~\ref{tab:e9-memory-paperC}), dominated by the in-memory DAG and CRDT state.
+
+\begin{table}[htbp]
+\centering
+\caption{Storage growth vs.\ op count}
+\label{tab:e8-storage-paperC}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+\textbf{Ops} & \textbf{CBOR Log} & \textbf{Ckpt State} & \textbf{Store Total} & \textbf{B/op} \\
+\midrule
+10,000  & 4.1\,MB   & 122\,B & 7.7\,MB   & 804 \\
+50,000  & 20.6\,MB  & 118\,B & 37.8\,MB  & 792 \\
+100,000 & 41.4\,MB  & 127\,B & 75.7\,MB  & 793 \\
+500,000 & 208.9\,MB & 130\,B & 555.8\,MB & 1,165 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Peak RSS during replay}
+\label{tab:e9-memory-paperC}
+\begin{tabular}{@{}rrr@{}}
+\toprule
+\textbf{Ops} & \textbf{Peak RSS (MB)} & \textbf{Replay (ms)} \\
+\midrule
+20,000  & 31   & 1,331  \\
+100,000 & 131  & 6,571  \\
+250,000 & 421  & 34,622 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph*{\textit{Confidentiality overhead (E13, E14)}}
+Per-tag encryption adds $\sim$6.5\% replay overhead (76.8 vs.\ 81.8~ms on 100 writes) with 40~bytes/payload ciphertext expansion. Key rotation costs $\sim$78~ms per KeyRotate event. These are small-scale measurements; larger logs are needed to separate per-op cost from startup overhead.
+
+
+\subsection{Limitations and Threats to Validity}\label{subsec:limitations-paperC}
+
+Disconnected nodes cannot learn of revocations until they sync~\cite{10.1007/978-3-030-01950-1_48}. The vulnerability window equals partition duration: operations written by a revoked user are invalidated on reconnection, but not before. The append-only log grows monotonically~\cite{8805074}, and the full log must be retained for audit. Log compaction with verifiable snapshots~\cite{DEEPA2022209} could bound storage but remains future work. Long-offline nodes face a proportionally large replay on reconnection; checkpoints help but do not eliminate this. Per-tag encryption protects payloads, yet operation structure, timestamps, and producer keys remain visible~\cite{kohlweiss2015accountable}; full metadata privacy would require anonymous credentials, ABE, or zero-knowledge proofs~\cite{8888155,8664491,zhang2020attribute}. Revocation also cannot undo physical-world actions already taken (e.g., an actuator that has fired). Applications needing staged commit must handle this themselves.
+
+Regarding validity: E6 covers six log sizes with five trials each, but E8 and E9 use fewer sizes and a single workload. All numbers come from one Linux x86\_64 machine, and E12 uses in-process simulation rather than real network transport. The workloads are synthetic; validation on production traces is future work. E2 determinism is verified on one platform; cross-platform validation (aarch64, macOS, Windows) awaits CI infrastructure.
+
+\section{Discussion}
+\label{sec:discussion-paperC}
+
+\paragraph*{\textit{The partition-duration trade-off}}
+\equack{}'s deny-wins gate repairs authorization state after partition heal, but it cannot prevent unauthorized effects during the partition itself. A revoked user's writes are retroactively invalidated when logs merge, yet any physical-world consequences of those writes (actuator commands, parameter changes applied to running equipment) persist. The vulnerability window is exactly the partition duration. For short disconnections---minutes to a few hours, typical of scheduled maintenance windows---operators can defer safety-critical actuations until sync confirms authorization. For day-long partitions in remote deployments, the exposure is more serious and may require application-layer compensating controls (staged commit, human-in-the-loop confirmation) that \equack{} does not prescribe. The guarantees are about the \emph{digital} state; the physical world cannot be rewound.
+
+\paragraph*{\textit{Scalability scope}}
+The evaluation numbers bound where \equack{} is and is not a good fit. Memory grows at $\approx$1.7~KB/op (Table~\ref{tab:e9-memory-paperC}), so a 256\,MB edge device can hold roughly 150K operations before paging---enough for weeks of maintenance logs on a single controller, but not for high-frequency telemetry streams. Replay throughput drops from 45K~ops/s on linear chains to 7K~ops/s with eight concurrent writers (Table~\ref{tab:e7-throughput-paperC}), a $6.4\times$ reduction driven by MVReg conflict resolution. Real deployments will have more keys and more writers; the scaling behavior under those conditions is untested. The append-only log compounds this: at $\approx$430~bytes/op in CBOR, a million-operation log occupies $\sim$430\,MB before RocksDB write amplification. Without log compaction, long-lived deployments will eventually need to archive and prune, a mechanism the current design defers to future work (verifiable snapshots~\cite{DEEPA2022209}). These constraints mean \equack{} fits authorization-rate workloads (access decisions per minute, not per millisecond) on devices with at least modest storage---industrial controllers, maintenance laptops, gateway nodes---rather than high-throughput data-plane enforcement.
+
+\paragraph*{\textit{Deny-wins conservatism}}
+The deny-wins semantics are deliberately conservative: when a GRANT and REVOKE are concurrent, the revoke wins. This is the safe default for settings where over-granting is riskier than over-denying, such as safety-parameter updates on shared equipment. But it has practical consequences. An erroneous revocation during a partition retroactively voids all subsequent work by that subject, even if the revocation was itself a mistake. The re-grant mechanism (Section~\ref{subsec:ecac-model-paperC}) allows recovery---a new GRANT after the REVOKE opens a fresh epoch---but this requires a second authority action that may not be timely during disconnection. Systems where availability is more important than safety (e.g., collaborative editing in low-risk domains) might prefer a \emph{permit-wins} or \emph{last-writer-wins} policy for certain operation types. \equack{}'s Cedar policy layer could, in principle, express such rules, but the epoch/gate mechanism currently hard-codes deny-wins at the replay level. Making this configurable per scope or resource type is a straightforward extension, though it would complicate the convergence argument.
+
+\paragraph*{\textit{In-band trust: benefits and costs}}
+Carrying issuer keys and status-list updates as replicated log events eliminates the need for online PKI lookups, which is what makes offline VC verification possible. The cost is that every replica stores all trust material, and the TrustView grows with each issuer key registration and status-list chunk. In the evaluated workloads this overhead is negligible (a handful of trust events per log), but a deployment with frequent key rotations across many issuers would see meaningful log growth from trust material alone. The pinned genesis checkpoint anchors the entire trust chain; its creation is a cross-signing ceremony that the current paper treats as a precondition rather than specifying its protocol. For multi-organization deployments, the governance of this ceremony---who signs, how keys are distributed, how the genesis is updated when organizations join or leave---is an open design problem that we have not addressed.
+
+\paragraph*{\textit{Comparison scope}}
+The gap analysis (Table~\ref{tab:gap-summary-paperC}) and mechanism comparison (Table~\ref{tab:mech-compare}) evaluate \equack{} against paradigm categories rather than specific systems, because no existing system combines CRDT-based replication with in-band VCs and a deny-wins gate. A fair question is how \equack{} compares to a CRDT with application-level access-control logic bolted on. The difference is where enforcement runs: application-level checks execute at ingest time and cannot retroactively invalidate operations accepted under stale evidence during a partition; \equack{}'s replay-time gate can, which is what provides R3. The absence of a directly comparable system makes head-to-head benchmarking infeasible and means the performance numbers lack an external reference point---whether 45K~ops/s or 7K~ops/s is adequate depends entirely on the deployment.
+
+\paragraph*{\textit{Pre-convergence safety window}}
+As formalized in the safety window definition ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$), \equack{} provides retroactive revocation safety, not real-time revocation. During the safety window, replicas that have not received a revocation may accept operations under stale evidence. This is an inherent trade-off of availability-first designs under CAP constraints: Zanzibar's Zookie provides real-time consistency at the cost of availability, while \equack{} provides availability at the cost of a bounded safety window. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation, regardless of the duration of $W(r)$.
+
+\paragraph*{\textit{Cedar property transfer}}
+Cedar's verified properties (decidability, totality, soundness) hold for the converged state $s^\star$ but not for transient local decisions during partitions. This is a fundamental limitation of any eventually consistent system that embeds a policy engine designed for single-context evaluation. The replay mechanism restores the invariant, but the transient violation window cannot be eliminated without sacrificing availability. Mechanized verification of the replay-gate composition---showing that deny-wins gating over a deterministic linearization preserves the intended authorization invariants---would strengthen this claim and is identified as future work.
+
+\paragraph*{\textit{Prototype scope and limitations}}
+The \equack{} prototype implements the full conceptual model but with simplifications in several areas. VC validation supports the core W3C data model fields (issuer, subject, validity period, status) but not the full VC Data Model 2.0 specification (e.g., no JSON-LD processing, no selective disclosure). Key management uses X25519 for key agreement but does not implement a full key ceremony protocol; the genesis checkpoint is assumed to be pre-shared. Cedar policy evaluation covers the core permit/forbid/deny-overrides semantics but not Cedar's full type system or schema validation. The libp2p gossip layer uses basic flooding rather than a production-grade protocol with backpressure or prioritization.
+
+\paragraph*{\textit{From prototype to deployment}}
+Several gaps remain between the \equack{} prototype and a production-ready system. The evaluation uses synthetic workloads on a single machine; real deployments involve heterogeneous devices, unreliable links, and bursty operation patterns that synthetic logs do not capture. E12 simulates multi-node sync in-process rather than over a real network, so sync timing under packet loss and bandwidth constraints is unknown. Cross-platform determinism (E2) is verified on Linux x86\_64 only; a single non-determinism bug in serialization or floating-point handling on another architecture would break convergence. The confidentiality layer is explicitly experimental: overhead was measured on 100 writes, far too few to characterize per-operation cost at scale. Finally, the formal guarantees (Theorems~1--5) are stated and argued but not mechanically verified; a Coq or Isabelle formalization of the replay and gate logic would close the gap between the model and the implementation.
+
+\section{Conclusion}
+\label{sec:conclusion-paperC}
+
+This paper addressed the offline enforcement problem: how can independent authorities grant and revoke permissions for shared resources that operate during disconnection, while converging to a consistent and auditable authorization state? \equack{} operationalizes this using a causal event DAG with deterministic replay: all events influencing authorization are recorded as signed, hash-linked operations; replicas merge by set union and replay under a deny-wins gate that skips unauthorized effects.
+
+The evaluation provides empirical evidence consistent with the formal guarantees. Replicas converged across 100 randomized orderings (E1); post-revocation effects were suppressed, including across partition boundaries (E3, E11); audit tampering was detected (E5); and multi-issuer conflicts resolved deterministically (E4). Replay throughput reaches 45k~ops/s for linear chains with 8--11$\times$ checkpoint speedup (E6, E10). Three-node sync convergence is confirmed under partition-heal conditions with deny-wins revocation (E12). Encryption overhead is modest ($\sim$6.5\%).
+
+The evaluation is primarily single-machine with synthetic workloads; E12 uses in-process simulation. Cross-platform determinism (E2) is verified on Linux x86\_64; multi-platform CI is deferred. The model assumes eventual delivery, correctly managed trust inputs, and uncompromised key material. Revocation cannot undo irreversible physical-world actions. As formalized in the pre-convergence safety window analysis, \equack{} provides retroactive revocation safety---the converged state $s^\star$ always reflects revocations---but does not prevent transient authorization under stale evidence during partitions. Cedar's verified properties hold for $s^\star$ but not for transient local decisions.
+
+Immediate priorities include multi-machine evaluation with network-realistic partition injection, realistic workloads (IoT fleet management, collaborative editing), and baseline comparisons against standalone policy engines (Cedar, OPA) and Zanzibar-family systems. Mechanized verification of the replay-gate composition (TLA$^+$ or Lean) would close the gap between the formal model and the implementation. Longer-term directions include extending the epoch model to support configurable combining algorithms beyond deny-overrides, governance frameworks for multi-authority coordination, log compaction with verifiable snapshots, Jepsen-style invariant testing, and privacy-preserving techniques (anonymous credentials, attribute-based encryption, zero-knowledge proofs). Real-world deployment in industrial control systems and federated research settings is essential for validating the model under realistic conditions.
+
+
+% ========================== References ==========================
+\balance
+\bibliographystyle{IEEEtran}
+\bibliography{ecac}
+
+\begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{photographs/aditya.jpg}}]{Aditya Sissodiya}
+received his B.Sc. (Hons.) degree in Computer Science from Doon University, and his M.Sc. degree in Computer Science from Christ University, India. He is pursuing a Ph.D. in Cyber-Physical Systems at Luleå University of Technology, Sweden. Before beginning his doctoral studies, he worked as a software engineer for 4 years in industry, contributing to supply chain optimization and healthcare technologies. His research interests lie in access control and secure collaboration mechanisms, with a recent focus on technologies supporting the circular economy.
+\end{IEEEbiography}
+
+\begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{photographs/johan_photo.png}}]{Johan Kristiansson} received his Ph.D. in multimedia technology from Luleå University of Technology, where he is currently employed as a Senior Lecturer in Cyber-Physical Systems. He has extensive industry experience, including over a decade at Ericsson, where he worked as a Principal Researcher specialising in container orchestration. As an early adopter of Docker, he explored microservices architectures and container security, and developed an in-house orchestration platform at Ericsson in 2014. He later served as CTO at RockSigma AB, where he built a Kubernetes-based seismic processing engine. He is also the lead developer of ColonyOS, a meta-OS designed to create computing continuums. Dr. Kristiansson has authored over 25 scientific publications and holds 23 patents in distributed computing, cloud computing, and container orchestration.
+\end{IEEEbiography}
+
+\begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{photographs/Ech_pp.jpg}}]{Eric Chiquito} received his B.S. degree in nanotechnology engineering from The Instituto Tecnol\'ogico y de Estudios Superiores de Occidente (ITESO), Mexico in. He concluded his PhD degree in cyber-physical systems at Luleå University of Technology, Sweden on 2024, and currently works as a postdoctoral researcher at LTU. Prior to this, he worked as a data scientist in the largest hotel group in Mexico, Grupo Posadas. His research interests include decentralized systems, data sharing, circular economy, and matchmaking mechanisms.
+\end{IEEEbiography}
+
+
+\begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{photographs/bodin2.jpg}}]{Ulf Bodin} is a professor at the Luleå University of Technology, where he is conducting research on the industrial IoT, distributed system of systems, computer communications, distributed ledgers and applied machine learning. He has a PhD in computer networking from Luleå University of Technology and more than 15 years of experience in academia and the software industry, including standardization in ETSI and other organizations.
+\end{IEEEbiography}
+
+\end{document}
