@@ -1,11 +1,5 @@
-% Concrete deterministic replay slice for Figure 3.
+% Schematic deterministic replay slice for the main paper.
 % This file is a TikZ fragment and is included from ecac.tex.
-%
-% RESOLVED 4.1: Figure uses 50 pre-revoke writes (matching paper prose).
-%               TODO: HUMAN — code fixture uses 20; update code to match paper/figure if 50 is canonical.
-% RESOLVED 4.2: Figure shows two distinct writers A and B with separate credentials.
-%               TODO: HUMAN — code fixture uses the same subject key for both; fix code to use distinct keys.
-% RESOLVED 4.4: Scope label unified to "confidential" to match code implementation.
 
 \definecolor{figtrust}{HTML}{A66D4F}
 \definecolor{figgrant}{HTML}{27AE60}
@@ -87,12 +81,17 @@
 
 % ── Section title ────────────────────────────────────────────────────
 \node[title, anchor=west] at (0.3, 7.55)
-    {Concrete Replay Slice from the Compliance Fixture};
+    {Two-writer deterministic replay with revoke-after-reconciliation};
 
 % ── Time axis ────────────────────────────────────────────────────────
 \draw[timeaxis] (2.0, 7.05) -- (18.6, 7.05);
-\node[helper, anchor=east] at (18.7, 7.30)
+\node[helper, anchor=east] at (13.8, 7.30)
     {\itshape replay order};
+\draw[rounded corners=4pt, fill=black!3, draw=black!18, line width=0.4pt]
+    (14.4, 7.30) rectangle (18.95, 7.85);
+\node[helper, anchor=west, font=\scriptsize\sffamily\bfseries]
+    at (14.55, 7.58)
+    {same event set $\rightarrow$ same order $\rightarrow$ same digest};
 
 % ── Lane labels ──────────────────────────────────────────────────────
 \node[lane] at (1.7, 6.05) {trust /};
@@ -113,13 +112,15 @@
     at (3.2, 5.90) {IssuerKey\\[-1pt]{\scriptsize issuer-1/k1}};
 
 \node[opbox, fill=figgrant!14, minimum width=2.2cm] (credgranta)
-    at (6.0, 5.90) {Cred\,+\,Grant\\[-1pt]{\scriptsize A: editor, confidential}};
+    at (6.0, 5.90) {Credential\,+\,Grant\\[-1pt]{\scriptsize A: editor, confidential}};
 
 \node[opbox, fill=figgrant!14, minimum width=2.2cm] (credgrantb)
-    at (9.0, 5.90) {Cred\,+\,Grant\\[-1pt]{\scriptsize B: editor, confidential}};
+    at (9.0, 5.90) {Credential\,+\,Grant\\[-1pt]{\scriptsize B: editor, confidential}};
 
-\node[opbox, fill=figmerge!14, minimum width=1.6cm] (merge)
-    at (13.0, 5.90) {Merge};
+\node[opbox, fill=figmerge!14, minimum width=2.2cm] (merge)
+    at (13.0, 5.90) {Reconciled\\[-1pt]{\scriptsize event set}};
+\node[helper, font=\scriptsize\sffamily\itshape, text=black!58]
+    at (13.0, 5.15) {set union / anti-entropy};
 
 \node[opbox, fill=figrevoke!16, minimum width=2.2cm] (revoke)
     at (15.6, 5.90) {Revoke\\[-1pt]{\scriptsize writer B}};
@@ -136,13 +137,13 @@
 
 \node[writebox, fill=figwritera!12] (apre)
     at (11.2, 3.90)
-    {A writes $\times 50$\\[-1pt]
-     {\scriptsize\color{figapply!80!black}\textbf{APPLY} $\times 50$}};
+    {A pre-revoke DATA\\[-1pt]
+     {\scriptsize\color{figapply!80!black}\textbf{APPLY}}};
 
 \node[writebox, fill=figwritera!12] (apost)
     at (17.6, 3.90)
-    {A writes $\times 10$\\[-1pt]
-     {\scriptsize\color{figapply!80!black}\textbf{APPLY} $\times 10$}};
+    {A post-revoke DATA\\[-1pt]
+     {\scriptsize\color{figapply!80!black}\textbf{APPLY}}};
 
 % ══════════════════════════════════════════════════════════════════════
 % WRITER B LANE (y = 2.05)
@@ -150,13 +151,13 @@
 
 \node[writebox, fill=figwriterb!12] (bpre)
     at (11.2, 2.05)
-    {B writes $\times 50$\\[-1pt]
-     {\scriptsize\color{figapply!80!black}\textbf{APPLY} $\times 50$}};
+    {B pre-revoke DATA\\[-1pt]
+     {\scriptsize\color{figapply!80!black}\textbf{APPLY}}};
 
-\node[writebox, fill=figskip!10, draw=figskip!60!black] (bpost)
+\node[writebox, fill=figskip!10, draw=figskip!60!black, densely dashed, line width=0.9pt] (bpost)
     at (17.6, 2.05)
-    {B writes $\times 10$\\[-1pt]
-     {\scriptsize\color{figskip!90!black}\textbf{SKIP} $\times 10$}};
+    {B post-revoke DATA\\[-1pt]
+     {\scriptsize\color{figskip!90!black}\textbf{SKIP}}};
 
 % ══════════════════════════════════════════════════════════════════════
 % CROSS-LANE FLOW ARROWS
@@ -183,6 +184,8 @@
 
 \draw[flow, draw=figrevoke!70!black]
     ([xshift=3pt]revoke.south) |- (bpost.west);
+\draw[densely dotted, draw=figrevoke!75!black, line width=0.7pt]
+    (revoke.south) -- (15.6, 0.52);
 
 % ══════════════════════════════════════════════════════════════════════
 % EPOCH BARS (below write lanes, above legend)
@@ -238,7 +241,7 @@
 % ── Determinism tagline ──────────────────────────────────────────────
 \node[helper, font=\scriptsize\sffamily\itshape, text=black!60]
     at (9.5, -2.15)
-    {Same merged event set $\rightarrow$ same topo order
+    {Same reconciled event set $\rightarrow$ same topo order
      $\rightarrow$ same apply/skip decisions on every replica.};
 
 \end{tikzpicture}

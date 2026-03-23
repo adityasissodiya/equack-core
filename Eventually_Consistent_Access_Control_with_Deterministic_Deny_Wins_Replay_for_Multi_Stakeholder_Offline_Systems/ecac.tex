@@ -17,9 +17,12 @@
 \usepackage{cite}
 \usepackage{float}
 \usepackage{tikz}
+\usepackage{pgfplots}
 \usepackage{adjustbox}
 \usepackage{rotating}
 \usetikzlibrary{arrows.meta,positioning,backgrounds,calc,shapes.geometric,shapes.multipart,fit,decorations.pathreplacing}
+\usepgfplotslibrary{groupplots}
+\pgfplotsset{compat=1.18}
 
 % ========================== TODO Marker Command ==========================
 \newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
@@ -270,6 +273,52 @@ Zanzibar~\cite{zanzibar2019} and its derivatives (SpiceDB, OpenFGA~\cite{openfga
 \paragraph{Matrix State Resolution.}
 The closest deployed system solving a structurally similar problem is Matrix's state resolution algorithm (v2)~\cite{matrix_stateresv2}. Like \equack{}, Matrix maintains a DAG of events and deterministically resolves state across federated servers. However, Matrix's authorization model is power-level-based: authorization events are prioritized by event type and sender power level, with specific tie-breaking rules (lexicographic event ID comparison). \equack{} differs in using CRDT formalism for data convergence, deny-wins semantics for authorization safety, and VC-based authorization epochs rather than power-level assignments. Jacob and Hartenstein~\cite{jacob2024eventuallyac} provide a formal analysis of Matrix's approach as an instance of ECAC; \equack{} builds on this conceptual foundation with a concrete mechanism targeting industrial multi-stakeholder settings.
 
+\paragraph{p2panda.}
+The p2panda toolkit~\cite{p2panda2024} is the closest existing
+system to \equack{}. Its \texttt{p2panda-auth}
+crate~\cite{p2panda_auth2025} implements a convergent access-control
+CRDT with a ``strong removal'' resolver that invalidates all
+concurrent operations by a removed member---a deny-wins mechanism
+over a causal DAG of signed, BLAKE3-hashed operations. Like \equack{},
+p2panda replicates append-only logs via gossip, orders events by
+topological sort with deterministic tiebreaking, and supports
+offline-first operation with eventual convergence. Its encryption
+layer~\cite{p2panda_encryption2025} uses DCGKA-based group
+keys~\cite{weidner2021dcgka} with automatic rotation on member
+removal, providing forward secrecy via the Signal Double Ratchet.
+
+Three architectural differences position \equack{} distinctly.
+First, \equack{} enforces deny-wins replay at the protocol level:
+the Gate function (Section~\ref{subsec:ecac-model-paperC}) is not optional, and the
+materialized state~$s^\star$ always reflects revocations
+(Theorem~3). In p2panda, retroactive invalidation of data is
+an application-layer choice; the access-control CRDT provides
+the invalidation set, but applications may preserve revoked
+members' contributions. Second, \equack{} models authorization as
+time-bounded epochs opened by W3C Verifiable Credentials and
+evaluated by a Cedar-inspired ABAC/RBAC policy layer with
+deny-overrides semantics, supporting scoped permissions and
+multi-issuer trust propagated in-band via
+$\mathsf{TRUST}$ events. p2panda uses group membership with four permission
+levels and Ed25519 key-pair identity; there is no policy engine,
+no credential-based epochs, and no in-band trust evidence for
+cross-organizational issuers. Third, \equack{} provides an explicit,
+hash-chained audit trail recording per-operation applied/skipped
+decisions (Theorem~4); p2panda's tamper evidence is implicit in
+the signed operation DAG without dedicated authorization-decision
+records. p2panda's encryption layer is more mature than
+\equack{}'s experimental per-tag scheme, particularly in forward
+secrecy and key-agreement sophistication.
+
+Figure~\ref{fig:enforcement-compare-paperC} contrasts the two architectures, highlighting where deny-wins enforcement sits in each stack.
+
+\begin{figure*}[htbp]
+\centering
+\resizebox{\textwidth}{!}{\input{diagrams/fig-enforcement-compare.tex}}
+\caption{Enforcement stack comparison: \equack{} vs.\ p2panda. Both systems build on signed append-only logs with causal DAG ordering and gossip replication. The critical difference is where deny-wins enforcement runs: in \equack{}, the Gate function is a mandatory protocol-level step during deterministic replay; in p2panda, the access-control CRDT computes the invalidation set, but retroactive removal of application data is an application-layer choice.}
+\label{fig:enforcement-compare-paperC}
+\end{figure*}
+
 \section{\equack{} Model}
 \label{sec:model-paperC}
 
@@ -277,7 +326,7 @@ The closest deployed system solving a structurally similar problem is Matrix's s
 
 \equack{} combines four key elements: (1)~a causal event log with deterministic deny-wins replay, (2)~verifiable credentials for time-bounded authorization epochs, (3)~a hybrid ABAC/RBAC policy model with deny-overrides semantics, and (4)~per-tag encryption with key rotation.
 
-We outline formal guarantees for convergence, safety, determinism, audit integrity, and leaver security (post-revocation confidentiality under key rotation). The system's four-phase lifecycle (Ingest, Validate, Replay, Query) is summarized in Figure~\ref{fig:ecac-overview-paperC}. The remainder of this section expands each phase and uses subsequent figures to clarify how the causal event log, in-band trust, deny-wins gating, and (optional) confidentiality interact to produce a deterministic authorization outcome.
+We outline formal guarantees for convergence, safety, determinism, audit integrity, and leaver security (post-revocation confidentiality under key rotation). Figure~\ref{fig:ecac-overview-paperC} summarizes the semantic replay pipeline: once replicas hold the same reconciled event set, deterministic linearization, TrustView reconstruction, epoch construction, and deny-wins gating force the same materialized state and audit outcome. The remainder of this section expands each phase and uses subsequent figures to clarify how the causal event log, in-band trust, deny-wins gating, and (optional) confidentiality interact to produce a deterministic authorization outcome.
 
 \begin{figure*}[t]
   \centering
@@ -285,7 +334,7 @@ We outline formal guarantees for convergence, safety, determinism, audit integri
   \adjustbox{max width=\textwidth, max totalheight=\textheight, center}{
     \input{diagrams/architecture-flow.tex}
   }
-  \caption{\equack{} prototype overview showing the \equack{} four-phase lifecycle (Ingest, Verify, Activated DAG, Epoch/Gate, CRDT state, Query) and supporting infrastructure.}
+  \caption{Semantic replay pipeline of \equack{}. Replicas ingest the same signed events, construct the same activated causal DAG, derive the same TrustView and authorization epochs, make the same deny-wins apply/skip decisions, and therefore materialize the same CRDT state digest. Anti-entropy, persistence, and audit are support paths rather than independent semantics.}
   \label{fig:ecac-overview-paperC}
 \end{figure*}
 
@@ -323,12 +372,12 @@ Concurrent events---those without causal order---are resolved using a composite 
 \textbf{Separation of DAG and CRDT roles.} A common point of confusion in offline access control is the overlapping role of causal graphs and Data CRDTs. In \equack{}, the pipeline follows a strict separation of concerns: the DAG and topological sort fix a deterministic, totally-ordered sequence of events to evaluate \textit{authorization and policy validity}. Meanwhile, the CRDT state (e.g., MVReg, OR-Set) strictly handles \textit{data payload convergence}. The policy engine evaluates the strict ordered DAG to build epochs and TrustViews; only authorized DATA events are then handed off to the CRDTs. 
 
 
-The event DAG acts as a convergent CRDT: merging logs is a set union---commutative, associative, idempotent. Operation structure and DAG mechanics are shown in Figure~\ref{fig:dag-structure-paperC}. Each operation carries a signed header with parent links, HLC timestamp, producer key, and typed payload. Replicas accept events opportunistically but only replay them once causal predecessors are present (activated/pending staging), ensuring every replica topologically sorts the same DAG prefix.
+The event DAG acts as a convergent CRDT: merging logs is a set union---commutative, associative, idempotent. Figure~\ref{fig:dag-structure-paperC} summarizes the replay-time decision inputs consumed by the deny-wins gate. Each operation still carries a signed header with parent links, HLC timestamp, producer key, and typed payload, but the main-paper semantic claim is that authorization becomes a deterministic function of the reconciled event set. Replicas accept events opportunistically but only replay them once causal predecessors are present (activated/pending staging), ensuring every replica topologically sorts the same DAG prefix.
 
 \begin{figure*}[htbp]
 \centering
 \resizebox{\textwidth}{!}{\input{diagrams/causal-dag.tex}}
-\caption{Operation structure showing the OpHeader fields and payload variants, and the causal DAG deterministic topological sort breaking ties according to HLC and BLAKE3 Op-ID.}
+\caption{Deterministic authorization during replay. For a replay-ordered event $e$, \equack{} applies \texttt{DATA}$(e)$ only when four conditions hold simultaneously: the event occupies a position inside an open authorization epoch, the event's physical time lies inside the VC validity interval, the issuer key and status evidence in TrustView validate the credential offline, and the policy layer returns \texttt{allow}. Otherwise the event is skipped, making authorization a deterministic function of the reconciled event set.}
 \label{fig:dag-structure-paperC}
 \end{figure*}
 
@@ -353,9 +402,16 @@ Unlike the W3C Bitstring Status List specification, which assumes HTTP-accessibl
 
 \equack{} uses a policy layer inspired by AWS's Cedar language (open-source ABAC). Policies may permit or forbid actions with a default deny stance; deny-overrides semantics ensure any matching forbid overrides all permits. The framework unifies RBAC and ABAC: roles are principal attributes, and Cedar's entity-attribute model supports hierarchical roles and contextual attributes. Policies are evaluated deterministically at each event's timestamp; identical inputs guarantee identical outcomes across replicas.
 
-A REVOKE event deterministically terminates any authorization epoch opened by a prior or concurrent GRANT, so earlier permits cannot ``win'' due to message reordering. Importantly, revocation is not irreversible: a GRANT \emph{after} a REVOKE in the replay order opens a fresh epoch (re-grant). For concurrent GRANT/REVOKE pairs, the deterministic linearization chooses a single order.
+A REVOKE event deterministically terminates any authorization epoch opened by a prior or concurrent GRANT, so earlier permits cannot ``win'' due to message reordering. Importantly, revocation is not irreversible: a GRANT \emph{after} a REVOKE in the replay order opens a fresh epoch (re-grant). For concurrent GRANT/REVOKE pairs, the deterministic linearization chooses a single order. Figure~\ref{fig:epoch-lifecycle-paperC} illustrates this lifecycle: a GRANT opens an epoch, DATA ops within it pass the gate, a REVOKE closes the epoch causing subsequent DATA ops to be skipped, and a re-GRANT opens a fresh epoch restoring access.
 
-\textbf{Replay Example.} Our compliance fixture contains an in-band \texttt{IssuerKey}, credential-and-grant pairs for two writers, 50 concurrent pre-revoke writes from each writer, a merge point, a \texttt{REVOKE} for one writer, and 10 post-revoke writes from each writer. Replay first builds the in-band TrustView, verifies both credentials, and opens epochs for both writers. The later \texttt{REVOKE} closes only writer~B's epoch in the deterministic replay order. As a result, all replicas apply both writers' pre-revoke writes, skip writer~B's post-revoke writes, and continue applying writer~A's writes.
+\begin{figure*}[htbp]
+\centering
+\resizebox{\textwidth}{!}{\input{diagrams/fig-epoch-lifecycle.tex}}
+\caption{Authorization epoch lifecycle. A \texttt{GRANT} referencing a valid credential opens an epoch at its replay position; a \texttt{REVOKE} closes the epoch. DATA operations inside an active epoch pass the deny-wins Gate (\textbf{APPLY}); those outside any epoch are skipped (\textbf{SKIP}). Revocation is not irreversible: a subsequent \texttt{GRANT} (re-grant) opens a fresh epoch, restoring access for later positions in the replay order.}
+\label{fig:epoch-lifecycle-paperC}
+\end{figure*}
+
+\textbf{Replay Example.} Figure~\ref{fig:deny-wins-paperC} uses a schematic two-writer example to make the replay semantics explicit. An in-band \texttt{IssuerKey} seeds TrustView, credential-and-grant pairs open epochs for writers A and B, reconciliation yields one shared event set, and \texttt{Revoke(B)} closes only B's epoch in the deterministic replay order. As a result, all replicas apply both writers' pre-revoke data, skip writer~B's post-revoke data, and continue applying writer~A's post-revoke data.
 
 \paragraph{Cedar property transfer under eventual consistency.}
 Cedar's formal verification~\cite{cutler2024cedar} establishes decidability, totality, and soundness of authorization evaluation under a single consistent context---all entity data and policies are available and coherent at decision time. In \equack{}'s eventually consistent setting, this assumption holds locally (each replica evaluates deterministically given its local state) but not globally during partitions: two replicas may reach different permit/deny outcomes for the same request if one has received a forbid policy or revocation that the other has not. The deny-wins replay mechanism restores global consistency after convergence: once all replicas hold the same event set, replay re-evaluates every operation under the converged policy set, and the final materialized state $s^\star$ satisfies Cedar's deny-overrides semantics. Cedar's verified properties thus hold for $s^\star$ but not for the transient local decisions made during partitions. Formal verification of the replay mechanism itself---specifically, that deterministic linearization plus deny-wins gating preserves the intended authorization invariants---is future work and would require extending Cedar's Lean~4 proofs or independent mechanized checking.
@@ -366,12 +422,12 @@ The current model uses deny-overrides as the sole combining algorithm: any match
 \paragraph{Entity hierarchy staleness.}
 Entity attributes used in Cedar policy evaluation (e.g., role assignments, group memberships) may be stale during partitions: a replica that has not yet received an attribute-update event evaluates policies against outdated entity state. Because attribute changes are events in the causal DAG, they are replayed deterministically on convergence, and the final state $s^\star$ reflects the correct attribute values. Transient local decisions based on stale attributes are corrected during replay.
 
-Figure~\ref{fig:deny-wins-paperC} shows this replay slice and the epochs and gate outcomes it induces.
+Figure~\ref{fig:deny-wins-paperC} makes the replay semantics explicit on a two-writer example: once replicas reconcile to the same event set, the replay order, epoch boundaries, and apply/skip decisions are identical.
 
 \begin{figure*}[htbp]
 \centering
 \resizebox{\textwidth}{!}{\input{diagrams/fig-deny-wins.tex}}
-\caption{Deterministic replay slice from the compliance fixture. An in-band \texttt{IssuerKey} seeds TrustView, verified \texttt{Credential}+\texttt{Grant} pairs open epochs for writers A and B, and \texttt{Revoke(B)} closes only B's epoch. The deny-wins gate therefore applies both writers' pre-revoke data, skips B's post-revoke data, continues applying A's post-revoke data, and emits matching audit events.}
+\caption{Two-writer replay example under deterministic deny-wins semantics. An in-band \texttt{IssuerKey} seeds TrustView; verified \texttt{Credential}+\texttt{Grant} pairs open epochs for writers A and B; reconciliation yields one shared event set; and \texttt{Revoke(B)} closes only B's epoch in the deterministic replay order. Every replica therefore applies both writers' pre-revoke data, skips B's post-revoke data, continues applying A's post-revoke data, and emits the same audit outcomes.}
 \label{fig:deny-wins-paperC}
 \end{figure*}
 
@@ -562,7 +618,14 @@ This affects \emph{when} a replica can replay but not \emph{what} $s^\star$ is, 
 
 \paragraph{Pre-convergence safety window.} Let $r$ be a revocation event created at physical time $t_r$ on some replica. Define the \emph{safety window} $W(r)$ as the interval $[t_r, t_{\text{heal}}]$ where $t_{\text{heal}}$ is the earliest time at which all correct replicas have received $r$ via anti-entropy. During $W(r)$, replicas that have not yet received $r$ may accept operations from the revoked principal under stale authorization evidence. Under the bounded partition assumption (Section~2.3, item~4), $W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$ is finite.
 
-\equack{} does not prevent tentative authorization during $W(r)$; it guarantees that the materialized state $s^\star$ computed after reconciliation reflects $r$. Specifically, any $\mathsf{DATA}$ event $e$ from the revoked subject with $\mathrm{pos}(e) \geq \mathrm{pos}(r)$ in the deterministic order $\triangleleft$ is skipped by the deny-wins gate, regardless of which replica originally accepted $e$. This provides \emph{retroactive revocation safety}: the final digital state is consistent with the revocation, even though individual replicas may have temporarily acted on stale evidence. In contrast, Zanzibar's Zookie mechanism~\cite{zanzibar2019} provides real-time revocation at the cost of availability during partition (consistent with CAP theorem constraints). \equack{} trades real-time revocation for availability, repairing safety on merge.
+\equack{} does not prevent tentative authorization during $W(r)$; it guarantees that the materialized state $s^\star$ computed after reconciliation reflects $r$. Specifically, any $\mathsf{DATA}$ event $e$ from the revoked subject with $\mathrm{pos}(e) \geq \mathrm{pos}(r)$ in the deterministic order $\triangleleft$ is skipped by the deny-wins gate, regardless of which replica originally accepted $e$. This provides \emph{retroactive revocation safety}: the final digital state is consistent with the revocation, even though individual replicas may have temporarily acted on stale evidence. In contrast, Zanzibar's Zookie mechanism~\cite{zanzibar2019} provides real-time revocation at the cost of availability during partition (consistent with CAP theorem constraints). \equack{} trades real-time revocation for availability, repairing safety on merge. Figure~\ref{fig:safety-window-paperC} visualizes this timeline.
+
+\begin{figure*}[htbp]
+\centering
+\resizebox{\textwidth}{!}{\input{diagrams/fig-safety-window.tex}}
+\caption{Pre-convergence safety window $W(r)$. Replica~A receives the \texttt{Revoke} and immediately stops accepting $U$'s operations. Replica~B, partitioned from~A, continues accepting $U$'s operations under stale evidence. After anti-entropy delivers the revocation, both replicas replay the merged log deterministically; the deny-wins gate skips $U$'s post-revocation operations, and both converge to the same state~$s^\star$. The safety window $W(r) \leq \Delta_{\mathrm{partition}} + \Delta_{\mathrm{propagation}}$ is bounded under the finite partition assumption.}
+\label{fig:safety-window-paperC}
+\end{figure*}
 
 \subsubsection{Main Theorems (Formal Guarantees)}
 
@@ -691,13 +754,13 @@ A 10{,}000-op concurrent-workload log was permuted into 100 valid orderings (res
 User $U$ was granted write access, performed 1{,}000 writes, and had the credential revoked after write~500. The 1{,}004-op log (1{,}000 Data + IssuerKey, Credential, Grant, Revoke) was replayed: the first 500 writes applied, the remaining 500 skipped. Digest: \texttt{\small 8da8b49e\ldots 46633fbf}.
 
 \paragraph*{\textit{Revocation under partition (E11, R3)}}
-In partition~A a user is revoked; partition~B, which has not yet received the revocation, contains further writes from the same user. After merging both logs and replaying, the 50 pre-revocation writes (both partitions) were applied and all 10 post-revocation writes from partition~B were skipped (merged digest: \texttt{\small 69fae61e\ldots 1a2986c1}). This is the scenario \equack{} was designed for.
-Figure~\ref{fig:partition-heal-paperC} visualizes this repair-on-heal semantics: a partitioned replica may locally accept stale writes, but those writes are not part of the final digital state unless they remain authorized after the union log is replayed.
+In partition~A a user is revoked; partition~B, which has not yet received the revocation, contains further writes from the same user under stale evidence. After merging both logs and replaying, the 50 shared-prefix writes were applied and the 10 stale post-revocation writes from partition~B were skipped. This is the scenario \equack{} was designed for.
+Figure~\ref{fig:partition-heal-paperC} visualizes repair-on-heal together with the finite pre-convergence safety window $W(r)$: replicas may diverge locally during a partition, but once they reconcile to the same event set, post-revoke effects disappear from the final digital state.
 
 \begin{figure*}[t]
 \centering
 \resizebox{\textwidth}{!}{\input{diagrams/fig-partition-heal.tex}}
-\caption{Partition-heal semantics of deterministic deny-wins replay. Replicas share a common prefix before partition. During the partition, replica~A receives \texttt{Revoke(U)} while replica~B, still missing that event, locally accepts subsequent writes by $U$ under stale evidence. After anti-entropy, all replicas replay the union log in the same deterministic order; the revoke closes $U$'s epoch, the post-revoke writes are skipped, and every replica converges to the same final state digest.}
+\caption{Partition-heal semantics and the finite pre-convergence safety window $W(r)$. During $W(r)$, a replica that has not yet received \texttt{Revoke(U)} may tentatively accept writes under stale evidence. After anti-entropy, all replicas replay the same union log in the same order; the revoke closes $U$'s epoch, post-revoke writes are skipped, and the final digital state converges. The guarantee is about the reconciled digital state, not rollback of physical-world effects already triggered during the partition.}
 \label{fig:partition-heal-paperC}
 \end{figure*}
 
@@ -771,6 +834,15 @@ offline-revocation          & 28,000 \\
 \end{tabular}
 \end{table}
 
+Figure~\ref{fig:eval-replay-throughput-paperC} visualizes the scaling trends quantified by Tables~\ref{tab:e6-replay-paperC} and~\ref{tab:e7-throughput-paperC}: full replay is approximately linear, checkpointed replay is consistently faster by about one order of magnitude, and workload concurrency materially reduces throughput.
+
+\begin{figure*}[t]
+\centering
+\input{diagrams/fig-eval-replay-throughput.tex}
+\caption{Replay cost trends. Full replay scales approximately linearly with log size, while restoring from a 90\% checkpoint reduces replay time by roughly one order of magnitude across the tested range. Throughput is highest on linear chains, falls under high concurrency because of MVReg conflict handling, and remains materially below the linear baseline under policy-heavy revocation workloads.}
+\label{fig:eval-replay-throughput-paperC}
+\end{figure*}
+
 \paragraph*{\textit{Storage and memory (E8, E9)}}
 CBOR log size grows linearly at $\approx$430~bytes/op; RocksDB write amplification brings the on-disk cost to $\approx$800~B/op (Table~\ref{tab:e8-storage-paperC}). Checkpoint state remains under 200~bytes for the single-key workload. Peak RSS during replay grows at $\approx$1.7~KB/op (Table~\ref{tab:e9-memory-paperC}), dominated by the in-memory DAG and CRDT state.
 
@@ -832,6 +904,23 @@ Carrying issuer keys and status-list updates as replicated log events eliminates
 
 \paragraph*{\textit{Comparison scope}}
 The gap analysis (Table~\ref{tab:gap-summary-paperC}) and mechanism comparison (Table~\ref{tab:mech-compare}) evaluate \equack{} against paradigm categories rather than specific systems, because no existing system combines CRDT-based replication with in-band VCs and a deny-wins gate. A fair question is how \equack{} compares to a CRDT with application-level access-control logic bolted on. The difference is where enforcement runs: application-level checks execute at ingest time and cannot retroactively invalidate operations accepted under stale evidence during a partition; \equack{}'s replay-time gate can, which is what provides R3. The absence of a directly comparable system makes head-to-head benchmarking infeasible and means the performance numbers lack an external reference point---whether 45K~ops/s or 7K~ops/s is adequate depends entirely on the deployment.
+
+The closest existing system is
+p2panda~\cite{p2panda2024,p2panda_auth2025}, which implements a
+convergent access-control CRDT with deny-wins semantics and
+DCGKA-based group encryption. The key architectural difference is
+where enforcement runs: in p2panda, deny-wins invalidation is
+computed by the access-control CRDT but retroactive replay of
+application data is optional and application-implemented; in
+\equack{}, the deny-wins gate is a mandatory step in deterministic
+replay, producing a stronger default safety guarantee at the cost
+of flexibility. p2panda's encryption layer provides forward
+secrecy via the Signal Double Ratchet, a property \equack{}'s
+experimental per-tag scheme does not offer. A direct empirical
+comparison is not currently feasible: p2panda provides no
+peer-reviewed formal model or published benchmarks, and its
+access-control crate was released in 2025 concurrently with
+\equack{}'s development.
 
 \paragraph*{\textit{Pre-convergence safety window}}
 As formalized in the safety window definition ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$), \equack{} provides retroactive revocation safety, not real-time revocation. During the safety window, replicas that have not received a revocation may accept operations under stale evidence. This is an inherent trade-off of availability-first designs under CAP constraints: Zanzibar's Zookie provides real-time consistency at the cost of availability, while \equack{} provides availability at the cost of a bounded safety window. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation, regardless of the duration of $W(r)$.

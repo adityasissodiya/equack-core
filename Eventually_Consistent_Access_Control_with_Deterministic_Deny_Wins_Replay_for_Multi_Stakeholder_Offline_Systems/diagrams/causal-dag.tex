@@ -1,165 +1,117 @@
-\definecolor{rustcolor}{HTML}{DEA584}
-\definecolor{corecolor}{HTML}{4A90D9}
-\definecolor{storecolor}{HTML}{50C878}
-\definecolor{netcolor}{HTML}{9B59B6}
-\definecolor{clicolor}{HTML}{E74C3C}
-\definecolor{opcolor}{HTML}{F39C12}
-\definecolor{vccolor}{HTML}{1ABC9C}
-\definecolor{bglight}{HTML}{F8F9FA}
+% Deterministic authorization gate semantics for the main paper.
+% Required TikZ libraries in the parent document:
+% arrows.meta, positioning, calc, fit, backgrounds
+
+\definecolor{gttrust}{HTML}{8B5E3C}
+\definecolor{gtepoch}{HTML}{7C3AED}
+\definecolor{gttime}{HTML}{D97706}
+\definecolor{gtpolicy}{HTML}{2563EB}
+\definecolor{gtapply}{HTML}{15803D}
+\definecolor{gtskip}{HTML}{B91C1C}
+\definecolor{gtnode}{HTML}{475569}
+\definecolor{gtbg}{HTML}{F8FAFC}
 
 \begin{tikzpicture}[
-    node distance=1.5cm and 1cm,
-    opnode/.style={rectangle split, rectangle split parts=4,
-                   draw, fill=white, rounded corners=3pt, thick,
-                   font=\footnotesize\ttfamily, align=left,
-                   minimum width=3.5cm},
-    orderidx/.style={circle, inner sep=1.5pt, font=\small\sffamily\bfseries},
-    parentlink/.style={-{Stealth[length=3mm, width=2.5mm]}, very thick, draw=opcolor, dashed}
+    every node/.style={font=\footnotesize\sffamily},
+    ev/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum width=1.8cm,
+        minimum height=0.8cm,
+        align=center,
+        draw=#1!70!black,
+        fill=#1!12,
+        line width=0.7pt
+    },
+    check/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum width=6.0cm,
+        minimum height=0.95cm,
+        align=left,
+        draw=#1!65!black,
+        fill=#1!10,
+        line width=0.65pt,
+        inner sep=5pt
+    },
+    gate/.style={
+        rectangle,
+        rounded corners=5pt,
+        minimum width=3.0cm,
+        minimum height=1.35cm,
+        align=center,
+        draw=black!65,
+        fill=black!3,
+        line width=0.9pt
+    },
+    badge/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum width=2.0cm,
+        minimum height=0.7cm,
+        align=center,
+        line width=0.75pt,
+        font=\footnotesize\sffamily\bfseries
+    },
+    flow/.style={
+        -{Stealth[length=2.5mm, width=2.0mm]},
+        line width=0.85pt,
+        draw=black!65
+    },
+    note/.style={font=\scriptsize\sffamily, text=black!68, align=center}
 ]
 
-% Title
-\node[font=\Large\sffamily\bfseries] (title) at (4, 11) {equack-core: Operation Structure \& Causal DAG};
+\draw[rounded corners=6pt, fill=gtbg, draw=black!15, line width=0.6pt]
+    (-0.3,-0.9) rectangle (18.9,5.4);
 
-% Legend
-\node[draw=gray, fill=white, rounded corners, align=left, font=\scriptsize\sffamily, thick] at (13.5, 10.5) {
-    \textbf{Topological Order Tie-breaking:}\\
-    1. Parents strictly before children\\
-    2. Lowest HLC (physical\_ms, logical)\\
-    3. Lowest Op-ID (BLAKE3)
-};
+\node[ev=gtnode] (iss) at (1.6,4.1) {IssuerKey};
+\node[ev=gttrust] (cred) at (4.0,4.1) {Credential};
+\node[ev=gtepoch] (grant) at (6.3,4.1) {Grant};
+\node[ev=gtnode] (d1) at (8.9,4.1) {$e=\texttt{DATA}$};
+\node[ev=gtskip] (rev) at (11.4,4.1) {Revoke};
+\node[ev=gtnode] (d2) at (13.9,4.1) {$e'=\texttt{DATA}$};
 
-% ============================================================================
-% MAIN DIAGRAM STRUCTURE
-% ============================================================================
-% The user provided a snippet that seems to replace the entire tikzpicture content
-% but also included a new \begin{tikzpicture}. I'm assuming the intent is to
-% replace the content within the existing tikzpicture environment.
-% Also, 'policycolor' is used in the new code but not defined. Assuming it's
-% meant to be 'vccolor' or a new color definition is missing.
-% For now, I'll define policycolor as vccolor.
-\definecolor{policycolor}{HTML}{1ABC9C} % Assuming policycolor is equivalent to vccolor
+\draw[flow] (iss) -- (cred);
+\draw[flow] (cred) -- (grant);
+\draw[flow] (grant) -- (d1);
+\draw[flow] (d1) -- (rev);
+\draw[flow] (rev) -- (d2);
 
-\tikzset{
-    opnode/.style={rectangle split, rectangle split parts=4,
-                   draw, fill=white, rounded corners=3pt, thick,
-                   font=\footnotesize\ttfamily, align=left,
-                   minimum width=3.5cm},
-    orderidx/.style={circle, inner sep=1.5pt, font=\small\sffamily\bfseries},
-    parentlink/.style={-{Stealth[length=3mm, width=2.5mm]}, very thick, draw=opcolor, dashed}
-}
+\node[note, anchor=west] at (15.1,4.55)
+    {deterministic replay by $(\mathrm{HLC}, \mathrm{op\_id})$};
 
-    % ========================================================================
-    % NODE DEFINITIONS
-    % Nodes placed with much broader absolute horizontal and relative vertical
-    % spacing to cleanly avoid multi-part text node overlaps.
-    % ========================================================================
+\draw[line width=2.2pt, draw=gtepoch!75!black, -{Stealth[length=2.3mm,width=1.9mm]}]
+    (6.3,3.35) -- (10.95,3.35);
+\draw[line width=1.3pt, draw=gtskip!80!black]
+    (11.4,3.05) -- (11.4,3.65);
+\node[note, anchor=east] at (5.9,3.35) {open epoch};
+\node[note, anchor=west] at (11.6,3.35) {closed by revoke};
 
-    \node[opnode, draw=corecolor!80!black] (op1) at (0, 8) {
-        % Base / Header
-        \textbf{Op-ID: A1B2...} \nodepart{two}
-        \texttt{Header:} \\
-        \texttt{- parents: [ ]} \\
-        \texttt{- hlc:  (1000, 0, N1)} \\
-        \texttt{- author: PK\_A} 
-        % Payload
-        \nodepart{three}
-        \texttt{Payload: Trust(IssuerKey)}
-        % Signature
-        \nodepart{four}
-         \texttt{Sig: Ed25519(...)}
-    };
-    
-    % Event order circle
-    \node[orderidx, fill=black, text=white, right=3pt] at (op1.north west) {1};
+\node[badge, draw=gtapply!70!black, fill=gtapply!12, text=gtapply!80!black] at (8.9,2.45) {APPLY};
+\node[badge, draw=gtskip!70!black, fill=gtskip!10, text=gtskip!90!black] at (13.9,2.45) {SKIP};
 
-    \node[opnode, draw=policycolor!80!black] (op2) at (4, 4) {
-        \textbf{Op-ID: C3D4...} \nodepart{two}
-        \texttt{Header:} \\
-        \texttt{- parents: [ A1B2... ]} \\
-        \texttt{- hlc:  (1005, 0, N1)} \\
-        \texttt{- author: PK\_A} 
-        \nodepart{three}
-        \texttt{Payload: Credential(VC)}
-        \nodepart{four}
-        \texttt{Sig: Ed25519(...)}
-    };
-    \node[orderidx, fill=black, text=white, right=3pt] at (op2.north west) {2};
+\node[check=gttime, anchor=north west] (c1) at (0.5,1.5)
+    {\textbf{Time validity}\\$\mathrm{phys}(\mathrm{hlc}(e)) \in [nb,na)$};
 
-    \node[opnode, draw=storecolor!80!black] (op3) at (8, 8) {
-        \textbf{Op-ID: 7G8H...} \nodepart{two}
-        \texttt{Header:} \\
-        \texttt{- parents: [ A1B2... ]} \\
-        \texttt{- hlc:  (1008, 0, N3)} \\
-        \texttt{- author: PK\_C} 
-        \nodepart{three}
-        \texttt{Payload: Data(MVReg=Val1)}
-        \nodepart{four}
-        \texttt{Sig: Ed25519(...)}
-    };
-    \node[orderidx, fill=black, text=white, right=3pt] at (op3.north west) {3};
+\node[check=gttrust, anchor=north west] (c2) at (6.4,1.5)
+    {\textbf{TrustView / VC validation}\\issuer key known, VC signature valid, status is \texttt{good}};
 
-    \node[opnode, draw=policycolor!80!black] (op4) at (0, 0) {
-        \textbf{Op-ID: E5F6...} \nodepart{two}
-        \texttt{Header:} \\
-        \texttt{- parents: [ C3D4... ]} \\
-        \texttt{- hlc:  (1010, 0, N2)} \\
-        \texttt{- author: PK\_B} 
-        \nodepart{three}
-        \texttt{Payload: Grant(Key, Scope)}
-        \nodepart{four}
-        \texttt{Sig: Ed25519(...)}
-    };
-    \node[orderidx, fill=black, text=white, right=3pt] at (op4.north west) {4};
+\node[check=gtepoch, anchor=north west] (c3) at (12.3,1.5)
+    {\textbf{Replay position / epoch}\\$\mathrm{pos}(e) \in [p_{start},p_{end})$};
 
-    \node[opnode, draw=storecolor!80!black] (op5) at (6, 0) {
-        \textbf{Op-ID: 9I0J...} \nodepart{two}
-        \texttt{Header:} \\
-        \texttt{- parents: [ E5F6..., 7G8H... ]} \\
-        \texttt{- hlc:  (1015, 0, N2)} \\
-        \texttt{- author: PK\_B} 
-        \nodepart{three}
-        \texttt{Payload: Data(MVReg=Val2)}
-        \nodepart{four}
-        \texttt{Sig: Ed25519(...)}
-    };
-    \node[orderidx, fill=black, text=white, right=3pt] at (op5.north west) {5};
+\node[check=gtpolicy, anchor=north west, minimum width=8.2cm] (c4) at (4.6,0.0)
+    {\textbf{Policy allow}\\$P(s,a,r,\alpha_e)=\texttt{allow}$ under deny-overrides semantics};
 
-    % ========================================================================
-    % DAG EDGES (Parent references)
-    % Routed with explicit angles to prevent them slicing through the text nodes
-    % ========================================================================
-    \begin{scope}[on background layer]
-        % op2 -> op1
-        \draw[parentlink] (op2.north west) to[out=135, in=315] (op1.south east);
-        \node[font=\tiny\sffamily, text=black!50] at (2, 5.8) {references};
+\node[gate] (g) at (15.5,0.1)
+    {\textbf{$\mathrm{Gate}(e)$}\\[-1pt]
+     APPLY iff all checks hold\\otherwise SKIP};
 
-        % op3 -> op1
-        \draw[parentlink] (op3.west) to[out=180, in=0] (op1.east);
+\draw[flow, draw=gttime!80!black] ([yshift=-1pt]c1.east) -- ++(0.5,0) |- (g.west);
+\draw[flow, draw=gttrust!80!black] ([yshift=-1pt]c2.east) -- ++(0.5,0) |- (g.west);
+\draw[flow, draw=gtepoch!80!black] ([yshift=-1pt]c3.west) -- ++(-0.5,0) |- (g.north);
+\draw[flow, draw=gtpolicy!80!black] (c4.east) -- (g.west);
 
-        % op4 -> op2
-        \draw[parentlink] (op4.north east) to[out=45, in=225] (op2.south west);
-
-        % op5 -> op4
-        \draw[parentlink] (op5.west) to[out=180, in=0] (op4.east);
-        
-        % op5 -> op3
-        \draw[parentlink] (op5.north east) to[out=45, in=225] (op3.south);
-    \end{scope}
-
-% Epoch Brackets (Right side highlighting Replay Engine logic)
-\draw[thick, draw=corecolor] (12, 7) -- (12, 3) node[midway, right=10pt, align=left, font=\footnotesize\sffamily] {
-    \textbf{Auth Epoch Builder}\\
-    Evaluates Trust, Credentials,\\
-    and Grants in order to gate\\
-    upcoming Data writes.
-};
-
-\draw[thick, draw=storecolor] (12, 2.5) -- (12, -1) node[midway, right=10pt, align=left, font=\footnotesize\sffamily] {
-    \textbf{Deny-Wins Gate}\\
-    Data Ops accepted only if\\
-    VC valid, unrevoked, inside\\
-    time window \mbox{[nbf, exp)} and\\
-    intersecting scope.
-};
+\node[note] at (9.25,-0.55)
+    {Authorization is a deterministic function of the reconciled event set, not of message arrival order.};
 
 \end{tikzpicture}

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use blake3;
 use ecac_core::crypto::vk_to_bytes;
 use ecac_core::dag::Dag;
@@ -166,75 +166,74 @@ fn partition_logs(out_a: &Path, out_b: &Path) -> Result<()> {
     let subject_pk = vk_to_bytes(&subject_sk.verifying_key());
     let subject_hex = hex::encode(subject_pk);
 
-    // Partition A: issuer key, VC+grant, some writes, revoke.
-    let mut ops_a: Vec<Op> = Vec::new();
-    let mut last_a: Option<OpId> = None;
-    let mut hlc_a = 1_000u64;
+    // Shared prefix present at both replicas before the partition:
+    // IssuerKey -> Credential -> Grant -> 50 authorized writes.
+    let mut shared_ops: Vec<Op> = Vec::new();
+    let mut hlc_shared = 1_000u64;
 
-    let ik = issuer_key_op("issuer-A", "kA", &issuer_a_sk, hlc_a, vec![]);
-    last_a = Some(ik.op_id);
-    ops_a.push(ik);
+    let ik = issuer_key_op("issuer-A", "kA", &issuer_a_sk, hlc_shared, vec![]);
+    let mut last_shared = ik.op_id;
+    shared_ops.push(ik);
 
-    hlc_a += 1;
-    let vc_bytes = jwt_compact("issuer-A", &subject_hex, "editor", &["confidential"], hlc_a, hlc_a + 1_000_000, &issuer_a_sk)?;
-    let (cred, grant, _) = cred_and_grant_ops(vc_bytes, &issuer_a_sk, &admin_sk, subject_pk, hlc_a, last_a.unwrap());
-    ops_a.push(cred);
+    hlc_shared += 1;
+    let vc_bytes = jwt_compact(
+        "issuer-A",
+        &subject_hex,
+        "editor",
+        &["confidential"],
+        hlc_shared,
+        hlc_shared + 1_000_000,
+        &issuer_a_sk,
+    )?;
+    let (cred, grant, _) =
+        cred_and_grant_ops(vc_bytes, &issuer_a_sk, &admin_sk, subject_pk, hlc_shared, last_shared);
+    shared_ops.push(cred);
     let grant_id = grant.op_id;
-    ops_a.push(grant);
-    last_a = Some(grant_id);
-    hlc_a += 2;
+    shared_ops.push(grant);
+    last_shared = grant_id;
+    hlc_shared += 2;
 
     for i in 0..50 {
-        let op = data_op(&subject_sk, "mv:o:x", &format!("A_pre{i}"), hlc_a, last_a.unwrap());
-        last_a = Some(op.op_id);
-        ops_a.push(op);
-        hlc_a += 1;
+        let op = data_op(
+            &subject_sk,
+            "mv:o:x",
+            &format!("pre{i}"),
+            hlc_shared,
+            last_shared,
+        );
+        last_shared = op.op_id;
+        shared_ops.push(op);
+        hlc_shared += 1;
     }
 
-    let rev = revoke_op(&admin_sk, subject_pk, "editor", &["confidential"], hlc_a, last_a.unwrap());
-    last_a = Some(rev.op_id);
-    ops_a.push(rev);
-    hlc_a += 1;
+    let shared_head = last_shared;
 
-    for i in 0..10 {
-        let op = data_op(&subject_sk, "mv:o:x", &format!("A_post{i}"), hlc_a, last_a.unwrap());
-        last_a = Some(op.op_id);
-        ops_a.push(op);
-        hlc_a += 1;
-    }
-
+    // Partition A learns the revoke.
+    let mut ops_a = shared_ops.clone();
+    let revoke = revoke_op(
+        &admin_sk,
+        subject_pk,
+        "editor",
+        &["confidential"],
+        hlc_shared,
+        shared_head,
+    );
+    ops_a.push(revoke);
     fs::write(out_a, serde_cbor::to_vec(&ops_a)?)?;
 
-    // Partition B: has issuer key + grant (authorized), emits pre- and post-revoke writes.
-    let mut ops_b: Vec<Op> = Vec::new();
-    let mut last_b: Option<OpId> = None;
-    let mut hlc_b = 1_005u64;
-
-    let ik_b = issuer_key_op("issuer-A", "kA", &issuer_a_sk, hlc_b, vec![]);
-    last_b = Some(ik_b.op_id);
-    ops_b.push(ik_b);
-    hlc_b += 1;
-
-    let vc_bytes_b = jwt_compact("issuer-A", &subject_hex, "editor", &["confidential"], hlc_b, hlc_b + 1_000_000, &issuer_a_sk)?;
-    let (cred_b, grant_b, _) = cred_and_grant_ops(vc_bytes_b, &issuer_a_sk, &admin_sk, subject_pk, hlc_b, last_b.unwrap());
-    ops_b.push(cred_b);
-    let grant_b_id = grant_b.op_id;
-    ops_b.push(grant_b);
-    last_b = Some(grant_b_id);
-    hlc_b += 2;
-
-    // Pre-revoke writes.
-    for i in 0..20 {
-        let op = data_op(&subject_sk, "mv:o:x", &format!("B_pre{i}"), hlc_b, last_b.unwrap());
-        last_b = Some(op.op_id);
-        ops_b.push(op);
-        hlc_b += 1;
-    }
-
-    // Post-revoke writes (occur after revoke time; should be skipped post-merge).
+    // Partition B remains stale and emits 10 writes after the revoke's creation time.
+    let mut ops_b = shared_ops;
+    let mut last_b = shared_head;
+    let mut hlc_b = hlc_shared + 1;
     for i in 0..10 {
-        let op = data_op(&subject_sk, "mv:o:x", &format!("B_post{i}"), hlc_b, last_b.unwrap());
-        last_b = Some(op.op_id);
+        let op = data_op(
+            &subject_sk,
+            "mv:o:x",
+            &format!("B_post{i}"),
+            hlc_b,
+            last_b,
+        );
+        last_b = op.op_id;
         ops_b.push(op);
         hlc_b += 1;
     }
