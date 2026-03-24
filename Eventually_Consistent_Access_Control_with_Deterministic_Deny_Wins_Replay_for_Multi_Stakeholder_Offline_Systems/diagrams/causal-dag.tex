@@ -1,117 +1,222 @@
-% Deterministic authorization gate semantics for the main paper.
+% Causal DAG with semantic edge types for the main paper.
 % Required TikZ libraries in the parent document:
-% arrows.meta, positioning, calc, fit, backgrounds
+%   arrows.meta, positioning, calc, fit, backgrounds, decorations.pathreplacing
 
-\definecolor{gttrust}{HTML}{8B5E3C}
-\definecolor{gtepoch}{HTML}{7C3AED}
-\definecolor{gttime}{HTML}{D97706}
-\definecolor{gtpolicy}{HTML}{2563EB}
-\definecolor{gtapply}{HTML}{15803D}
-\definecolor{gtskip}{HTML}{B91C1C}
-\definecolor{gtnode}{HTML}{475569}
-\definecolor{gtbg}{HTML}{F8FAFC}
+% --- Colors ---
+\definecolor{vccolor}{HTML}{0D9488}     % teal  – trust chain
+\definecolor{corecolor}{HTML}{2563EB}   % blue  – authorization chain
+\definecolor{opcolor}{HTML}{D97706}     % orange – data / causal
+\definecolor{policycolor}{HTML}{7C3AED} % purple – policy (grant)
+\definecolor{storecolor}{HTML}{15803D}  % green  – data store
+\definecolor{dagbg}{HTML}{F8FAFC}       % light background
 
 \begin{tikzpicture}[
-    every node/.style={font=\footnotesize\sffamily},
-    ev/.style={
-        rectangle,
-        rounded corners=4pt,
-        minimum width=1.8cm,
-        minimum height=0.8cm,
-        align=center,
-        draw=#1!70!black,
-        fill=#1!12,
-        line width=0.7pt
-    },
-    check/.style={
-        rectangle,
-        rounded corners=4pt,
-        minimum width=6.0cm,
-        minimum height=0.95cm,
-        align=left,
-        draw=#1!65!black,
-        fill=#1!10,
-        line width=0.65pt,
-        inner sep=5pt
-    },
-    gate/.style={
+    every node/.style={font=\small\sffamily},
+    %% --- Node style ---
+    opnode/.style={
         rectangle,
         rounded corners=5pt,
-        minimum width=3.0cm,
-        minimum height=1.35cm,
-        align=center,
-        draw=black!65,
-        fill=black!3,
-        line width=0.9pt
+        minimum width=5.0cm,
+        align=left,
+        draw=#1!70!black,
+        fill=#1!8,
+        line width=0.8pt,
+        inner sep=6pt,
+        font=\scriptsize\ttfamily
     },
-    badge/.style={
+    %% --- Three semantic edge styles ---
+    trustlink/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        very thick,
+        draw=vccolor,
+        densely dashed,
+    },
+    authlink/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        very thick,
+        draw=corecolor,
+        densely dotted,
+    },
+    datalink/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        very thick,
+        draw=opcolor,
+        solid,
+    },
+    %% --- Badge for event type ---
+    typebadge/.style={
+        fill=#1!20,
+        rounded corners=2pt,
+        font=\tiny\sffamily\bfseries,
+        inner sep=2pt,
+        text=#1!80!black
+    },
+    %% --- Replay-order circle ---
+    replaynum/.style={
+        circle,
+        fill=black!80,
+        text=white,
+        font=\scriptsize\sffamily\bfseries,
+        inner sep=1.5pt,
+        minimum size=5mm
+    },
+    %% --- Annotation box ---
+    annot/.style={
         rectangle,
         rounded corners=4pt,
-        minimum width=2.0cm,
-        minimum height=0.7cm,
+        draw=gray!60,
+        fill=white,
         align=center,
-        line width=0.75pt,
-        font=\footnotesize\sffamily\bfseries
-    },
-    flow/.style={
-        -{Stealth[length=2.5mm, width=2.0mm]},
-        line width=0.85pt,
-        draw=black!65
-    },
-    note/.style={font=\scriptsize\sffamily, text=black!68, align=center}
+        font=\scriptsize\sffamily,
+        inner sep=5pt,
+        line width=0.6pt
+    }
 ]
 
-\draw[rounded corners=6pt, fill=gtbg, draw=black!15, line width=0.6pt]
-    (-0.3,-0.9) rectangle (18.9,5.4);
+% ── Background ──
+\draw[rounded corners=8pt, fill=dagbg, draw=black!12, line width=0.5pt]
+    (-2.6, -0.5) rectangle (14.5, 11.0);
 
-\node[ev=gtnode] (iss) at (1.6,4.1) {IssuerKey};
-\node[ev=gttrust] (cred) at (4.0,4.1) {Credential};
-\node[ev=gtepoch] (grant) at (6.3,4.1) {Grant};
-\node[ev=gtnode] (d1) at (8.9,4.1) {$e=\texttt{DATA}$};
-\node[ev=gtskip] (rev) at (11.4,4.1) {Revoke};
-\node[ev=gtnode] (d2) at (13.9,4.1) {$e'=\texttt{DATA}$};
+% Title
+\node[font=\normalsize\sffamily\bfseries, anchor=north west] at (-2.0, 10.6)
+    {equack-core: Operation Structure \& Causal DAG};
 
-\draw[flow] (iss) -- (cred);
-\draw[flow] (cred) -- (grant);
-\draw[flow] (grant) -- (d1);
-\draw[flow] (d1) -- (rev);
-\draw[flow] (rev) -- (d2);
+% ==================================================================
+%  NODES  (compact layout — 3.0-unit vertical gap, 9.0-unit horiz)
+% ==================================================================
 
-\node[note, anchor=west] at (15.1,4.55)
-    {deterministic replay by $(\mathrm{HLC}, \mathrm{op\_id})$};
+% op1 — IssuerKey  (top-left)
+\node[opnode=vccolor] (op1) at (2.0, 8.5) {%
+    id: 0xa3f1\ldots\\
+    parents: [$\emptyset$] \quad\textrm{\scriptsize(genesis)}\\
+    hlc: (1001, 0)\\
+    key: PubA\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} TRUST / IssuerKey\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivA)%
+};
 
-\draw[line width=2.2pt, draw=gtepoch!75!black, -{Stealth[length=2.3mm,width=1.9mm]}]
-    (6.3,3.35) -- (10.95,3.35);
-\draw[line width=1.3pt, draw=gtskip!80!black]
-    (11.4,3.05) -- (11.4,3.65);
-\node[note, anchor=east] at (5.9,3.35) {open epoch};
-\node[note, anchor=west] at (11.6,3.35) {closed by revoke};
+% op2 — Credential  (middle-left)
+\node[opnode=vccolor] (op2) at (2.0, 5.5) {%
+    id: 0xb7c2\ldots\\
+    parents: [0xa3f1]\\
+    hlc: (1002, 0)\\
+    key: PubA\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} TRUST / Credential\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivA)%
+};
 
-\node[badge, draw=gtapply!70!black, fill=gtapply!12, text=gtapply!80!black] at (8.9,2.45) {APPLY};
-\node[badge, draw=gtskip!70!black, fill=gtskip!10, text=gtskip!90!black] at (13.9,2.45) {SKIP};
+% op3 — Data / MVReg = Val1  (top-right)
+\node[opnode=storecolor] (op3) at (11.0, 8.5) {%
+    id: 0xd4e8\ldots\\
+    parents: [0xa3f1]\\
+    hlc: (1003, 0)\\
+    key: PubB\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} DATA / MVReg $\leftarrow$ ``Val1''\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivB)%
+};
 
-\node[check=gttime, anchor=north west] (c1) at (0.5,1.5)
-    {\textbf{Time validity}\\$\mathrm{phys}(\mathrm{hlc}(e)) \in [nb,na)$};
+% op4 — Grant  (bottom-left)
+\node[opnode=policycolor] (op4) at (2.0, 2.5) {%
+    id: 0xe5f9\ldots\\
+    parents: [0xb7c2]\\
+    hlc: (1004, 0)\\
+    key: PubA\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} GRANT\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivA)%
+};
 
-\node[check=gttrust, anchor=north west] (c2) at (6.4,1.5)
-    {\textbf{TrustView / VC validation}\\issuer key known, VC signature valid, status is \texttt{good}};
+% op5 — Data / MVReg = Val2  (bottom-right)
+\node[opnode=storecolor] (op5) at (11.0, 2.5) {%
+    id: 0xf6a0\ldots\\
+    parents: [0xe5f9, 0xd4e8]\\
+    hlc: (1005, 0)\\
+    key: PubB\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} DATA / MVReg $\leftarrow$ ``Val2''\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivB)%
+};
 
-\node[check=gtepoch, anchor=north west] (c3) at (12.3,1.5)
-    {\textbf{Replay position / epoch}\\$\mathrm{pos}(e) \in [p_{start},p_{end})$};
+% ==================================================================
+%  EVENT-TYPE BADGES  (top-right of each node)
+% ==================================================================
+\node[typebadge=vccolor,       anchor=south west] at (op1.north east) {TRUST};
+\node[typebadge=vccolor,       anchor=south west] at (op2.north east) {CREDENTIAL};
+\node[typebadge=storecolor,    anchor=south west] at (op3.north east) {DATA};
+\node[typebadge=policycolor,   anchor=south west] at (op4.north east) {GRANT};
+\node[typebadge=storecolor,    anchor=south west] at (op5.north east) {DATA};
 
-\node[check=gtpolicy, anchor=north west, minimum width=8.2cm] (c4) at (4.6,0.0)
-    {\textbf{Policy allow}\\$P(s,a,r,\alpha_e)=\texttt{allow}$ under deny-overrides semantics};
+% ==================================================================
+%  REPLAY-ORDER CIRCLES  (snug to top-left corner of each node)
+% ==================================================================
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op1.north west) {1};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op2.north west) {2};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op3.north west) {3};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op4.north west) {4};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op5.north west) {5};
 
-\node[gate] (g) at (15.5,0.1)
-    {\textbf{$\mathrm{Gate}(e)$}\\[-1pt]
-     APPLY iff all checks hold\\otherwise SKIP};
+% ==================================================================
+%  EDGES — three semantic categories
+% ==================================================================
 
-\draw[flow, draw=gttime!80!black] ([yshift=-1pt]c1.east) -- ++(0.5,0) |- (g.west);
-\draw[flow, draw=gttrust!80!black] ([yshift=-1pt]c2.east) -- ++(0.5,0) |- (g.west);
-\draw[flow, draw=gtepoch!80!black] ([yshift=-1pt]c3.west) -- ++(-0.5,0) |- (g.north);
-\draw[flow, draw=gtpolicy!80!black] (c4.east) -- (g.west);
+% op2 → op1 : trustlink  (Credential verifies IssuerKey)
+\draw[trustlink] (op2.north) -- (op1.south)
+    node[midway, right=3pt, font=\tiny\sffamily, text=vccolor!80!black] {verifies issuer};
 
-\node[note] at (9.25,-0.55)
-    {Authorization is a deterministic function of the reconciled event set, not of message arrival order.};
+% op3 → op1 : datalink  (Data causally after IssuerKey — ordering only)
+\draw[datalink] (op3.west) -- (op1.east)
+    node[midway, above=2pt, font=\tiny\sffamily, text=opcolor!80!black] {causal dep};
+
+% op4 → op2 : authlink  (Grant activates Credential)
+\draw[authlink] (op4.north) -- (op2.south)
+    node[midway, right=3pt, font=\tiny\sffamily, text=corecolor!80!black] {activates VC};
+
+% op5 → op4 : authlink  (Data gated by Grant)
+\draw[authlink] (op5.west) -- (op4.east)
+    node[midway, above=2pt, font=\tiny\sffamily, text=corecolor!80!black] {gated by};
+
+% op5 → op3 : datalink  (CRDT merge point)
+\draw[datalink] (op5.north) -- (op3.south)
+    node[midway, right=3pt, font=\tiny\sffamily, text=opcolor!80!black] {CRDT merge};
+
+% ==================================================================
+%  LEGEND  (centred in the clear middle area)
+% ==================================================================
+\node[draw=gray!60, fill=white, rounded corners=5pt, align=left,
+      font=\scriptsize\sffamily, line width=0.7pt, inner sep=7pt]
+      (legend) at (6.5, 5.5) {%
+    \textbf{Topological Order Tie-breaking:}\\
+    1. Parents strictly before children\\
+    2. Lowest HLC (physical\_ms, logical)\\
+    3. Lowest Op-ID (BLAKE3)\\[5pt]
+    \textbf{Edge types:}\\
+    \tikz\draw[vccolor, densely dashed, very thick,
+      -{Stealth[length=2mm]}] (0,0) -- (0.9,0);
+      \;\; Trust chain\\
+    \tikz\draw[corecolor, densely dotted, very thick,
+      -{Stealth[length=2mm]}] (0,0) -- (0.9,0);
+      \;\; Authorization\\
+    \tikz\draw[opcolor, solid, very thick,
+      -{Stealth[length=2mm]}] (0,0) -- (0.9,0);
+      \;\; Data / causal%
+};
+
+% ==================================================================
+%  ANNOTATION BOXES
+% ==================================================================
+
+% Auth Epoch Builder — brace tight to the left column
+\draw[decorate, decoration={brace, amplitude=5pt, mirror},
+      thick, draw=corecolor!70!black]
+    ([xshift=-3mm]op1.north west) -- ([xshift=-3mm]op4.south west)
+    node[midway, left=7pt, annot, text=corecolor!80!black] {%
+        \textbf{Auth Epoch}\\Builder%
+    };
+
+% Deny-Wins Gate — op5 flows through the gate for APPLY/SKIP
+\node[annot, text=policycolor!80!black] (denylabel) at ([yshift=-10mm]op5.south) {%
+    \textbf{Deny-Wins Gate}%
+};
+\draw[-{Stealth[length=2mm]}, thick, draw=policycolor!60!black]
+    (op5.south) -- (denylabel.north)
+    node[midway, right=3pt, font=\tiny\sffamily, text=policycolor!70!black] {APPLY / SKIP};
 
 \end{tikzpicture}

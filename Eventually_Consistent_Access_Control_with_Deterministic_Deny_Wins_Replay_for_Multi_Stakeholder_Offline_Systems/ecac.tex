@@ -372,12 +372,12 @@ Concurrent events---those without causal order---are resolved using a composite 
 \textbf{Separation of DAG and CRDT roles.} A common point of confusion in offline access control is the overlapping role of causal graphs and Data CRDTs. In \equack{}, the pipeline follows a strict separation of concerns: the DAG and topological sort fix a deterministic, totally-ordered sequence of events to evaluate \textit{authorization and policy validity}. Meanwhile, the CRDT state (e.g., MVReg, OR-Set) strictly handles \textit{data payload convergence}. The policy engine evaluates the strict ordered DAG to build epochs and TrustViews; only authorized DATA events are then handed off to the CRDTs. 
 
 
-The event DAG acts as a convergent CRDT: merging logs is a set union---commutative, associative, idempotent. Figure~\ref{fig:dag-structure-paperC} summarizes the replay-time decision inputs consumed by the deny-wins gate. Each operation still carries a signed header with parent links, HLC timestamp, producer key, and typed payload, but the main-paper semantic claim is that authorization becomes a deterministic function of the reconciled event set. Replicas accept events opportunistically but only replay them once causal predecessors are present (activated/pending staging), ensuring every replica topologically sorts the same DAG prefix.
+The event DAG acts as a convergent CRDT: merging logs is a set union---commutative, associative, idempotent. Figure~\ref{fig:dag-structure-paperC} illustrates the operation structure and causal DAG: each operation carries a signed header with parent links, HLC timestamp, producer key, and typed payload. Three categories of edges---trust-chain, authorization, and data/causal---encode the semantic relationships between operations. Authorization becomes a deterministic function of the reconciled event set. Replicas accept events opportunistically but only replay them once causal predecessors are present (activated/pending staging), ensuring every replica topologically sorts the same DAG prefix.
 
 \begin{figure*}[htbp]
 \centering
 \resizebox{\textwidth}{!}{\input{diagrams/causal-dag.tex}}
-\caption{Deterministic authorization during replay. For a replay-ordered event $e$, \equack{} applies \texttt{DATA}$(e)$ only when four conditions hold simultaneously: the event occupies a position inside an open authorization epoch, the event's physical time lies inside the VC validity interval, the issuer key and status evidence in TrustView validate the credential offline, and the policy layer returns \texttt{allow}. Otherwise the event is skipped, making authorization a deterministic function of the reconciled event set.}
+\caption{Operation structure and causal DAG\@. Each node shows the OpHeader fields, typed payload, and Ed25519 signature. Edges encode three semantic relationships: trust-chain links (dashed teal) connect issuer keys to credentials, authorization links (dotted blue) connect credentials to grants and grants to gated data operations, and data/causal links (solid orange) encode CRDT merge points and ordering dependencies. Circled numbers indicate the deterministic replay order from Algorithm~\ref{alg:linearize-paperC}.}
 \label{fig:dag-structure-paperC}
 \end{figure*}
 
@@ -716,7 +716,14 @@ Gossip/sync & \texttt{net::gossip} \\
 \section{Evaluation}
 \label{sec:eval-paperC}
 
-We evaluate \equack{} through deterministic experiments that provide empirical evidence for the formal guarantees (R2--R5) and quantify replay cost. All experiments use fixed seeds and a deterministic environment (\texttt{TZ=UTC, SOURCE\_DATE\_EPOCH=1}), and assume offline operation without continuous global consensus (R1).
+We evaluate \equack{} through deterministic experiments that provide
+empirical evidence for the main theorems (Theorems~1--5,
+Section~\ref{subsec:ecac-model-paperC}) and quantify replay cost.
+Table~\ref{tab:experiment-summary} maps each experiment to the
+theorem(s) it targets. All experiments use fixed seeds and a
+deterministic environment (\texttt{TZ=UTC, SOURCE\_DATE\_EPOCH=1}).
+Offline operation without continuous global consensus is a
+precondition of the model, not an experimental variable.
 
 \subsection{Methodology}\label{subsec:methodology-paperC}
 
@@ -744,16 +751,49 @@ offline-\allowbreak revocation & 8 & Mixed & Single & Policy overhead \\
 \end{tabular}
 \end{table}
 
+\begin{table}[htbp]
+\centering
+\caption{Experiment summary. T1--T5 refer to the formal guarantees in Section~\ref{subsec:ecac-model-paperC}; ``Perf'' denotes performance characterization without a corresponding theorem.}
+\label{tab:experiment-summary}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{ID} & \textbf{Experiment} & \textbf{Theorems} \\
+\midrule
+E1  & Convergence (100 orderings)      & T1, T2  \\
+E2  & Cross-platform determinism       & T1      \\
+E3  & Deny-wins revocation             & T3      \\
+E4  & Multi-authority conflict          & T1--T3   \\
+E5  & Audit integrity (3 tamper modes)  & T4      \\
+E6  & Replay scaling + checkpoints      & Perf    \\
+E7  & Throughput by workload            & Perf    \\
+E8  & Storage growth                    & Perf    \\
+E9  & Peak memory (RSS)                 & Perf    \\
+E11 & Partition-heal revocation         & T2, T3  \\
+E12 & Multi-node sync                   & T2, T3  \\
+E13 & Encryption overhead               & T5      \\
+E14 & Key rotation cost                 & T5      \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Sections~\ref{subsec:correctness-paperC}
+and~\ref{subsec:performance-paperC} present correctness experiments
+(E1--E5, E11--E12) that validate the formal guarantees, followed
+by performance experiments (E6--E9, E13--E14) that characterize
+replay cost, storage, and encryption overhead.
 
 \subsection{Correctness}\label{subsec:correctness-paperC}
 
-\paragraph*{\textit{Convergence (E1, R2)}}
+\paragraph*{\textit{Convergence (E1; Theorems~1--2)}}
 A 10{,}000-op concurrent-workload log was permuted into 100 valid orderings (respecting causal dependencies) and each was replayed independently. All 100 produced the same digest (\texttt{\small cbab89ee\ldots b7f493b2}), with mean replay time 615~ms ($\sigma=18$~ms).
 
-\paragraph*{\textit{Deny-wins revocation (E3, R3)}}
+\paragraph*{\textit{Deny-wins revocation (E3; Theorem~3)}}
 User $U$ was granted write access, performed 1{,}000 writes, and had the credential revoked after write~500. The 1{,}004-op log (1{,}000 Data + IssuerKey, Credential, Grant, Revoke) was replayed: the first 500 writes applied, the remaining 500 skipped. Digest: \texttt{\small 8da8b49e\ldots 46633fbf}.
 
-\paragraph*{\textit{Revocation under partition (E11, R3)}}
+\paragraph*{\textit{Revocation under partition (E11; Theorems~2--3)}}
 In partition~A a user is revoked; partition~B, which has not yet received the revocation, contains further writes from the same user under stale evidence. After merging both logs and replaying, the 50 shared-prefix writes were applied and the 10 stale post-revocation writes from partition~B were skipped. This is the scenario \equack{} was designed for.
 Figure~\ref{fig:partition-heal-paperC} visualizes repair-on-heal together with the finite pre-convergence safety window $W(r)$: replicas may diverge locally during a partition, but once they reconcile to the same event set, post-revoke effects disappear from the final digital state.
 
@@ -764,16 +804,16 @@ Figure~\ref{fig:partition-heal-paperC} visualizes repair-on-heal together with t
 \label{fig:partition-heal-paperC}
 \end{figure*}
 
-\paragraph*{\textit{Multi-authority conflict (E4, R5)}}
+\paragraph*{\textit{Multi-authority conflict (E4; Theorems~1--3)}}
 Three issuers ($I_1$, $I_2$, $I_3$) with overlapping authority grant user $U$ the ``editor'' role at $t_1$, $t_2$; $I_3$ revokes at $t_3>t_2$. The resulting 128-op log was injected into 10 replicas in random orders. All converged to the same digest (\texttt{\small f2fbb024\ldots 1103c2b2}): writes during $[t_1,t_3)$ accepted, writes after $t_3$ skipped.
 
-\paragraph*{\textit{Audit integrity (E5, R4)}}
+\paragraph*{\textit{Audit integrity (E5; Theorem~4)}}
 An audited log was generated and the chain head digest $\mathrm{ch}_N$ was recorded. Three tamper modes were applied: (1)~a byte flip in one record's payload, (2)~deletion of one record from the pinned prefix, and (3)~a swap of two adjacent records. Chain verification against $\mathrm{ch}_N$ succeeded on the untampered log and failed on all three mutations, detecting each at the exact tampered record.
 
-\paragraph*{\textit{Cross-platform determinism (E2)}}
+\paragraph*{\textit{Cross-platform determinism (E2; Theorem~1)}}
 A 127-op CBOR fixture exercises all event categories (Data, Grant, Revoke, Trust) and includes true concurrency. A CI test replays it and asserts the final digest equals a hardcoded constant (\texttt{\small 4ea9684a\ldots bdc2b9}, blake3). Any replay-engine change that alters the digest breaks the build, following the approach of cross-environment consistency verification~\cite{7163066}. Full cross-platform validation (aarch64, macOS, Windows) awaits CI infrastructure.
 
-\paragraph*{\textit{Multi-node sync (E12)}}
+\paragraph*{\textit{Multi-node sync (E12; Theorems~2--3)}}
 In an in-process simulation, three nodes each generated 1{,}000 ops independently, then synced; all converged. A second scenario partitioned node~C while A issued a Revoke targeting C. After healing and full sync, all three nodes held the same digest, with C's post-revoke ops gated out (Table~\ref{tab:e12-sync-paperC}).
 
 \begin{table}[htbp]
@@ -877,7 +917,7 @@ CBOR log size grows linearly at $\approx$430~bytes/op; RocksDB write amplificati
 \end{tabular}
 \end{table}
 
-\paragraph*{\textit{Confidentiality overhead (E13, E14)}}
+\paragraph*{\textit{Confidentiality overhead (E13, E14; Theorem~5)}}
 Per-tag encryption adds $\sim$6.5\% replay overhead (76.8 vs.\ 81.8~ms on 100 writes) with 40~bytes/payload ciphertext expansion. Key rotation costs $\sim$78~ms per KeyRotate event. These are small-scale measurements; larger logs are needed to separate per-op cost from startup overhead.
 
 
@@ -939,7 +979,7 @@ Several gaps remain between the \equack{} prototype and a production-ready syste
 
 This paper addressed the offline enforcement problem: how can independent authorities grant and revoke permissions for shared resources that operate during disconnection, while converging to a consistent and auditable authorization state? \equack{} operationalizes this using a causal event DAG with deterministic replay: all events influencing authorization are recorded as signed, hash-linked operations; replicas merge by set union and replay under a deny-wins gate that skips unauthorized effects.
 
-The evaluation provides empirical evidence consistent with the formal guarantees. Replicas converged across 100 randomized orderings (E1); post-revocation effects were suppressed, including across partition boundaries (E3, E11); audit tampering was detected (E5); and multi-issuer conflicts resolved deterministically (E4). Replay throughput reaches 45k~ops/s for linear chains with 8--11$\times$ checkpoint speedup (E6, E10). Three-node sync convergence is confirmed under partition-heal conditions with deny-wins revocation (E12). Encryption overhead is modest ($\sim$6.5\%).
+The evaluation provides empirical evidence consistent with the formal guarantees. Replicas converged across 100 randomized orderings (E1); post-revocation effects were suppressed, including across partition boundaries (E3, E11); audit tampering was detected (E5); and multi-issuer conflicts resolved deterministically (E4). Replay throughput reaches 45k~ops/s for linear chains with 8--11$\times$ checkpoint speedup (E6). Three-node sync convergence is confirmed under partition-heal conditions with deny-wins revocation (E12). Encryption overhead is modest ($\sim$6.5\%).
 
 The evaluation is primarily single-machine with synthetic workloads; E12 uses in-process simulation. Cross-platform determinism (E2) is verified on Linux x86\_64; multi-platform CI is deferred. The model assumes eventual delivery, correctly managed trust inputs, and uncompromised key material. Revocation cannot undo irreversible physical-world actions. As formalized in the pre-convergence safety window analysis, \equack{} provides retroactive revocation safety---the converged state $s^\star$ always reflects revocations---but does not prevent transient authorization under stale evidence during partitions. Cedar's verified properties hold for $s^\star$ but not for transient local decisions.
 
