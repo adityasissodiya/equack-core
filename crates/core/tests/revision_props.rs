@@ -266,8 +266,10 @@ proptest! {
         // Full replay state.
         let (_state_full, digest_full) = replay_full(&dag);
 
-        // For each DATA op that is NOT authorized, verify removing it does not
-        // change the digest (i.e., it was indeed skipped during replay).
+        // For each DATA op that is NOT authorized, verify removing it does
+        // not change the CRDT state (i.e., it was indeed skipped during
+        // replay).  We normalize processed_count before comparing digests
+        // because removing an op changes the DAG length but not the data.
         for (pos, id) in topo.iter().enumerate() {
             let Some(op) = dag.get(id) else { continue };
             let Payload::Data { ref key, .. } = op.header.payload else { continue };
@@ -295,7 +297,11 @@ proptest! {
                         dag_without.insert(other_op.clone());
                     }
                 }
-                let (_state_without, digest_without) = replay_full(&dag_without);
+                let (mut state_without, _) = replay_full(&dag_without);
+                // Normalize processed_count so digest comparison is purely
+                // about CRDT state, not DAG size metadata.
+                state_without.set_processed_count(_state_full.processed_count());
+                let digest_without = state_without.digest();
 
                 prop_assert_eq!(
                     digest_full, digest_without,
@@ -379,7 +385,11 @@ proptest! {
             }
         }
 
-        let (_state_trimmed, digest_trimmed) = replay_full(&dag_trimmed);
+        let (mut _state_trimmed, _) = replay_full(&dag_trimmed);
+        // Normalize processed_count so digest comparison is purely
+        // about CRDT state, not DAG size metadata.
+        _state_trimmed.set_processed_count(_state_full.processed_count());
+        let digest_trimmed = _state_trimmed.digest();
 
         prop_assert_eq!(
             digest_full, digest_trimmed,
