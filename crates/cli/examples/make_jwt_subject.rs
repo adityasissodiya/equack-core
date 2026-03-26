@@ -36,7 +36,7 @@ fn hex32(arr: &[u8; 32]) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Args: <ISSUER_SK_HEX> <SUBJECT_SK_HEX> <OUT_JWT_PATH>
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let args = env::args().skip(1).collect::<Vec<_>>();
     if args.len() != 3 {
         eprintln!("usage: make_jwt_subject <ISSUER_SK_HEX> <SUBJECT_SK_HEX> <OUT_JWT_PATH>");
         std::process::exit(2);

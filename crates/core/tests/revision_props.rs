@@ -61,7 +61,7 @@ struct ScenarioOps {
     /// Public key of the data-authoring user.
     user_pk: [u8; 32],
     /// Public key of the admin (issuer + grant author).
-    admin_pk: [u8; 32],
+    _admin_pk: [u8; 32],
 }
 
 fn build_scenario(seed: u64, n_data: usize, emit_revoke: bool) -> ScenarioOps {
@@ -149,7 +149,7 @@ fn build_scenario(seed: u64, n_data: usize, emit_revoke: bool) -> ScenarioOps {
         ops.push(data_op);
     }
 
-    ScenarioOps { ops, revoke_hlc_phys, user_pk, admin_pk }
+    ScenarioOps { ops, revoke_hlc_phys, user_pk, _admin_pk: admin_pk }
 }
 
 /// Insert all ops into a DAG in the order specified by `indices`.

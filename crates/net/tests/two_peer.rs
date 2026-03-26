@@ -180,7 +180,6 @@ async fn rr_fetch_roundtrip_via_channel() -> Result<()> {
                         // if server chose to send End first, it is still a valid response
                         break Ok::<_, anyhow::Error>(());
                     }
-                    _ => {}
                 }
             }
         }
@@ -249,7 +248,6 @@ async fn rr_fetch_with_provider_minimal() -> Result<()> {
                     RpcFrame::End => {
                         panic!("provider returned End without matching id; expected OpBytes for [9;32]");
                     }
-                    _ => {}
                 }
             }
         }

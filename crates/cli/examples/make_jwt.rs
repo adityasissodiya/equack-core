@@ -37,7 +37,7 @@ fn to_hex32(arr: &[u8; 32]) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Args: <issuer_sk_hex> <out_path>
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let args = env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 2 {
         eprintln!("usage: cargo run -p ecac-cli --example make_jwt -- <issuer_sk_hex> <out_path>");
         std::process::exit(2);

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use libp2p::gossipsub::PublishError;
 use libp2p::Multiaddr;
 use tokio::task::yield_now;
 use tokio::time::{sleep, timeout, Duration};
@@ -109,7 +108,7 @@ async fn duplicate_announce_storm_is_ignored() -> Result<()> {
     })
     .await??;
 
-    /// Give gossip a brief settle time for membership/fanout before we publish.
+    // Give gossip a brief settle time for membership/fanout before we publish.
     timeout(Duration::from_secs(1), async {
         // ~ a few hundred ms of ticks is plenty with 200ms heartbeat
         for _ in 0..10 {

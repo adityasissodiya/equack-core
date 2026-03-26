@@ -9,7 +9,7 @@ fn main() {
     let out_dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "fixtures".to_string());
-    let mut dir = PathBuf::from(out_dir);
+    let dir = PathBuf::from(out_dir);
     fs::create_dir_all(&dir).expect("mkdir fixtures");
 
     let (sk, vk) = generate_keypair();

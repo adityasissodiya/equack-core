@@ -1,4 +1,3 @@
-use std::{env, path::Path};
 
 #[cfg(feature = "audit")]
 use ecac_store::audit_sink::StoreAuditHook;

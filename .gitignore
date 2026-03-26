@@ -1,5 +1,6 @@
 # === Rust / Cargo ===
 /target/
+**/target/
 **/*.rs.bk
 
 # Keep Cargo.lock (reproducibility). Do NOT ignore it.
@@ -38,6 +39,18 @@ node_modules/
 # === Python virtual environments ===
 .venv/
 venv/
+
+# === LaTeX build artifacts ===
+*.aux
+*.out
+*.synctex.gz
+
+# === Backup files ===
+*.bak
+
+# === Local database state ===
+.m8test.db/
+**/.ecac.db/
 
 # === Project artifacts we don't commit (paper run outputs) ===
 docs/eval/out/

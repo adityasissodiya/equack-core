@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs};
 
 use ecac_core::dag::Dag;
 use ecac_core::op::{Op, Payload};
@@ -29,7 +29,7 @@ fn hex32(arr: &[u8; 32]) -> String {
 
 fn main() -> anyhow::Result<()> {
     // Args: <op.cbor>...
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!("usage: vc_replay <op_or_vec1.cbor> [more.cbor ...]");
         std::process::exit(2);

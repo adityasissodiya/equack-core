@@ -6,7 +6,6 @@ use ecac_store::{Store, StoreOptions};
 use pretty_assertions::assert_eq;
 use rocksdb::{ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options};
 use std::{fs, path::Path, path::PathBuf};
-use tempfile::tempdir;
 
 /// --- helpers ----------------------------------------------------------------
 

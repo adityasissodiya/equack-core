@@ -18,6 +18,7 @@ fn e3_cbor_path() -> PathBuf {
 }
 
 #[test]
+#[ignore = "requires external e3-policy.cbor fixture not included in the repository"]
 fn count_e3_payload_variants() {
     let path = e3_cbor_path();
     assert!(path.exists(), "e3-policy.cbor not found at {}", path.display());

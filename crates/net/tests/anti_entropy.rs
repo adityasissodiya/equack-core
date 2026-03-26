@@ -153,7 +153,7 @@ async fn anti_entropy_round_converges() -> Result<()> {
     b.listen(loopback_addr())?;
 
     // Wait for listen addrs
-    let a_addr = timeout(Duration::from_secs(5), async {
+    let _a_addr = timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(addr) = a.listen_addr_rx.try_recv() {
                 break Ok::<_, anyhow::Error>(addr);

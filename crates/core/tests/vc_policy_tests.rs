@@ -386,7 +386,7 @@ fn vc_hash_mismatch_denies() {
     );
 
     // Build a DIFFERENT credential (B) for another subject just to obtain a different cred_hash
-    let (other_user_sk, other_user_vk) = generate_keypair();
+    let (_other_user_sk, other_user_vk) = generate_keypair();
     let other_user_pk = vk_to_bytes(&other_user_vk);
     let (cred_b, _grant_b_unused) = make_credential_and_grant(
         &issuer_sk,
@@ -678,7 +678,7 @@ fn vc_inband_trustview_allows() {
 
     let (admin_sk, admin_vk) = generate_keypair();
     let admin_pk = vk_to_bytes(&admin_vk);
-    let (user_sk, user_vk) = generate_keypair();
+    let (_user_sk, user_vk) = generate_keypair();
     let user_pk = vk_to_bytes(&user_vk);
 
     let nbf = 10_000u64;
@@ -745,7 +745,7 @@ fn vc_inband_trustview_status_revoked_denies() {
 
     let (admin_sk, admin_vk) = generate_keypair();
     let admin_pk = vk_to_bytes(&admin_vk);
-    let (user_sk, user_vk) = generate_keypair();
+    let (_user_sk, user_vk) = generate_keypair();
     let user_pk = vk_to_bytes(&user_vk);
 
     let nbf = 10_000u64;

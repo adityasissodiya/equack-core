@@ -103,19 +103,19 @@ pub fn encrypt_value(
     plaintext: &[u8],
     aad: &[u8],
 ) -> EncV1 {
-    let key = Key::from_slice(key);
-    let cipher = XChaCha20Poly1305::new(key);
+    let key = Key::from(*key);
+    let cipher = XChaCha20Poly1305::new(&key);
 
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
     let mut buf = plaintext.to_vec();
 
     let auth_tag = cipher
-        .encrypt_in_place_detached(XNonce::from_slice(&nonce), aad, &mut buf)
+        .encrypt_in_place_detached(&nonce.into(), aad, &mut buf)
         .expect("encryption failure");
 
     let mut tag_bytes = [0u8; 16];
-    tag_bytes.copy_from_slice(auth_tag.as_slice());
+    tag_bytes.copy_from_slice(auth_tag.as_ref());
 
     EncV1 {
         tag: tag.to_string(),
@@ -129,15 +129,15 @@ pub fn encrypt_value(
 /// Decrypt an EncV1 envelope with the given key and AAD.
 /// Returns None on any failure (wrong key, bad AAD, tampering).
 pub fn decrypt_value(key: &[u8; 32], enc: &EncV1, aad: &[u8]) -> Option<Vec<u8>> {
-    let key = Key::from_slice(key);
-    let cipher = XChaCha20Poly1305::new(key);
+    let key = Key::from(*key);
+    let cipher = XChaCha20Poly1305::new(&key);
 
     let mut buf = enc.ct.clone();
-    let nonce = XNonce::from_slice(&enc.nonce);
-    let auth_tag = chacha20poly1305::Tag::from_slice(&enc.aead_tag);
+    let nonce = XNonce::from(enc.nonce);
+    let auth_tag = chacha20poly1305::Tag::from(enc.aead_tag);
 
     if cipher
-        .decrypt_in_place_detached(nonce, aad, &mut buf, auth_tag)
+        .decrypt_in_place_detached(&nonce, aad, &mut buf, &auth_tag)
         .is_err()
     {
         return None;
