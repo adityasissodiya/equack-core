@@ -166,7 +166,7 @@ Access control, revocation, verifiable credentials, CRDTs, deterministic replay,
   records data operations, credential grants and revocations, and
   trust evidence in a single signed causal event log. Replicas
   merge logs by set union and reconstruct authorized state through
-  deterministic replay with a deny-wins gate. Authorization is
+  deterministic replay with a \emph{deny-wins} gate---a conflict-resolution rule in which any revocation overrides concurrent permits. Authorization is
   expressed through Verifiable Credential (VC)-based time-bounded epochs evaluated by a
   Cedar-inspired policy engine supporting Attribute-Based Access Control (ABAC) and Role-Based Access Control (RBAC) semantics,
   so that fine-grained, scoped, attribute-conditional permissions
@@ -414,7 +414,7 @@ The event DAG acts as a convergent CRDT; merging logs is a set union, commutativ
 \label{fig:dag-structure}
 \end{figure*}
 
-Replay follows a deny-wins rule, each event is applied only if the actor held the required permission at that moment; unauthorized events become no-ops. Operations are disseminated via gossip and anti-entropy (libp2p); this affects liveness but not safety or determinism.
+Replay follows a deny-wins rule, each event is applied only if the actor held the required permission at that moment; unauthorized events become no-ops. Operations are disseminated via gossip and background synchronization (anti-entropy) using libp2p; this affects liveness but not safety or determinism.
 
 \textbf{Realization.} The DAG is implemented in \texttt{core::dag}, which stores operations and computes the deterministic topological sort (\texttt{core::replay::topo\_sort}). CRDT state ($\mathrm{MVReg}$, $\mathrm{OR\text{-}Set}$) is managed by \texttt{core::crdt}. Operations are serialized as deterministic CBOR with Ed25519 signatures computed over BLAKE3 hashes of the unsigned header (\texttt{core::crypto}). Gossip dissemination and anti-entropy synchronization use libp2p (\texttt{net::gossip}, \texttt{net::sync}).
 
@@ -422,9 +422,9 @@ Replay follows a deny-wins rule, each event is applied only if the actor held th
 
 \equack{} manages permissions using verifiable, time-bounded credentials. It adopts the W3C VC format for signed authorization tokens asserting a principal's rights over a specific interval (validFrom--validUntil). Credentials are tamper-evident and self-verifying; replicas independently confirm authenticity and validity~\cite{8603785}.
 
-Revocations use standard VC status lists, cryptographically signed bitstrings indicating whether each credential ID is revoked. A valid credential defines an authorization epoch; expiry or revocation ends it.
+Revocations use standard VC status lists, cryptographically signed bitstrings indicating whether each credential ID is revoked. A valid credential defines an \emph{authorization epoch}---the interval during which that credential grants a subject a specific permission; expiry or revocation ends it.
 
-Trust evidence is carried in-band as TRUST events (issuer keys and status-list updates) and replayed into a local TrustView, anchored by a pinned, cross-signed genesis checkpoint. The log forms a distributed PKI, an offline node can verify at any timestamp that a user held a valid, non-revoked credential without contacting a central authority.
+Trust evidence is carried in-band as TRUST events (issuer keys and status-list updates) and replayed into a local \emph{TrustView}---the replica's materialized view of all issuer keys and credential-status evidence received so far---anchored by a pinned, cross-signed genesis checkpoint. The log forms a distributed PKI, an offline node can verify at any timestamp that a user held a valid, non-revoked credential without contacting a central authority.
 
 During replay, the system checks for a valid credential covering each event's timestamp; if found, the operation applies, otherwise it is skipped.
 
@@ -614,7 +614,7 @@ Let $\mathcal{P}$ denote the Cedar policy, modeled as a total function
   \mathcal{P} : \mathsf{Subj}\times\mathsf{Act}\times\mathsf{Res}\times\mathsf{Attr}\to\{\mathsf{allow},\mathsf{deny}\},
 \]
 with \emph{deny-overrides} semantics.
-For a $\mathsf{DATA}$ event $e$ with tuple $(s,a,r,\alpha_e)$, define:
+For a $\mathsf{DATA}$ event $e$ with tuple $(s,a,r,\alpha_e)$, define the \emph{gate function}---the predicate that determines whether a data event is authorized at its position in the replay order:
 \[
 \begin{aligned}
 \mathsf{Gate}(e) :=\;&
@@ -650,7 +650,7 @@ Given initial state $s_0$, define \emph{deterministic replay} over the sequence 
   \end{cases}\Big).
 \end{aligned}
 \]
-The \emph{materialized state} is $s^\star := \mathsf{Replay}(s_0,\langle e\rangle_{\triangleleft})$.
+The \emph{materialized state} (the computed state after replaying all events) is $s^\star := \mathsf{Replay}(s_0,\langle e\rangle_{\triangleleft})$.
 Checkpoints store $(\mathsf{H}(s^\star),\mathrm{meta})$ periodically together with the append-only event store.
 
 \medskip
@@ -955,6 +955,8 @@ Regarding validity: E6 covers six log sizes with five trials each, but E8 and E9
 
 \section{Discussion}
 \label{sec:discussion}
+
+\noindent This section examines the trade-offs, limitations, and positioning of the model and prototype.
 
 \paragraph*{\textit{Partition-duration trade-off and safety window}}
 \equack{}'s deny-wins gate repairs authorization state after partition heal but cannot prevent unauthorized effects during the partition itself. The vulnerability window equals partition duration ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$): a revoked user's writes are retroactively invalidated when logs merge, yet physical-world consequences (actuator commands, parameter changes) persist. For short disconnections (minutes to hours), operators can defer safety-critical actuations until sync confirms authorization; for day-long partitions, application-layer compensating controls (staged commit, human-in-the-loop) are needed. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation---the physical world cannot be rewound.

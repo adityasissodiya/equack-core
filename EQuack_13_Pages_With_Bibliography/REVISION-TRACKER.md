@@ -73,3 +73,16 @@ Tracks changes made during the supervisor-feedback revision (supervisorFeedback.
 - Figure 3 (Causal DAG): Confirmed Algorithm ref resolved correctly; no changes needed
 - Figure 4 (Deny-wins replay): Good as-is; no changes
 - Skipped optional workflow figure (page budget already met)
+
+## Phase 8: Background Knowledge Reduction Pass
+**Status:** Complete
+
+### Changes:
+- Added deny-wins definition on first body use (Introduction): "a conflict-resolution rule in which any revocation overrides concurrent permits"
+- Added authorization epoch definition on first use (Section 3.2): "the interval during which that credential grants a subject a specific permission"
+- Added TrustView definition on first use (Section 3.2): "the replica's materialized view of all issuer keys and credential-status evidence received so far"
+- Added gate function explanation before formal definition (Section 3.5): "the predicate that determines whether a data event is authorized at its position in the replay order"
+- Added materialized state parenthetical: "(the computed state after replaying all events)"
+- Added Discussion section orienting sentence
+- Replaced "anti-entropy" with "background synchronization (anti-entropy)" on first use
+- Replaced "anti-entropy" label in Figure 1 with "sync"
