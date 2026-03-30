@@ -291,6 +291,23 @@ R6 Confidentiality               & Partial & Partial & No      & No       & No  
 
 Table~\ref{tab:gap-summary} evaluates five dominant approaches against R1--R6. Centralized Identity and Access Management (IAM) couples enforcement to online coordination, failing R1 and R3 under partition~\cite{jacob2024eventuallyac}. Token-based schemes enable offline checks but lack deterministic reconciliation and timely revocation~\cite{rouhani2021distributed}. CRDTs converge data payloads; they do not define authorization semantics or revocation rollback~\cite{shapiro2011crdt,gomes2017_sec}. Blockchains offer total ordering and auditability at the cost of online consensus, which is incompatible with offline enforcement~\cite{8989788,9020182,9446108,8798730,9548956,DIFRANCESCOMAESA201993,s20010282,s22031271}. Capability-based systems~\cite{birgisson2014macaroons,ucan2022,andersen2019wave} verify delegated authority offline but cannot deterministically converge conflicting authorization state or retroactively revoke. No existing approach simultaneously satisfies R1--R6.
 
+Table~\ref{tab:gap-summary} identifies which \emph{properties}
+each paradigm satisfies. The deeper gap is mechanism-level: no
+existing approach provides
+(i)~deterministic reconciliation of authorization history after
+    partition,
+(ii)~deny-wins revocation semantics that retroactively exclude
+    operations admitted under stale credentials,
+(iii)~fine-grained policy evaluation (ABAC/RBAC) over the
+    reconciled history,
+(iv)~in-band propagation of trust and credential-status evidence,
+    or
+(v)~auditable linkage between credential state and data-state
+    replay.
+ECAC~\cite{jacob2024eventuallyac} provides the formal framework
+for (i) but not the concrete mechanisms for (ii)--(v). \equack{}
+fills these gaps.
+
 \subsection{Mechanism-Level Comparison}\label{subsec:mechanism-comparison}
 
 To clarify \equack{}'s positioning, Table~\ref{tab:mech-compare} compares it against the closest design patterns along five axes: ordering model, revocation semantics, trust distribution, audit model, and offline availability.
