@@ -195,7 +195,7 @@ Access control, revocation, verifiable credentials, CRDTs, deterministic replay,
       excluded after reconciliation.
 
     \item \textit{Prototype and evaluation}
-      (Sections~\ref{sec:implementation}--\ref{sec:evaluation}).  \textit{equack-core} is evaluated for convergence, revocation
+      (Sections~\ref{sec:ecac-model}--\ref{sec:evaluation}).  \textit{equack-core} is evaluated for convergence, revocation
       enforcement, multi-authority conflict resolution, audit integrity,
       and replay cost.  The experiments confirm identical state digests
       across 100 topological orderings of a 10\,000-operation log,
@@ -205,8 +205,8 @@ Access control, revocation, verifiable credentials, CRDTs, deterministic replay,
 \end{enumerate}
 
   Section~\ref{sec:problem-analysis} formalizes the problem and derives requirements.
-  Section~\ref{sec:ecac-model} presents the \equack{} model and formal guarantees.
-  Section~\ref{sec:implementation} describes the Rust prototype.
+  Section~\ref{sec:ecac-model} presents the \equack{} model, its Rust prototype
+  realization, and formal guarantees.
   Section~\ref{sec:evaluation} evaluates it.
   Section~\ref{sec:discussion} discusses trade-offs and positioning.
   Section~\ref{sec:conclusion} concludes.
@@ -371,12 +371,18 @@ Matrix's state resolution (v2)~\cite{matrix_stateresv2} is structurally similar-
 
 The p2panda toolkit~\cite{p2panda2024} is the closest existing system. Its \texttt{p2panda-auth} crate~\cite{p2panda_auth2025} implements a convergent access-control CRDT with a ``strong removal'' resolver over a causal DAG, and its encryption layer~\cite{p2panda_encryption2025} uses Decentralized Continuous Group Key Agreement (DCGKA)-based group keys with forward secrecy via the Signal Double Ratchet. Three differences position \equack{} distinctly: (1)~\equack{} enforces deny-wins replay at the protocol level---the Gate function (Section~\ref{subsec:formal-model}) is mandatory and the materialized state always reflects revocations (Theorem~3), whereas p2panda treats retroactive data invalidation as an application-layer choice; (2)~\equack{} models authorization as VC-based epochs evaluated by a Cedar policy layer with multi-issuer trust propagated in-band, whereas p2panda uses group membership with four permission levels and no policy engine; (3)~\equack{} provides an explicit hash-chained audit trail (Theorem~4), whereas p2panda's tamper evidence is implicit in the signed DAG. p2panda's encryption layer is more mature than \equack{}'s experimental per-tag scheme.
 
-\section{\equack{} Model}
+\section{\equack{}: Model and Realization}
 \label{sec:ecac-model}
 
-\equack{} is an Eventually Consistent Access Control model designed for offline-first operation with provable security and auditability guarantees. This section presents the conceptual model and its formal properties.
+Each subsection first describes the conceptual mechanism, then
+shows how \textit{equack-core} realizes it. The formal model
+(Section~\ref{subsec:formal-model}) is self-contained and does not depend on
+implementation choices.
 
-It combines four elements; (1)~a causal event log with deterministic deny-wins replay, (2)~verifiable credentials for time-bounded authorization epochs, (3)~a hybrid Attribute-Based Access Control (ABAC)/Role-Based Access Control (RBAC) policy model with deny-overrides semantics, and (4)~per-tag encryption with key rotation.
+\equack{} is an Eventually Consistent Access Control model designed for offline-first operation with provable security and auditability guarantees.
+It combines four elements: (1)~a causal event log with deterministic deny-wins replay, (2)~verifiable credentials for time-bounded authorization epochs, (3)~a hybrid Attribute-Based Access Control (ABAC)/Role-Based Access Control (RBAC) policy model with deny-overrides semantics, and (4)~per-tag encryption with key rotation.
+
+The prototype, \textit{equack-core}, is a Rust library comprising approximately 8,500~lines (excluding tests). It uses Ed25519 for signatures, BLAKE3 for hashing, XChaCha20-Poly1305 for encryption, and SHA-256 for status list bitstrings. Operations are serialized in Concise Binary Object Representation (CBOR).
 
 \begin{figure*}[!t]
   \centering
@@ -390,7 +396,7 @@ It combines four elements; (1)~a causal event log with deterministic deny-wins r
 
 We state formal guarantees for convergence, safety, determinism, audit integrity, and leaver security (post-revocation confidentiality under key rotation). Figure~\ref{fig:ecac-overview} summarizes the four-phase lifecycle (Ingest, Validate, Replay, Query).
 
-\subsection{Event Log and Deterministic Deny-Wins Replay}
+\subsection{Event Types and Causal DAG}
 
 \equack{} maintains an append-only event log structured as a causal DAG, where each event points to its causal predecessors. The DAG encodes happens-before relations, and system state is derived by deterministically sorting and replaying events. A fixed traversal order ensures every replica produces the same sequence.
 
@@ -410,7 +416,9 @@ The event DAG acts as a convergent CRDT; merging logs is a set union, commutativ
 
 Replay follows a deny-wins rule, each event is applied only if the actor held the required permission at that moment; unauthorized events become no-ops. Operations are disseminated via gossip and anti-entropy (libp2p); this affects liveness but not safety or determinism.
 
-\subsection{Authorization Epochs via Verifiable Credentials and Status Lists}
+\textbf{Realization.} The DAG is implemented in \texttt{core::dag}, which stores operations and computes the deterministic topological sort (\texttt{core::replay::topo\_sort}). CRDT state ($\mathrm{MVReg}$, $\mathrm{OR\text{-}Set}$) is managed by \texttt{core::crdt}. Operations are serialized as deterministic CBOR with Ed25519 signatures computed over BLAKE3 hashes of the unsigned header (\texttt{core::crypto}). Gossip dissemination and anti-entropy synchronization use libp2p (\texttt{net::gossip}, \texttt{net::sync}).
+
+\subsection{Authorization Epochs and Credential Lifecycle}
 
 \equack{} manages permissions using verifiable, time-bounded credentials. It adopts the W3C VC format for signed authorization tokens asserting a principal's rights over a specific interval (validFrom--validUntil). Credentials are tamper-evident and self-verifying; replicas independently confirm authenticity and validity~\cite{8603785}.
 
@@ -424,7 +432,9 @@ Trust operations (IssuerKey, IssuerKeyRevoke, StatusListChunk) build the TrustVi
 
 Unlike the W3C Bitstring Status List specification, which assumes HTTP-accessible status endpoints, \equack{} propagates status-list updates as in-band $\mathsf{TRUST}$ events in the causal DAG. This sidesteps the need for always-online StatusList URLs, status freshness is bounded by event propagation latency rather than HTTP polling intervals. The trade-off is that status information is only as fresh as the latest $\mathsf{TRUST}$ event a replica has received. \equack{}'s design is compatible with W3C Bitstring Status List at the data-format level; deployments with partial connectivity can supplement in-band propagation with periodic HTTP fetches when available.
 
-\subsection{Policy Semantics (Cedar) and Deny-Overrides Alignment}
+\textbf{Realization.} Epoch construction is implemented in \texttt{core::epoch}; VC parsing and Ed25519 signature verification in \texttt{core::vc}. TrustView assembly---materializing issuer keys and status-list evidence from replayed TRUST events---is implemented in \texttt{core::trust} and \texttt{core::trustview}. Status-list bitstrings are verified using SHA-256 checksums.
+
+\subsection{Policy Evaluation and Deny-Wins Replay}
 
 \equack{} uses a policy layer inspired by AWS's Cedar language (open-source ABAC). Policies may permit or forbid actions with a default deny stance; deny-overrides semantics ensure any matching forbid overrides all permits. The framework unifies RBAC and ABAC, roles are principal attributes, and Cedar's entity-attribute model supports hierarchical roles and contextual attributes. Policies are evaluated deterministically at each event's timestamp; identical inputs guarantee identical outcomes across replicas.
 
@@ -437,6 +447,8 @@ Cedar's formal verification~\cite{cutler2024cedar} establishes decidability, tot
 The current model uses deny-overrides as the sole combining algorithm, any matching \texttt{forbid} policy overrides all \texttt{permit} policies. This is a deliberate safe default for multi-authority settings where no single authority should be able to override another authority's denial. Priority-based or temporal-precedence combining (e.g., last-writer-wins for policy updates) would require extending the epoch model to track policy precedence across authorities; we leave this for future work.
 
 Entity attributes used in Cedar policy evaluation (e.g., role assignments, group memberships) may be stale during partitions, a replica that has not yet received an attribute-update event evaluates policies against outdated entity state. Because attribute changes are events in the causal DAG, they are replayed deterministically on convergence, and the final state $s^\star$ reflects the correct attribute values. Transient local decisions based on stale attributes are corrected during replay.
+
+\textbf{Realization.} The deny-wins gate is implemented in \texttt{core::policy::gate}. Full replay (\texttt{core::replay::replay\_full}) and incremental replay from checkpoints (\texttt{core::replay::apply\_incremental}) both apply the gate as a pure fold over the linearized sequence. Policy evaluation uses a Cedar-inspired ABAC engine; Cedar's full type system is not implemented in the prototype.
 
 Figure~\ref{fig:deny-wins} shows this replay slice and the epochs and gate outcomes it induces.
 
@@ -452,11 +464,15 @@ Figure~\ref{fig:deny-wins} shows this replay slice and the epochs and gate outco
 
 During replay, each replica emits a signed \emph{audit record} per DATA operation indicating applied/skipped status and reason. Records are linked in an append-only hash chain; any inconsistency is detectable relative to a pinned chain head digest (e.g., cross-signed checkpoint). Because replay is deterministic, independent replicas with the same event set compute identical audit traces and can validate each other after reconciliation (R4).
 
+\textbf{Realization.} Audit chain management is implemented in \texttt{store::audit}. The \texttt{replay\_full\_with\_audit} entry point accepts an \texttt{AuditHook} trait object, emitting signed records during replay. Checkpoints (state snapshot plus topological watermark) are managed by \texttt{store::checkpoint} backed by RocksDB.
+
 \subsection{Confidentiality and Key Rotation}
 
 \equack{} supports an optional per-tag payload encryption layer. Each DATA operation carries ciphertext $c := \mathsf{Enc}_{K_{\tau}^{(v)}}(m)$ with key version $v$ (XChaCha20-Poly1305). Ciphertext is replicated for convergence; access control is enforced at \emph{query time} via the deny-wins gate, with unauthorized subjects receiving a redacted view. On revocation, a KeyRotate event advances to $K_{\tau}^{(v+1)}$, distributed in-band via KeyGrant records encrypted to authorized subjects' public keys. This provides \emph{leaver security}; revoked subjects lacking $K_{\tau}^{(v+1)}$ cannot decrypt post-rotation ciphertexts. This component is experimental; we treat confidentiality results as indicative.
 
-\subsection{Formal Model}\label{subsec:formal-model}
+\textbf{Realization.} Encryption and decryption use XChaCha20-Poly1305 in \texttt{core::crypto}. Per-tag key versioning and KeyGrant/KeyRotate handling use X25519 key agreement without a full ceremony protocol. Tag keys are persisted by \texttt{store::put\_tag\_key} / \texttt{store::get\_tag\_key}.
+
+\subsection{Formal Model and Guarantees}\label{subsec:formal-model}
 
 Let $\mathsf{Subj}$ be subjects (principals), $\mathsf{Res}$ resources, $\mathsf{Act}$ actions, and $\mathsf{Attr}$ attribute valuations.
 Physical time is measured in milliseconds as $(T_{\mathrm{ms}}=\mathbb{N}, \le)$.
@@ -674,20 +690,7 @@ The head digest is a collision-resistant hash of the prefix. Any change to the p
 By assumption, unauthorized subjects do not obtain $K_{\tau}^{(v+1)}$. Under IND-CPA security, ciphertexts under an unknown key reveal no information about plaintext beyond negligible probability.
 
 
-\section{Implementation}\label{sec:implementation}
-
-\equack{}-core is a Rust library organized into four crates that map directly to the conceptual model:
-
-\begin{itemize}
-    \item \texttt{core}: Operations, DAG construction, deterministic replay, policy evaluation (Cedar), VC parsing and verification, and CRDT state (MVReg, OR-Set). This crate implements the formal model from Section~\ref{subsec:formal-model}.
-    \item \texttt{store}: RocksDB persistence, checkpoint creation and restoration, and audit chain management. Implements the checkpoint and audit mechanisms.
-    \item \texttt{net}: libp2p-based gossip dissemination and anti-entropy synchronization. Implements the liveness layer.
-    \item \texttt{cli}: Command-line interface for workload generation, log manipulation, and experiment execution.
-\end{itemize}
-
-The implementation uses Ed25519 for signatures, BLAKE3 for hashing, XChaCha20-Poly1305 for encryption, and SHA-256 for status list bitstrings. Operations are serialized in Concise Binary Object Representation (CBOR). The prototype comprises approximately 8,500 lines of Rust (excluding tests).
-
-Table~\ref{tab:impl-mapping} maps conceptual elements to implementation modules.
+Table~\ref{tab:impl-mapping} summarizes the mapping from conceptual elements to \textit{equack-core} modules. The prototype is organized into four crates: \texttt{core} (DAG, replay, policy, VCs, CRDTs), \texttt{store} (RocksDB persistence, checkpoints, audit), \texttt{net} (libp2p gossip and anti-entropy), and \texttt{cli} (workload generation and experiment execution).
 
 \begin{table}[!htbp]
 \centering
