@@ -958,19 +958,28 @@ Regarding validity: E6 covers six log sizes with five trials each, but E8 and E9
 
 \noindent This section examines the trade-offs, limitations, and positioning of the model and prototype.
 
-\paragraph*{\textit{Partition-duration trade-off and safety window}}
-\equack{}'s deny-wins gate repairs authorization state after partition heal but cannot prevent unauthorized effects during the partition itself. The vulnerability window equals partition duration ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$): a revoked user's writes are retroactively invalidated when logs merge, yet physical-world consequences (actuator commands, parameter changes) persist. For short disconnections (minutes to hours), operators can defer safety-critical actuations until sync confirms authorization; for day-long partitions, application-layer compensating controls (staged commit, human-in-the-loop) are needed. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation---the physical world cannot be rewound.
+\paragraph*{\textit{Partition-duration trade-off}}
+\equack{}'s deny-wins gate repairs authorization state after partition heal but cannot prevent unauthorized effects during the partition itself. The vulnerability window equals partition duration ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$): a revoked user's writes are retroactively invalidated when logs merge, yet physical-world consequences (actuator commands, parameter changes) persist. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation---the physical world cannot be rewound.
 
-\paragraph*{\textit{Scalability and deny-wins conservatism}}
+\paragraph*{\textit{Operational mitigation}}
+For short disconnections (minutes to hours), operators can defer safety-critical actuations until sync confirms authorization; for day-long partitions, application-layer compensating controls (staged commit, human-in-the-loop) are needed. \equack{} provides the convergence guarantee; application-layer policy decides how to act on transient uncertainty.
+
+\paragraph*{\textit{Scalability}}
 Memory grows at $\approx$1.7~KB/op (Table~\ref{tab:e9-memory}), so a 256\,MB edge device holds roughly 150K operations---enough for weeks of maintenance logs, but not high-frequency telemetry. Throughput drops from 45K~ops/s on linear chains to 7K~ops/s with eight concurrent writers (Table~\ref{tab:e7-throughput}); at $\approx$430~bytes/op in CBOR, a million-operation log occupies $\sim$430\,MB before write amplification. Without log compaction (deferred to future work), long-lived deployments will need archival. These constraints position \equack{} for authorization-rate workloads on devices with modest storage rather than high-throughput data-plane enforcement.
+
+\paragraph*{\textit{Deny-wins conservatism}}
 The deny-wins semantics are deliberately conservative: concurrent GRANT and REVOKE resolves in favor of revocation, appropriate where over-granting is riskier than over-denying. An erroneous revocation retroactively voids subsequent work; recovery requires a new GRANT to open a fresh epoch (Section~\ref{subsec:formal-model}), which may not be timely during disconnection. Making the combining algorithm configurable per scope is a natural extension, though it would complicate the convergence argument.
 
-\paragraph*{\textit{In-band trust and comparison scope}}
+\paragraph*{\textit{In-band trust}}
 Carrying issuer keys and status-list updates as replicated log events eliminates online PKI lookups, enabling offline VC verification. The cost is that TrustView grows with each key registration and status-list chunk; deployments with frequent key rotations across many issuers would see meaningful log growth from trust material alone. The pinned genesis checkpoint anchors the trust chain; its governance (who signs, how keys are distributed, how organizations join or leave) is an open design problem.
+
+\paragraph*{\textit{Comparison scope}}
 Tables~\ref{tab:gap-summary} and~\ref{tab:mech-compare} evaluate \equack{} against paradigm categories rather than specific systems, because no existing system combines CRDT replication with in-band VCs and a deny-wins gate. The key distinction from application-level access control is enforcement timing: application-level checks execute at ingest and cannot retroactively invalidate operations accepted under stale evidence; \equack{}'s replay-time gate can (R3). The closest system is p2panda, whose retroactive replay of application data is optional and application-implemented, whereas \equack{}'s deny-wins gate is mandatory during deterministic replay. A direct empirical comparison is infeasible as p2panda provides no peer-reviewed formal model or published benchmarks.
 
-\paragraph*{\textit{Cedar properties and prototype scope}}
+\paragraph*{\textit{Cedar properties}}
 Cedar's verified properties (decidability, totality, soundness) hold for the converged state $s^\star$ but not for transient local decisions during partitions---an inherent limitation of any eventually consistent system embedding a single-context policy engine. Mechanized verification of the replay-gate composition would strengthen this claim and is a priority for future work.
+
+\paragraph*{\textit{Prototype scope}}
 The prototype implements the full conceptual model with simplifications: VC validation omits JSON-LD and selective disclosure; key management uses X25519 without a full ceremony protocol; Cedar's full type system is not implemented; and libp2p gossip uses basic flooding. The evaluation uses synthetic workloads on a single Linux x86\_64 machine; E12 simulates multi-node sync in-process; cross-platform determinism awaits multi-platform CI; and the confidentiality layer is experimental. The formal guarantees (Theorems~1--5) are argued but not mechanically verified; a Coq or Isabelle formalization would close the gap between model and implementation.
 
 \section{Conclusion}

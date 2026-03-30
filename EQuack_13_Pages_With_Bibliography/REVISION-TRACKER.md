@@ -86,3 +86,17 @@ Tracks changes made during the supervisor-feedback revision (supervisorFeedback.
 - Added Discussion section orienting sentence
 - Replaced "anti-entropy" with "background synchronization (anti-entropy)" on first use
 - Replaced "anti-entropy" label in Figure 1 with "sync"
+
+## Phase 9: Discussion Paragraph Splitting
+**Status:** Complete
+
+### Changes:
+- Split 4 merged Discussion paragraphs into 8 focused paragraphs:
+  1. Partition-duration trade-off (vulnerability window, digital guarantee)
+  2. Operational mitigation (short vs long disconnections)
+  3. Scalability (memory, throughput, log size constraints)
+  4. Deny-wins conservatism (conservative semantics, re-grant recovery)
+  5. In-band trust (PKI elimination, TrustView growth, genesis governance)
+  6. Comparison scope (paradigm-level comparison, p2panda distinction)
+  7. Cedar properties (verified properties hold for converged state)
+  8. Prototype scope (simplifications, evaluation limitations, future verification)
