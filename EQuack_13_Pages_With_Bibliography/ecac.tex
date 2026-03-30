@@ -956,13 +956,8 @@ Regarding validity: E6 covers six log sizes with five trials each, but E8 and E9
 \section{Discussion}
 \label{sec:discussion}
 
-\noindent This section examines the trade-offs, limitations, and positioning of the model and prototype.
-
 \paragraph*{\textit{Partition-duration trade-off}}
-\equack{}'s deny-wins gate repairs authorization state after partition heal but cannot prevent unauthorized effects during the partition itself. The vulnerability window equals partition duration ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$): a revoked user's writes are retroactively invalidated when logs merge, yet physical-world consequences (actuator commands, parameter changes) persist. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation---the physical world cannot be rewound.
-
-\paragraph*{\textit{Operational mitigation}}
-For short disconnections (minutes to hours), operators can defer safety-critical actuations until sync confirms authorization; for day-long partitions, application-layer compensating controls (staged commit, human-in-the-loop) are needed. \equack{} provides the convergence guarantee; application-layer policy decides how to act on transient uncertainty.
+\equack{}'s deny-wins gate repairs authorization state after partition heal but cannot prevent unauthorized effects during the partition itself. The vulnerability window equals partition duration ($W(r) \leq \Delta_{\text{partition}} + \Delta_{\text{propagation}}$): a revoked user's writes are retroactively invalidated when logs merge, yet physical-world consequences (actuator commands, parameter changes) persist. The guarantee is that the final digital state $s^\star$ is always consistent with the revocation---the physical world cannot be rewound. For short disconnections (minutes to hours), operators can defer safety-critical actuations until sync confirms authorization; for day-long partitions, application-layer compensating controls (staged commit, human-in-the-loop) are needed.
 
 \paragraph*{\textit{Scalability}}
 Memory grows at $\approx$1.7~KB/op (Table~\ref{tab:e9-memory}), so a 256\,MB edge device holds roughly 150K operations---enough for weeks of maintenance logs, but not high-frequency telemetry. Throughput drops from 45K~ops/s on linear chains to 7K~ops/s with eight concurrent writers (Table~\ref{tab:e7-throughput}); at $\approx$430~bytes/op in CBOR, a million-operation log occupies $\sim$430\,MB before write amplification. Without log compaction (deferred to future work), long-lived deployments will need archival. These constraints position \equack{} for authorization-rate workloads on devices with modest storage rather than high-throughput data-plane enforcement.
@@ -976,39 +971,19 @@ Carrying issuer keys and status-list updates as replicated log events eliminates
 \paragraph*{\textit{Comparison scope}}
 Tables~\ref{tab:gap-summary} and~\ref{tab:mech-compare} evaluate \equack{} against paradigm categories rather than specific systems, because no existing system combines CRDT replication with in-band VCs and a deny-wins gate. The key distinction from application-level access control is enforcement timing: application-level checks execute at ingest and cannot retroactively invalidate operations accepted under stale evidence; \equack{}'s replay-time gate can (R3). The closest system is p2panda, whose retroactive replay of application data is optional and application-implemented, whereas \equack{}'s deny-wins gate is mandatory during deterministic replay. A direct empirical comparison is infeasible as p2panda provides no peer-reviewed formal model or published benchmarks.
 
-\paragraph*{\textit{Cedar properties}}
-Cedar's verified properties (decidability, totality, soundness) hold for the converged state $s^\star$ but not for transient local decisions during partitions---an inherent limitation of any eventually consistent system embedding a single-context policy engine. Mechanized verification of the replay-gate composition would strengthen this claim and is a priority for future work.
-
-\paragraph*{\textit{Prototype scope}}
-The prototype implements the full conceptual model with simplifications: VC validation omits JSON-LD and selective disclosure; key management uses X25519 without a full ceremony protocol; Cedar's full type system is not implemented; and libp2p gossip uses basic flooding. The evaluation uses synthetic workloads on a single Linux x86\_64 machine; E12 simulates multi-node sync in-process; cross-platform determinism awaits multi-platform CI; and the confidentiality layer is experimental. The formal guarantees (Theorems~1--5) are argued but not mechanically verified; a Coq or Isabelle formalization would close the gap between model and implementation.
+\paragraph*{\textit{Prototype scope and Cedar properties}}
+Cedar's verified properties (decidability, totality, soundness) hold for the converged state $s^\star$ but not for transient local decisions during partitions---an inherent limitation of any eventually consistent system embedding a single-context policy engine. The prototype implements the full conceptual model with simplifications: VC validation omits JSON-LD and selective disclosure; key management uses X25519 without a full ceremony protocol; Cedar's full type system is not implemented; and libp2p gossip uses basic flooding. The evaluation uses synthetic workloads on a single Linux x86\_64 machine; E12 simulates multi-node sync in-process; cross-platform determinism awaits multi-platform CI; and the confidentiality layer is experimental. The formal guarantees (Theorems~1--5) are argued but not mechanically verified; mechanized verification of the replay-gate composition is a priority for future work.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-\equack{} treats authorization as replicated history.
-Data operations, credential changes, and trust updates all go into the
-same signed causal event log; replicas merge by set union; and a
-deterministic deny-wins replay gate decides which operations survive.
-Replicas that have seen the same events therefore compute the same
-authorized state, and revoked operations are excluded---even if they
-executed while the revoking replica was unreachable.
+Offline multi-stakeholder systems need authorization decisions that remain available during disconnection and converge deterministically after partition healing. The ECAC paradigm~\cite{jacob2024eventuallyac} establishes that such convergence is formally achievable, but leaves open how to realize it with concrete credentials, fine-grained policies, and in-band trust. \equack{} closes this gap by recording data operations, credential changes, and trust evidence in a single signed causal event log and reconstructing authorized state through deterministic deny-wins replay.
 
-The prototype evaluation supports this within the limits of a
-single-machine, synthetic-workload setup.  One hundred valid orderings
-of a 10\,000-operation log all converged to the same state digest;
-a revocation workload suppressed every post-revocation write after
-reconciliation; multi-issuer conflicts resolved deterministically; and
-audit tampering was detected.  Replay throughput reached
-45\,000~operations/s on linear chains, and checkpoint restore cut
-replay cost by 8--11$\times$.
+The prototype evaluation supports this within a single-machine, synthetic-workload setup. One hundred valid orderings of a 10\,000-operation log all converged to the same state digest; a revocation workload suppressed every post-revocation write after reconciliation; multi-issuer conflicts resolved deterministically; and audit tampering was detected. Replay throughput reached 45\,000~operations/s on linear chains, and checkpoint restore cut replay cost by 8--11$\times$.
 
-The workloads are synthetic, the multi-node topology is simulated
-in-process, and the confidentiality layer is experimental.  The model
-also trades real-time revocation for partition availability: it
-guarantees the converged \emph{digital} state, not reversal of
-physical-world actions.  Multi-machine evaluation under realistic
-network partitions and mechanized verification of the replay-gate
-composition are the clear next steps.
+A credential revocation issued by any authorized issuer eventually takes effect at every replica, regardless of partition topology or message ordering. The in-band trust model eliminates the dependency on always-online PKI infrastructure, and the tamper-evident audit trail allows independent parties to verify that authorization decisions were computed correctly from the same evidence. Together, these properties enable offline authorization in settings---industrial IoT, federated data sharing, disaster response---where no prior system simultaneously provides deterministic convergence, retroactive revocation safety, and fine-grained policy expressiveness.
+
+The workloads are synthetic, the multi-node topology is simulated in-process, and the confidentiality layer is experimental. The model trades real-time revocation for partition availability: it guarantees the converged \emph{digital} state, not reversal of physical-world actions. Multi-machine evaluation under realistic network partitions and mechanized verification of the replay-gate composition are the priority next steps.
 
 % ========================== References ==========================
 \bibliographystyle{IEEEtran}

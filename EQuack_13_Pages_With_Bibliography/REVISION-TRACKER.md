@@ -100,3 +100,17 @@ Tracks changes made during the supervisor-feedback revision (supervisorFeedback.
   6. Comparison scope (paradigm-level comparison, p2panda distinction)
   7. Cedar properties (verified properties hold for converged state)
   8. Prototype scope (simplifications, evaluation limitations, future verification)
+
+## Phase 10: Conclusion Rewrite
+**Status:** Complete
+
+### Changes:
+- Rewrote conclusion into 4-paragraph structure:
+  1. Problem + novelty: ECAC gap → EQUACK as concrete realization
+  2. Evidence: key experimental results (convergence, revocation, audit, throughput)
+  3. Implications: revocation enforcement, offline PKI, auditability, application domains
+  4. Limitations + next steps: synthetic workloads, single-machine, mechanized verification
+- Merged Discussion "Operational mitigation" into "Partition-duration trade-off" paragraph
+- Merged Discussion "Cedar properties" into "Prototype scope" paragraph
+- Removed Discussion orienting sentence (paragraph labels suffice)
+- Net result: 15 pages (same as pre-revision baseline)
