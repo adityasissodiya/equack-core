@@ -18,3 +18,10 @@ Tracks changes made during the supervisor-feedback revision (supervisorFeedback.
 - Added novelty sentence (replay mechanism, not ingredients)
 - Reworded contribution 1 to position as ECAC instantiation with fine-grained policy support
 - Added paper roadmap paragraph with section references
+
+## Phase 2: Novelty Positioning (J&H Differentiation)
+**Status:** Complete
+
+### Changes:
+- Shortened J&H paragraph in Section 2.1 from ~15 lines to ~4 lines (detailed analysis now in Introduction)
+- Added mechanism-level differentiation sentence after Matrix paragraph in Section 2.5/2.6
