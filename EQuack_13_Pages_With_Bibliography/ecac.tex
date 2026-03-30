@@ -472,6 +472,37 @@ During replay, each replica emits a signed \emph{audit record} per DATA operatio
 
 \textbf{Realization.} Encryption and decryption use XChaCha20-Poly1305 in \texttt{core::crypto}. Per-tag key versioning and KeyGrant/KeyRotate handling use X25519 key agreement without a full ceremony protocol. Tag keys are persisted by \texttt{store::put\_tag\_key} / \texttt{store::get\_tag\_key}.
 
+\subsection{Developer Interface}\label{subsec:developer-interface}
+
+The following pseudocode summarizes the core operations a developer calls against \textit{equack-core}. The signatures are simplified from the actual Rust API.
+
+\begin{lstlisting}[language=Rust,caption={Simplified API surface of \textit{equack-core}.},label={lst:api}]
+// Register an issuer key (TRUST event)
+dag.insert(trust_issuer_publish(issuer_pk));
+
+// Issue a credential and grant access
+let vc = issuer.issue_credential(
+    subject, role, scope, valid_from, valid_until);
+dag.insert(op_grant(vc, issuer_sk));
+
+// Submit a data operation (gated by active epoch)
+dag.insert(op_data(tag, field, value, author_sk));
+
+// Revoke a credential (REVOKE event)
+dag.insert(op_revoke(vc_id, issuer_sk));
+
+// Replay and materialize authorized state
+let (state, digest) = replay_full(&dag);
+
+// Incremental replay from checkpoint
+let (state, digest) =
+    apply_incremental(&mut ckpt_state, &dag);
+\end{lstlisting}
+
+In the factory scenario (Section~\ref{sec:introduction}), vendor~A's issuer calls \texttt{trust\_issuer\_publish} to register its key, then \texttt{issue\_credential} to grant engineer~E temporary \texttt{editor} access to controller~C's safety parameters. Engineer~E submits parameter updates via \texttt{op\_data} while offline. When vendor~A revokes E's credential after a safety incident, the \texttt{op\_revoke} event propagates via gossip synchronization. On the next \texttt{replay\_full}, all replicas skip E's post-revocation writes and converge to the same authorized state digest.
+
+% TODO: HUMAN — confirm that the developer API pseudocode accurately reflects the intended public interface.
+
 \subsection{Formal Model and Guarantees}\label{subsec:formal-model}
 
 Let $\mathsf{Subj}$ be subjects (principals), $\mathsf{Res}$ resources, $\mathsf{Act}$ actions, and $\mathsf{Attr}$ attribute valuations.
