@@ -822,25 +822,25 @@ replay cost, storage, and encryption overhead.
 \subsection{Correctness}\label{subsec:correctness}
 
 \paragraph*{\textit{Convergence (E1; T1, T2)}}
-A 10{,}000-op concurrent-workload log was permuted into 100 valid orderings (respecting causal dependencies) and each was replayed independently. All 100 produced the same digest (\texttt{\small cbab89ee\ldots b7f493b2}), with mean replay time 615~ms ($\sigma=18$~ms).
+A 10{,}000-op concurrent-workload log was permuted into 100 valid orderings (respecting causal dependencies) and each was replayed independently. All 100 produced the same digest (\texttt{\small cbab89ee\ldots b7f493b2}), with mean replay time 615~ms ($\sigma=18$~ms). Delivery order does not affect the final authorized state---a prerequisite for safe offline operation across independently administered replicas.
 
 \paragraph*{\textit{Deny-wins revocation (E3; T3)}}
-User $U$ was granted write access, performed 1{,}000 writes, and had the credential revoked after write~500. The 1{,}004-op log (1{,}000 Data + IssuerKey, Credential, Grant, Revoke) was replayed: the first 500 writes applied, the remaining 500 skipped. Digest: \texttt{\small 8da8b49e\ldots 46633fbf}.
+User $U$ was granted write access, performed 1{,}000 writes, and had the credential revoked after write~500. The 1{,}004-op log (1{,}000 Data + IssuerKey, Credential, Grant, Revoke) was replayed: the first 500 writes applied, the remaining 500 skipped. Digest: \texttt{\small 8da8b49e\ldots 46633fbf}. An engineer whose credential is revoked after a safety incident has all post-revocation parameter changes excluded from the converged state, regardless of which controllers received the revocation first.
 
 \paragraph*{\textit{Revocation under partition (E11; T2, T3)}}
-In partition~A a user is revoked; partition~B, which has not yet received the revocation, contains further writes from the same user under stale evidence. After merging both logs and replaying, the 50 pre-revocation data writes (from both partitions) were applied and all 10 post-revocation writes from partition~B were skipped. This is the scenario \equack{} was designed for.
+In partition~A a user is revoked; partition~B, which has not yet received the revocation, contains further writes from the same user under stale evidence. After merging both logs and replaying, the 50 pre-revocation data writes (from both partitions) were applied and all 10 post-revocation writes from partition~B were skipped. A revocation issued on one side of a partition retroactively invalidates stale writes accepted on the other side.
 
 \paragraph*{\textit{Multi-authority conflict (E4; T1, T3)}}
 Three issuers ($I_1$, $I_2$, $I_3$) with overlapping authority grant user $U$ the ``editor'' role at $t_1$, $t_2$; $I_3$ revokes at $t_3>t_2$. The resulting 128-op log was injected into 10 replicas in random orders. All converged to the same digest (\texttt{\small f2fbb024\ldots 1103c2b2}): writes during $[t_1,t_3)$ accepted, writes after $t_3$ skipped.
 
 \paragraph*{\textit{Audit integrity (E5; T4)}}
-An audited log was generated and the chain head digest $\mathrm{ch}_N$ was recorded. Three tamper modes were applied: (1)~a byte flip in one record's payload, (2)~deletion of one record from the pinned prefix, and (3)~a swap of two adjacent records. Chain verification against $\mathrm{ch}_N$ succeeded on the untampered log and failed on all three mutations, detecting each at the exact tampered record.
+An audited log was generated and the chain head digest $\mathrm{ch}_N$ was recorded. Three tamper modes were applied: (1)~a byte flip in one record's payload, (2)~deletion of one record from the pinned prefix, and (3)~a swap of two adjacent records. Chain verification against $\mathrm{ch}_N$ succeeded on the untampered log and failed on all three mutations, detecting each at the exact tampered record. Any party can independently verify that no authorization decisions were altered after the fact.
 
 \paragraph*{\textit{Cross-platform determinism (E2; T1)}}
 A 127-op CBOR fixture exercises all event categories (Data, Grant, Revoke, Trust) and includes true concurrency. A Continuous Integration (CI) test replays it and asserts the final digest equals a hardcoded constant (\texttt{\small 4ea9684a\ldots bdc2b9}, blake3). Any replay-engine change that alters the digest breaks the build, following standard cross-environment consistency verification practice. Full cross-platform validation (aarch64, macOS, Windows) awaits CI infrastructure.
 
 \paragraph*{\textit{Multi-node sync (E12; T2, T3)}}
-In an in-process simulation, three nodes each generated 1{,}000 ops independently, then synced; all converged. A second scenario partitioned node~C while A issued a Revoke targeting C. After healing and full sync, all three nodes held the same digest, with C's post-revoke ops gated out (Table~\ref{tab:e12-sync}).
+In an in-process simulation, three nodes each generated 1{,}000 ops independently, then synced; all converged. A second scenario partitioned node~C while A issued a Revoke targeting C. After healing and full sync, all three nodes held the same digest, with C's post-revoke ops gated out (Table~\ref{tab:e12-sync}). This demonstrates end-to-end deny-wins enforcement across independently operating nodes.
 
 \begin{table}[!htbp]
 \centering
