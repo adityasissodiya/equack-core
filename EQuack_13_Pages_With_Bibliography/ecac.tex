@@ -390,7 +390,7 @@ The prototype, \textit{equack-core}, is a Rust library comprising approximately 
   \adjustbox{max width=\textwidth, max totalheight=\textheight, center}{
     \input{diagrams/architecture-flow.tex}
   }
-  \caption{\equack{} prototype overview showing the \equack{} four-phase lifecycle (Ingest, Verify, Activated DAG, Epoch/Gate, CRDT state, Query) and supporting infrastructure.}
+  \caption{\equack{} four-phase lifecycle. Events enter through Ingest, are validated by the TrustView and causally ordered in the DAG, pass through the deny-wins Epoch Builder + Gate, and converge in the CRDT State before reaching queries. Dashed arrows carry trust evidence and audit verdicts.}
   \label{fig:ecac-overview}
 \end{figure*}
 

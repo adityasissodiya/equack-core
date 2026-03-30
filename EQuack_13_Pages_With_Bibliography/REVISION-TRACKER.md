@@ -63,3 +63,13 @@ Tracks changes made during the supervisor-feedback revision (supervisorFeedback.
 - Added interpretation sentence after E5 result: any party can independently verify no authorization decisions altered
 - Added interpretation sentence after E11 result: revocation across partition retroactively invalidates stale writes
 - Added interpretation sentence after E12 result: end-to-end deny-wins enforcement across independently operating nodes
+
+## Phase 7: Figure Redesign
+**Status:** Complete
+
+### Changes:
+- Figure 1 (Offline Enforcement Problem): Bumped `\tiny` labels to `\scriptsize` for IEEE print DPI legibility
+- Figure 2 (Architecture): Simplified to clean four-phase lifecycle view — removed implementation-specific details (RocksDB, libp2p, CBOR, op_id) from boxes; kept box-and-connector flow with numbered phase groups (1. Ingest, 2. Validate & 3. Replay, 4. Query); updated caption
+- Figure 3 (Causal DAG): Confirmed Algorithm ref resolved correctly; no changes needed
+- Figure 4 (Deny-wins replay): Good as-is; no changes
+- Skipped optional workflow figure (page budget already met)
