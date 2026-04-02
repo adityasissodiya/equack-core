@@ -1,6 +1,6 @@
 <div align="center">
-  <h1>🦆 ECAC-core</h1>
-  <p><strong>Eventually Consistent Access Control with Deterministic Deny-Wins Replay for Multi-Stakeholder Offline Systems.</strong></p>
+  <h1>🦆 equack-core</h1>
+  <p><strong>Eventually Consistent Access Control with Deterministic Deny-Wins Replay.</strong></p>
   <p>
     <a href="https://github.com/adityasissodiya/equack-core/actions"><img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build"></a>
     <a href="https://github.com/adityasissodiya/equack-core/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
