@@ -1,10 +1,16 @@
-# ECAC-core
+<div align="center">
+  <h1>🦆 ECAC-core</h1>
+  <p><strong>Eventually Consistent Access Control with Deterministic Deny-Wins Replay for Multi-Stakeholder Offline Systems.</strong></p>
+  <p>
+    <a href="https://github.com/adityasissodiya/equack-core/actions"><img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build"></a>
+    <a href="https://github.com/adityasissodiya/equack-core/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg?style=flat-square" alt="Rust Version"></a>
+  </p>
+</div>
 
-Eventually Consistent Access Control with Deterministic Deny-Wins Replay for Multi-Stakeholder Offline Systems.
+> A Rust implementation of a deterministic access-control substrate built around a signed, hash-linked causal operation log with VC-backed authorization, in-band trust, tamper-evident audit, and reproducible evaluation artifacts.
 
-A Rust implementation of a deterministic access-control substrate built around a signed, hash-linked causal operation log with VC-backed authorization, in-band trust, tamper-evident audit, and reproducible evaluation artifacts.
-
-## Repository Layout
+## 📂 Repository Layout
 
 ```
 crates/
@@ -23,27 +29,27 @@ docs/         Architecture, protocol, policy, audit, evaluation documentation
 deploy/       Docker and partition-simulation tooling
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
-### Prerequisites
+### 📋 Prerequisites
 
 - **Rust 1.85** (pinned via `rust-toolchain.toml`; installed automatically by `rustup`)
 - A C toolchain for RocksDB (the `rocksdb` crate requires `libclang` and a C compiler)
 - **Python 3** and `matplotlib` (only for plotting scripts)
 
-### Build
+### 🛠️ Build
 
 ```bash
 cargo build --workspace --locked --release
 ```
 
-### Test
+### 🧪 Test
 
 ```bash
 cargo test --workspace --locked
 ```
 
-### Reproduce Paper Artifacts
+### 📊 Reproduce Paper Artifacts
 
 The canonical reproduction script builds the workspace, runs all benchmark scenarios, generates audit and trust artifacts, computes SHA-256 hashes, and bundles a deterministic tarball:
 
@@ -68,7 +74,7 @@ The `Makefile` provides shorthand targets:
 | `make m7`        | Run M7 evaluation grid (quick mode)      |
 | `make plots`     | Generate evaluation plots                |
 
-## Design Overview
+## 🏗️ Design Overview
 
 ECAC-core is a deterministic state machine driven by a signed, hash-linked operation log:
 
@@ -92,15 +98,20 @@ ECAC-core is a deterministic state machine driven by a signed, hash-linked opera
 
 10. **Confidentiality** *(experimental)* -- Per-tag XChaCha20-Poly1305 encryption with VC-backed key grants. Functionally incomplete (over-redacts); de-emphasized in favor of in-band trust.
 
-For detailed documentation, see:
-- [`docs/architecture.md`](docs/architecture.md) -- System architecture
-- [`docs/protocol.md`](docs/protocol.md) -- Wire protocol
-- [`docs/policy-model.md`](docs/policy-model.md) -- Policy semantics
-- [`docs/audit.md`](docs/audit.md) -- Audit subsystem
-- [`docs/m10_inband_trust.md`](docs/m10_inband_trust.md) -- In-band trust model
-- [`docs/eval/RESULTS.md`](docs/eval/RESULTS.md) -- Evaluation results
+### 📚 Documentation Reference
 
-## Evaluation Highlights
+| Document | Description |
+|----------|-------------|
+| 📐 [`docs/architecture.md`](docs/architecture.md) | System architecture |
+| 🔌 [`docs/protocol.md`](docs/protocol.md) | Wire protocol |
+| 🛡️ [`docs/policy-model.md`](docs/policy-model.md) | Policy semantics |
+| 🔎 [`docs/audit.md`](docs/audit.md) | Audit subsystem |
+| 🤝 [`docs/m10_inband_trust.md`](docs/m10_inband_trust.md) | In-band trust model |
+| 📈 [`docs/eval/RESULTS.md`](docs/eval/RESULTS.md) | Evaluation results |
+
+## 🌟 Highlighted Evaluation Results
+
+> **Note:** Full plots and detailed metrics are available in [`docs/eval/plots/`](docs/eval/plots/).
 
 | Experiment | Key Result |
 |-----------|-----------|
@@ -109,9 +120,7 @@ For detailed documentation, see:
 | E7: Throughput | 40-50K ops/s (linear), 4-10K ops/s (concurrent 8 writers) |
 | E10: Checkpoints | 10x speedup at 20K ops with 90% checkpoint |
 
-Plots and detailed metrics: [`docs/eval/plots/`](docs/eval/plots/)
-
-## Guarantees
+## 🔐 Guarantees
 
 - **Deterministic replay**: identical op set and trust inputs produce identical state, regardless of insertion order or crash boundaries.
 - **Deny-wins safety**: any VC verification failure causes data ops to be skipped, never partially applied.
@@ -120,7 +129,7 @@ Plots and detailed metrics: [`docs/eval/plots/`](docs/eval/plots/)
 - **Audit integrity**: append-only, hash-linked, signed log with replay cross-check.
 - **Reproducible artifacts**: `scripts/reproduce.sh` yields bit-for-bit identical outputs for the same commit and toolchain.
 
-## Limitations
+## ⚠️ Limitations
 
 - **Confidentiality**: per-tag encryption is implemented but functionally incomplete (authorized subjects still see `<redacted>`).
 - **Trust model**: no StatusPointer support, no multi-issuer quorums, no advanced key rollover.
@@ -129,7 +138,7 @@ Plots and detailed metrics: [`docs/eval/plots/`](docs/eval/plots/)
 
 ECAC-core is a research prototype, not a production access-control system.
 
-## Toolchain
+## ⚙️ Toolchain
 
 | Component | Version |
 |-----------|---------|
@@ -137,10 +146,10 @@ ECAC-core is a research prototype, not a production access-control system.
 | Nix shell | `flake.nix` (same toolchain) |
 | Build | `cargo build --locked --release` |
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
 
-## Citation
+## 📖 Citation
 
 See [`CITATION.cff`](CITATION.cff) for machine-readable citation metadata.
