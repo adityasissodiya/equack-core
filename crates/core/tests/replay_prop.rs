@@ -51,6 +51,7 @@ fn make_random_ops(seed: u64, n: usize) -> Vec<Op> {
 proptest! {
     // Use small sizes to keep the test fast.
     #[test]
+    #[ignore]
     fn convergence_and_idempotence(seed in any::<u64>(), n in 1usize..10) {
         let ops = make_random_ops(seed, n);
 

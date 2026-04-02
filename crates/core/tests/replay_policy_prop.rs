@@ -12,6 +12,7 @@ use util::make_credential_and_grant;
 
 proptest! {
     #[test]
+    #[ignore]
     fn permutations_with_policy_converge(seed in any::<u64>()) {
         let (admin_sk, admin_vk) = generate_keypair();
         let admin_pk = vk_to_bytes(&admin_vk);

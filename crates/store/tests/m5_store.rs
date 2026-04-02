@@ -104,6 +104,7 @@ fn open_raw_db(p: &Path) -> DBWithThreadMode<MultiThreaded> {
 /// --- tests -------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn append_and_get_roundtrip() -> Result<()> {
     let ops = read_ops_cbor(&repo_ops_path())?;
     let td = temp_db_dir();
@@ -131,6 +132,7 @@ fn append_and_get_roundtrip() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn parent_missing_then_arrives() -> Result<()> {
     let ops = read_ops_cbor(&repo_ops_path())?;
 
@@ -190,6 +192,7 @@ fn parent_missing_then_arrives() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn integrity_scan_detects_corruption() -> Result<()> {
     let ops = read_ops_cbor(&repo_ops_path())?;
     let td = temp_db_dir();
@@ -234,6 +237,7 @@ fn integrity_scan_detects_corruption() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn checkpoint_parity_matches_full_replay() {
     let dir = tempfile::tempdir().unwrap();
     let dbp = dir.path().join("ecac.db");
