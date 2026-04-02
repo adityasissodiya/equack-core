@@ -136,7 +136,7 @@ ECAC-core is a deterministic state machine driven by a signed, hash-linked opera
 - **Networking**: not part of the reproduction pipeline; optional and tested separately.
 - **Audit repair**: crash-tail truncation is detected but not automatically repaired.
 
-ECAC-core is a research prototype, not a production access-control system.
+equack-core is a research prototype, not a production access-control system.
 
 ## ⚙️ Toolchain
 
