@@ -1,68 +1,51 @@
 #!/usr/bin/env bash
-# measure-convergence.sh -- Check whether all three EQUACK nodes have
-# converged by comparing their state digests.
+# measure-convergence.sh -- Poll all three EQUACK nodes until their state
+# digests match (convergence) or a timeout is reached.
 #
 # Usage:
-#   ./measure-convergence.sh
+#   ./measure-convergence.sh [MAX_WAIT_SECONDS]
 #
-# Exit code 0 = converged, 1 = divergent.
+# Exit code 0 = converged, 1 = timeout or error.
 
 set -euo pipefail
 
-# TODO: HUMAN -- Configure the actual endpoint or CLI command that returns
-# the node's current state digest. The placeholder below assumes an HTTP
-# endpoint at /api/state/digest on port 9000. Adjust to match the real
-# EQUACK server API or replace with a CLI invocation such as:
-#   docker exec equack-node1 equack-cli state digest
-
+MAX_WAIT="${1:-60}"
+POLL_INTERVAL=1
 DIGEST_ENDPOINT="/api/state/digest"
 
-echo "=== Measuring convergence across 3 EQUACK nodes ==="
-
 fetch_digest() {
-  local name="$1"
-  local port="$2"
-  # TODO: HUMAN -- Replace curl call if the node exposes digests via CLI
-  # rather than HTTP. The current command assumes a JSON response with a
-  # "digest" field. Adjust the jq selector as needed.
-  local digest
-  digest=$(curl -sf "http://localhost:${port}${DIGEST_ENDPOINT}" | jq -r '.digest' 2>/dev/null) || {
-    echo "  ERROR: could not reach ${name} on port ${port}" >&2
-    echo "UNAVAILABLE"
-    return
-  }
-  echo "${digest}"
+  local port="$1"
+  curl -sf "http://localhost:${port}${DIGEST_ENDPOINT}" 2>/dev/null \
+    | jq -r '.digest' 2>/dev/null || echo "UNAVAILABLE"
 }
 
-DIGEST1=$(fetch_digest "node1" 9001)
-DIGEST2=$(fetch_digest "node2" 9002)
-DIGEST3=$(fetch_digest "node3" 9003)
+echo "=== Measuring convergence across 3 EQUACK nodes (timeout ${MAX_WAIT}s) ==="
 
-echo "  node1 digest: ${DIGEST1}"
-echo "  node2 digest: ${DIGEST2}"
-echo "  node3 digest: ${DIGEST3}"
+START_S=$(date +%s)
 
-if [[ "${DIGEST1}" == "UNAVAILABLE" || "${DIGEST2}" == "UNAVAILABLE" || "${DIGEST3}" == "UNAVAILABLE" ]]; then
-  echo ""
-  echo "RESULT: one or more nodes were unreachable -- cannot determine convergence."
-  exit 1
-fi
+while true; do
+  D1=$(fetch_digest 9001)
+  D2=$(fetch_digest 9002)
+  D3=$(fetch_digest 9003)
 
-if [[ "${DIGEST1}" == "${DIGEST2}" && "${DIGEST2}" == "${DIGEST3}" ]]; then
-  echo ""
-  echo "RESULT: ALL NODES CONVERGED (digest: ${DIGEST1})"
-  exit 0
-else
-  echo ""
-  echo "RESULT: NODES HAVE NOT CONVERGED"
-  if [[ "${DIGEST1}" != "${DIGEST2}" ]]; then
-    echo "  - node1 and node2 differ"
+  NOW_S=$(date +%s)
+  ELAPSED=$((NOW_S - START_S))
+
+  if [[ "$D1" != "UNAVAILABLE" && "$D2" != "UNAVAILABLE" && "$D3" != "UNAVAILABLE" ]]; then
+    if [[ "$D1" == "$D2" && "$D2" == "$D3" ]]; then
+      echo "CONVERGED in ${ELAPSED}s (digest: $D1)"
+      echo "  node1: $D1  node2: $D2  node3: $D3"
+      exit 0
+    fi
   fi
-  if [[ "${DIGEST2}" != "${DIGEST3}" ]]; then
-    echo "  - node2 and node3 differ"
+
+  if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
+    echo "TIMEOUT after ${MAX_WAIT}s -- nodes have NOT converged"
+    echo "  node1: $D1"
+    echo "  node2: $D2"
+    echo "  node3: $D3"
+    exit 1
   fi
-  if [[ "${DIGEST1}" != "${DIGEST3}" ]]; then
-    echo "  - node1 and node3 differ"
-  fi
-  exit 1
-fi
+
+  sleep "$POLL_INTERVAL"
+done

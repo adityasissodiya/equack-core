@@ -813,3 +813,302 @@ fn vc_inband_trustview_status_revoked_denies() {
     let res = verify_vc_with_trustview(cred_bytes, &tv);
     assert!(matches!(res, Err(ecac_core::vc::VcError::Revoked)));
 }
+
+// =========================================================================
+// Concurrent GRANT/REVOKE (Reviewer MAJOR 4 — IoT-J revision)
+//
+// These two tests pin the semantics of a concurrent GRANT/REVOKE pair when
+// the deterministic linearization places the REVOKE before the GRANT:
+//
+//  - `concurrent_grant_revoke_same_credential_suppressed`
+//        The re-ordered GRANT references the SAME credential whose status
+//        list entry is now marked revoked. The VC check must fail and no
+//        new epoch may open. DATA authored after that GRANT must be denied.
+//
+//  - `concurrent_grant_revoke_fresh_credential_regrants`
+//        The re-ordered GRANT references a DIFFERENT (still-valid)
+//        credential. A fresh epoch must open at the GRANT's position and
+//        DATA authored under it must be permitted.
+//
+// Together, these pin down the "deny-wins is per-epoch, not per-subject"
+// re-grant semantics discussed in Section~3.3 of the paper.
+// =========================================================================
+
+// Local helper: issue a JWT-format credential with a caller-chosen jti and
+// status index, then return (Credential op, Grant op).
+#[allow(clippy::too_many_arguments)]
+fn make_credential_and_grant_custom(
+    issuer_sk: &ed25519_dalek::SigningKey,
+    issuer_id: &str,
+    subject_pk: [u8; 32],
+    role: &str,
+    scope: &[&str],
+    nbf_phys: u64,
+    exp_phys: u64,
+    admin_sk: &ed25519_dalek::SigningKey,
+    admin_pk_bytes: [u8; 32],
+    jti: &str,
+    status_list_id: &str,
+    status_index: u64,
+) -> (Op, Op) {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use ecac_core::crypto::vk_to_bytes;
+    use ecac_core::op::CredentialFormat;
+    use ed25519_dalek::{Signature, Signer};
+    use serde_json::json;
+
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+    let sub_hex = {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(64);
+        for b in subject_pk {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        s
+    };
+    let claims = json!({
+        "sub_pk": sub_hex,
+        "role": role,
+        "scope": scope,
+        "nbf": nbf_phys,
+        "exp": exp_phys,
+        "iss": issuer_id,
+        "jti": jti,
+        "status": { "id": status_list_id, "index": status_index }
+    });
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    let signing_input = format!("{header}.{payload}");
+    let sig: Signature = issuer_sk.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    let compact = format!("{signing_input}.{sig_b64}");
+    let cred_bytes = compact.as_bytes().to_vec();
+
+    let cred_hash: [u8; 32] = {
+        let mut h = blake3::Hasher::new();
+        h.update(&cred_bytes);
+        h.finalize().into()
+    };
+
+    let issuer_vk = ed25519_dalek::VerifyingKey::from(issuer_sk);
+    let issuer_pk_bytes = vk_to_bytes(&issuer_vk);
+
+    let cred_op = Op::new(
+        vec![],
+        Hlc::new(nbf_phys, 1),
+        issuer_pk_bytes,
+        Payload::Credential {
+            cred_id: jti.to_string(),
+            cred_bytes,
+            format: CredentialFormat::Jwt,
+        },
+        issuer_sk,
+    );
+
+    let grant_op = Op::new(
+        vec![cred_op.op_id],
+        Hlc::new(nbf_phys, 2),
+        admin_pk_bytes,
+        Payload::Grant {
+            subject_pk,
+            cred_hash,
+        },
+        admin_sk,
+    );
+
+    (cred_op, grant_op)
+}
+
+#[test]
+fn concurrent_grant_revoke_same_credential_suppressed() {
+    // Setup: one issuer, one user. Credential c1 has status index 0.
+    // The status list bit 0 is set -> c1 is revoked. A REVOKE event also
+    // scope-closes any open epoch. A second GRANT referencing the SAME
+    // revoked credential is placed LATER in the deterministic order, and
+    // a DATA op authored after that GRANT must be denied because c1's VC
+    // check fails (status-revoked).
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
+    // list-0, bit 0 = c1 is revoked in the status list.
+    let mut status = StatusCache::from_map(vec![("list-0".to_string(), vec![0b0000_0001])]);
+
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    let nbf = 10_000u64;
+    let exp = 20_000u64;
+
+    // c1 references list-0, index 0 (will be revoked).
+    let (cred1, grant1) = make_credential_and_grant_custom(
+        &issuer_sk, issuer_id, user_pk, "editor", &["hv"], nbf, exp, &admin_sk, admin_pk,
+        "cred-1", "list-0", 0,
+    );
+    // A second GRANT referencing the SAME credential hash (pretend a late
+    // concurrent re-grant ordered after the REVOKE).
+    let cred1_hash = match &cred1.header.payload {
+        Payload::Credential { cred_bytes, .. } => ecac_core::vc::blake3_hash32(cred_bytes),
+        _ => panic!("expected Credential payload"),
+    };
+    let late_grant = Op::new(
+        vec![grant1.op_id],
+        Hlc::new(nbf + 5, 9),
+        admin_pk,
+        Payload::Grant {
+            subject_pk: user_pk,
+            cred_hash: cred1_hash,
+        },
+        &admin_sk,
+    );
+    // A scope-matching REVOKE that closes any open epoch.
+    let revoke = Op::new(
+        vec![grant1.op_id],
+        Hlc::new(nbf + 3, 1),
+        admin_pk,
+        Payload::Revoke {
+            subject_pk: user_pk,
+            role: "editor".into(),
+            scope_tags: vec!["hv".into()],
+            at: Hlc::new(nbf + 3, 1),
+        },
+        &admin_sk,
+    );
+    // DATA op written after the late GRANT. Must be denied.
+    let write = Op::new(
+        vec![late_grant.op_id],
+        Hlc::new(nbf + 7, 3),
+        user_pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"SUPPRESSED".to_vec(),
+        },
+        &user_sk,
+    );
+
+    let cred1_id = cred1.op_id;
+    let grant1_id = grant1.op_id;
+    let revoke_id = revoke.op_id;
+    let late_grant_id = late_grant.op_id;
+    let write_id = write.op_id;
+
+    let mut dag = Dag::new();
+    dag.insert(cred1);
+    dag.insert(grant1);
+    dag.insert(revoke);
+    dag.insert(late_grant);
+    dag.insert(write);
+
+    // Ordered so REVOKE precedes the late GRANT, mirroring the deterministic
+    // linearization after tie-breaking.
+    let ids = vec![cred1_id, grant1_id, revoke_id, late_grant_id, write_id];
+    let idx = build_auth_epochs_with(&dag, &ids, &trust, &mut status);
+
+    let (action, _obj, _field, _elem, tags) = derive_action_and_tags("mv:o:x").unwrap();
+    let topo_like_pos = 1_000_000usize;
+    assert!(
+        !is_permitted_at_pos(
+            &idx,
+            &user_pk,
+            action,
+            &tags,
+            topo_like_pos,
+            Hlc::new(nbf + 7, 3)
+        ),
+        "DATA after a GRANT that re-references a status-revoked credential \
+         must be denied (concurrent GRANT/REVOKE, same credential)"
+    );
+}
+
+#[test]
+fn concurrent_grant_revoke_fresh_credential_regrants() {
+    // Setup: one issuer, one user. Credential c1 is revoked in the status
+    // list (bit 0). A scope-matching REVOKE closes c1's epoch. A LATER
+    // GRANT references a FRESH credential c2 whose status bit is clear;
+    // c2 must verify, a new epoch must open, and a DATA op authored after
+    // the fresh GRANT must be permitted.
+    let (issuer_sk, issuer_vk) = generate_keypair();
+    let issuer_id = "oem-issuer-1";
+    let trust = trust_from_single(issuer_id, issuer_vk.clone());
+    // list-0 bit 0 = c1 revoked, bit 1 = c2 still valid.
+    let mut status = StatusCache::from_map(vec![("list-0".to_string(), vec![0b0000_0001])]);
+
+    let (admin_sk, admin_vk) = generate_keypair();
+    let admin_pk = vk_to_bytes(&admin_vk);
+    let (user_sk, user_vk) = generate_keypair();
+    let user_pk = vk_to_bytes(&user_vk);
+
+    let nbf = 10_000u64;
+    let exp = 20_000u64;
+
+    // c1 at status index 0 (revoked).
+    let (cred1, grant1) = make_credential_and_grant_custom(
+        &issuer_sk, issuer_id, user_pk, "editor", &["hv"], nbf, exp, &admin_sk, admin_pk,
+        "cred-1", "list-0", 0,
+    );
+    // c2 at status index 1 (still valid).
+    let (cred2, grant2) = make_credential_and_grant_custom(
+        &issuer_sk, issuer_id, user_pk, "editor", &["hv"], nbf, exp, &admin_sk, admin_pk,
+        "cred-2", "list-0", 1,
+    );
+    // Scope-matching REVOKE, ordered AFTER grant1 and BEFORE grant2.
+    let revoke = Op::new(
+        vec![grant1.op_id],
+        Hlc::new(nbf + 3, 1),
+        admin_pk,
+        Payload::Revoke {
+            subject_pk: user_pk,
+            role: "editor".into(),
+            scope_tags: vec!["hv".into()],
+            at: Hlc::new(nbf + 3, 1),
+        },
+        &admin_sk,
+    );
+    // DATA written after the fresh GRANT referencing c2.
+    let write = Op::new(
+        vec![grant2.op_id],
+        Hlc::new(nbf + 7, 3),
+        user_pk,
+        Payload::Data {
+            key: "mv:o:x".into(),
+            value: b"REGRANTED".to_vec(),
+        },
+        &user_sk,
+    );
+
+    let cred1_id = cred1.op_id;
+    let grant1_id = grant1.op_id;
+    let cred2_id = cred2.op_id;
+    let grant2_id = grant2.op_id;
+    let revoke_id = revoke.op_id;
+    let write_id = write.op_id;
+
+    let mut dag = Dag::new();
+    dag.insert(cred1);
+    dag.insert(grant1);
+    dag.insert(revoke);
+    dag.insert(cred2);
+    dag.insert(grant2);
+    dag.insert(write);
+
+    // Topo-like order: REVOKE precedes grant2 (the fresh re-grant).
+    let ids = vec![cred1_id, grant1_id, revoke_id, cred2_id, grant2_id, write_id];
+    let idx = build_auth_epochs_with(&dag, &ids, &trust, &mut status);
+
+    let (action, _obj, _field, _elem, tags) = derive_action_and_tags("mv:o:x").unwrap();
+    let topo_like_pos = 1_000_000usize;
+    assert!(
+        is_permitted_at_pos(
+            &idx,
+            &user_pk,
+            action,
+            &tags,
+            topo_like_pos,
+            Hlc::new(nbf + 7, 3)
+        ),
+        "DATA after a fresh-credential re-grant (concurrent GRANT/REVOKE, \
+         different credential) must be permitted"
+    );
+}

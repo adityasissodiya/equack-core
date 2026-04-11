@@ -153,7 +153,22 @@ pub fn tags_for(obj: &str, field: &str) -> TagSet {
         ("o", "s") => {
             t.insert("mech".to_string());
         }
-        _ => {}
+        _ => {
+            // Fleet-style controller keys used by bench_iot_fleet:
+            //   obj = "c<N>" (controller id), field = "param<N>".
+            // These resources fall under the maintenance scope ("hv","mech")
+            // so engineers granted those scopes can write parameters; revoking
+            // those scopes closes the gate.
+            let obj_is_controller = obj.starts_with('c')
+                && obj.len() > 1
+                && obj[1..].chars().all(|c| c.is_ascii_digit());
+            let field_is_param = field.starts_with("param")
+                && field[5..].chars().all(|c| c.is_ascii_digit());
+            if obj_is_controller && field_is_param {
+                t.insert("hv".to_string());
+                t.insert("mech".to_string());
+            }
+        }
     }
     t
 }

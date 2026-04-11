@@ -176,6 +176,18 @@ impl Metrics {
         h.observe_ms(ms);
     }
 
+    /// Read a counter value (returns 0 if the key was never registered).
+    ///
+    /// Used by benches that need to read post-replay counts (e.g.
+    /// applied/skipped) without parsing CSV. Counters are global and
+    /// monotonic, so call `reset` before the measurement window.
+    pub fn counter(&self, key: &str) -> u64 {
+        let r = self.counters.read().unwrap();
+        r.get(key)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
     /// Reset all counters and histograms to zero (keys remain registered).
     pub fn reset(&self) {
         for (_, c) in self.counters.write().unwrap().iter_mut() {

@@ -1,0 +1,41 @@
+# E16 networked multi-node sync results
+# date: 2026-04-10T11:56:34Z
+
+=== [E16] bringing up docker-compose testbed ===
+waiting for nodes to become ready...
+all nodes ready after 1s
+
+=== [E16] scenario A -- baseline (no delay, no loss) ===
+generated 1000 ops on each node (3000 total)
+=== Measuring convergence across 3 EQUACK nodes (timeout 60s) ===
+CONVERGED in 4s (digest: be0dd3a347b30a97)
+  node1: be0dd3a347b30a97  node2: be0dd3a347b30a97  node3: be0dd3a347b30a97
+scenario A: PASS
+
+=== [E16] scenario B -- 100 ms delay, 1% loss on node3 uplink ===
+tc netem applied on node3
+generated 1000 ops on each node (6000 total cumulative)
+=== Measuring convergence across 3 EQUACK nodes (timeout 90s) ===
+CONVERGED in 3s (digest: d338557264002ff0)
+  node1: d338557264002ff0  node2: d338557264002ff0  node3: d338557264002ff0
+tc netem removed
+scenario B: PASS
+
+=== [E16] scenario C -- partition + heal (30 s) ===
+=== Injecting network partition: isolating node3 for 30s ===
+  node1 IP: 172.25.0.4
+  node2 IP: 172.25.0.3
+  Partition active -- node3 cannot reach node1 or node2.
+  Waiting 30s before healing...
+=== Partition healed. node3 can communicate with all peers again. ===
+post-heal convergence check:
+=== Measuring convergence across 3 EQUACK nodes (timeout 60s) ===
+CONVERGED in 5s (digest: 1b4ef6d4c9224864)
+  node1: 1b4ef6d4c9224864  node2: 1b4ef6d4c9224864  node3: 1b4ef6d4c9224864
+scenario C: PASS
+
+=== [E16] complete. results: /media/aditya/File System 2/Equack/equack-core/deploy/results/e16-20260410T135634.txt ===
+Scenario A (baseline):      PASS
+Scenario B (WAN emulation): PASS
+Scenario C (partition+heal):PASS
+=== [E16] tearing down testbed ===

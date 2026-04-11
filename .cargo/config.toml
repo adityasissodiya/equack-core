@@ -1,0 +1,15 @@
+# Cross-compilation scaffolding for E15 (edge-hardware replay benchmark).
+#
+# Enables `cargo build --release --target aarch64-unknown-linux-gnu` for
+# Raspberry Pi 4-class edge targets without changing the default host build.
+#
+# HUMAN: install the target before use:
+#   rustup target add aarch64-unknown-linux-gnu
+# and install a suitable aarch64 gcc cross-compiler, e.g.:
+#   sudo apt install gcc-aarch64-linux-gnu
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
