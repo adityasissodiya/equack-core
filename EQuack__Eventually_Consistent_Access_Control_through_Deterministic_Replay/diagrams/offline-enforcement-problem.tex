@@ -1,0 +1,197 @@
+\definecolor{clrGreen}{HTML}{27AE60}
+\definecolor{clrRed}{HTML}{C0392B}
+\definecolor{clrBlue}{HTML}{2E86C1}
+\definecolor{clrGray}{HTML}{607D8B}
+\definecolor{clrWarn}{HTML}{E67E22}
+\definecolor{bgLeft}{HTML}{FFF8E8}
+\definecolor{bgRight}{HTML}{EBF5FB}
+
+\begin{figure*}[!t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    every node/.style={font=\sffamily},
+    node distance=0.3cm and 0.8cm,
+    % card header
+    chead/.style={
+        rectangle, rounded corners=4pt,
+        fill=black!7, draw=black!20,
+        line width=0.5pt,
+        minimum width=5.2cm, minimum height=0.8cm,
+        font=\sffamily\bfseries, text=black!75, align=center,
+    },
+    % card body
+    cbody/.style={
+        rectangle, rounded corners=4pt,
+        draw=black!20, fill=white,
+        line width=0.5pt,
+        text width=4.8cm, inner sep=8pt,
+        font=\sffamily, text=black!80, align=left,
+    },
+    % problem badge
+    prob/.style={
+        rectangle, rounded corners=4pt,
+        draw=clrWarn!50, fill=clrWarn!8,
+        font=\sffamily\bfseries, text=clrWarn!80!black,
+        inner sep=5pt, align=center,
+    },
+    % verdict
+    vkeep/.style={
+        rectangle, rounded corners=5pt,
+        draw=clrGreen!45, fill=clrGreen!6,
+        font=\sffamily, inner sep=8pt, align=left, text width=8.4cm,
+    },
+    vskip/.style={
+        rectangle, rounded corners=5pt,
+        draw=clrRed!35, fill=clrRed!5,
+        font=\sffamily, inner sep=8pt, align=left, text width=8.4cm,
+    },
+    % backgrounds
+    phase/.style={rectangle, rounded corners=10pt, line width=0.5pt, draw=black!12},
+    % sync
+    syncbox/.style={
+        rectangle, rounded corners=8pt,
+        draw=clrGray!35, fill=clrGray!6,
+        line width=0.7pt, inner sep=10pt, align=center,
+    },
+    % arrows
+    bigarr/.style={
+        -{Stealth[length=5mm, width=3.5mm]},
+        line width=1.6pt, draw=clrGray!55,
+    },
+    phtitle/.style={font=\large\sffamily\bfseries, text=black!72},
+]
+
+% =====================================================================
+%  CONTROLLER A
+% =====================================================================
+\node[chead] (hA) at (0,0) {Controller A};
+\node[cbody, below=-2pt of hA] (bA) {%
+    \textcolor{clrGreen}{\bfseries\textbullet}~Sees: engineer granted access\\[4pt]
+    \textcolor{clrBlue}{\bfseries\textbullet}~Engineer updates a parameter\\[4pt]
+    \textcolor{clrRed}{\bfseries\textbullet}~Has \emph{not} heard the revocation%
+};
+\node[prob, below=7pt of bA] (pA) {Accepted --- but is it still valid?};
+
+% =====================================================================
+%  CONTROLLER B
+% =====================================================================
+\node[chead, right=0.9cm of hA] (hB) {Controller B};
+\node[cbody, below=-2pt of hB] (bB) {%
+    \textcolor{clrBlue}{\bfseries\textbullet}~Engineer updates a parameter\\[4pt]
+    \textcolor{clrRed}{\bfseries\textbullet}~Revocation arrives \emph{after} the update\\[4pt]
+    \textcolor{clrGray}{\bfseries\textbullet}~Too late to undo what happened%
+};
+\node[prob, below=7pt of bB] (pB) {Applied now, invalid later?};
+
+% =====================================================================
+%  CONTROLLER C
+% =====================================================================
+\node[chead, right=0.9cm of hB] (hC) {Controller C};
+\node[cbody, below=-2pt of hC] (bC) {%
+    \textcolor{clrGreen}{\bfseries\textbullet}~Issuer 1 grants access\\[4pt]
+    \textcolor{clrRed}{\bfseries\textbullet}~Issuer 2 revokes access\\[4pt]
+    \textcolor{clrBlue}{\bfseries\textbullet}~Engineer updates a parameter%
+};
+\node[prob, below=7pt of bC] (pC) {Grant and revoke --- which wins?};
+
+% =====================================================================
+%  PARTITION DIVIDERS
+% =====================================================================
+\draw[dashed, draw=black!18, line width=0.7pt]
+    ($(hA.north east)!0.5!(hB.north west) + (0,0.35)$) --
+    ($(pA.south east)!0.5!(pB.south west) + (0,-0.15)$);
+\draw[dashed, draw=black!18, line width=0.7pt]
+    ($(hB.north east)!0.5!(hC.north west) + (0,0.35)$) --
+    ($(pB.south east)!0.5!(pC.south west) + (0,-0.15)$);
+
+% =====================================================================
+%  LEFT PHASE BACKGROUND + TITLE
+% =====================================================================
+\begin{scope}[on background layer]
+    \node[phase, fill=bgLeft,
+          fit=(hA)(hB)(hC)(pA)(pB)(pC),
+          inner xsep=14pt, inner ysep=16pt] (LBG) {};
+\end{scope}
+\node[phtitle, above=3pt of LBG.north]
+    {While disconnected, each controller sees a different slice of reality};
+\node[font=\sffamily\itshape, text=black!48,
+      below=3pt of LBG.south] (leftnote)
+    {Each made a locally reasonable decision --- but they disagree.};
+
+% =====================================================================
+%  SYNC BOX
+% =====================================================================
+\node[syncbox, right=1.1cm of LBG.east, anchor=west] (sync) {%
+    {\large\bfseries Reconnect}\\[5pt]
+    Merge all events\\into one shared log%
+};
+\draw[bigarr] (LBG.east) -- (sync.west);
+
+% =====================================================================
+%  VERDICTS
+% =====================================================================
+\node[vkeep, right=1.1cm of sync.east, anchor=north west,
+      yshift=8pt] (v1) {%
+    \textcolor{clrGreen}{\bfseries\checkmark}~%
+    \textbf{Controller A's update: kept}\\[2pt]
+    {\small\color{black!55} The engineer was still authorized when it happened.}%
+};
+\node[vskip, below=8pt of v1] (v2) {%
+    \textcolor{clrRed}{\bfseries$\boldsymbol\times$}~%
+    \textbf{Controller B's update: removed}\\[2pt]
+    {\small\color{black!55} The revocation means this should never have been accepted.}%
+};
+\node[vskip, below=8pt of v2] (v3) {%
+    \textcolor{clrRed}{\bfseries$\boldsymbol\times$}~%
+    \textbf{Controller C's update: removed}\\[2pt]
+    {\small\color{black!55} When grant and revoke conflict, revoke wins.}%
+};
+
+% Explanation above verdicts
+\node[font=\sffamily, text=black!58, align=center,
+      above=8pt of v1.north] (rtxt) {%
+    All controllers replay the merged log in the same order.\\
+    The revocation is now known everywhere.%
+};
+
+% Convergence line below verdicts
+\node[font=\sffamily\bfseries, text=black!62, align=center,
+      below=8pt of v3.south] (conv) {%
+    Same events $\Rightarrow$ same answer on every controller.%
+};
+
+% =====================================================================
+%  RIGHT PHASE BACKGROUND + TITLE
+% =====================================================================
+\begin{scope}[on background layer]
+    \node[phase, fill=bgRight,
+          fit=(rtxt)(v1)(v2)(v3)(conv),
+          inner xsep=14pt, inner ysep=14pt] (RBG) {};
+\end{scope}
+\node[phtitle, above=3pt of RBG.north]
+    {After reconnection: one shared answer};
+
+% Arrow sync → right phase
+\draw[bigarr] (sync.east) -- (RBG.west);
+
+% =====================================================================
+%  BOTTOM TAKEAWAY
+% =====================================================================
+\path (LBG.south west |- leftnote.south) ++(0, -0.5) coordinate (bleft);
+\path (RBG.south east |- leftnote.south) ++(0, -0.5) coordinate (bright);
+\path (bleft) -- (bright) coordinate[midway] (bmid);
+
+\node[phase, fill=black!2, draw=black!10,
+      inner sep=8pt, align=center, font=\sffamily,
+      anchor=north] at (bmid) (takeaway) {%
+    The hard part is not granting or revoking access.
+    The hard part is making every device \emph{agree afterward}
+    on what was authorized.%
+};
+
+\end{tikzpicture}%
+}
+\caption{The offline enforcement problem. While disconnected, each controller makes authorization decisions from an incomplete view of grants and revocations. After reconnection, the system deterministically agrees on which operations remain authorized, despite late-arriving revocations and conflicting decisions from independent authorities. The hard part is not granting or revoking access. The hard part is making every device agree afterward on what was authorized.}
+\label{fig:offline-enforcement-problem}
+\end{figure*}

@@ -1,0 +1,105 @@
+\definecolor{journeyMainFill}{HTML}{EAF3FF}
+\definecolor{journeyMainDraw}{HTML}{2F6DB0}
+\definecolor{journeySyncFill}{HTML}{EEF8E8}
+\definecolor{journeySyncDraw}{HTML}{7AA65A}
+\definecolor{journeyReplayFill}{HTML}{FFF5E6}
+\definecolor{journeyReplayDraw}{HTML}{D39A2E}
+\definecolor{journeyBadFill}{HTML}{FDECEC}
+\definecolor{journeyBadDraw}{HTML}{C8453C}
+\definecolor{journeyFinalFill}{HTML}{F2EEFF}
+\definecolor{journeyFinalDraw}{HTML}{7B68CC}
+\definecolor{journeyNoteFill}{HTML}{FFF9E6}
+\definecolor{journeyNoteDraw}{HTML}{C9A227}
+
+\begin{tikzpicture}[
+  >=Latex,
+  font=\sffamily\footnotesize,
+  line width=0.65pt,
+  node distance=3mm and 5mm,
+  mainbox/.style={
+    rounded corners=2pt,
+    draw=journeyMainDraw,
+    fill=journeyMainFill,
+    align=center,
+    text width=4.85cm,
+    inner sep=3pt,
+    minimum height=8.5mm
+  },
+  syncbox/.style={
+    rounded corners=2pt,
+    draw=journeySyncDraw,
+    fill=journeySyncFill,
+    align=center,
+    text width=4.85cm,
+    inner sep=3pt,
+    minimum height=8.5mm
+  },
+  replaybox/.style={
+    rounded corners=2pt,
+    draw=journeyReplayDraw,
+    fill=journeyReplayFill,
+    align=center,
+    text width=4.85cm,
+    inner sep=3pt,
+    minimum height=8.5mm
+  },
+  finalbox/.style={
+    rounded corners=2pt,
+    draw=journeyFinalDraw,
+    fill=journeyFinalFill,
+    align=center,
+    text width=4.85cm,
+    inner sep=3pt,
+    minimum height=8.5mm
+  },
+  badbox/.style={
+    rounded corners=2pt,
+    draw=journeyBadDraw,
+    fill=journeyBadFill,
+    align=center,
+    text width=1.95cm,
+    inner sep=3pt,
+    minimum height=8.5mm
+  },
+  note/.style={
+    rounded corners=2pt,
+    draw=journeyNoteDraw,
+    fill=journeyNoteFill,
+    align=center,
+    text width=4.85cm,
+    inner sep=3pt
+  },
+  decision/.style={
+    diamond,
+    aspect=2.0,
+    draw=journeyReplayDraw,
+    fill=journeyReplayFill,
+    align=center,
+    text width=2.55cm,
+    inner sep=1.8pt
+  },
+  flow/.style={->}
+]
+
+\node[mainbox] (a) {\textbf{1. You ask for a change}\\Example: set this value to $X$};
+\node[mainbox, below=of a] (b) {\textbf{2. Device makes a signed event}\\who + what + when + earlier events seen};
+\node[mainbox, below=of b] (c) {\textbf{3. Event enters the log}\\Permanent evidence; saved does not mean final truth yet};
+\node[syncbox, below=5mm of c] (e) {\textbf{4. Devices sync missing events later}\\Other devices may also create events while offline\\Late, duplicate, or out-of-order arrival is okay};
+\node[replaybox, below=of e] (f) {\textbf{5. Replay rebuilds state}\\Same history + same deterministic order};
+\node[decision, below=4mm of f] (g) {\textbf{6. Permission check}\\(\textit{deny-wins})};
+\node[replaybox, below=5mm of g] (i) {\textbf{7. Valid events update the CRDT}\\Concurrency is merged safely};
+\node[note, below=of i] (j) {\textbf{Common CRDT behaviors}\\MV-register: concurrent field edits can both be remembered\\OR-set: add/remove stays consistent};
+\node[finalbox, below=of j] (k) {\textbf{8. Final shared state}\\Same evidence + same rules = same answer on every device};
+\node[badbox, right=3mm of g] (h) {\textbf{Invalid event}\\revoked / expired / unclear\\stays as evidence only};
+
+\draw[flow] (a) -- (b);
+\draw[flow] (b) -- (c);
+\draw[flow] (c) -- (e);
+\draw[flow] (e) -- (f);
+\draw[flow] (f) -- (g);
+\draw[flow] (g) -- node[left, fill=white, inner sep=1pt, font=\scriptsize] {allowed} (i);
+\draw[flow] (i) -- (j);
+\draw[flow] (j) -- (k);
+\draw[flow] (g) -- (h);
+
+\end{tikzpicture}

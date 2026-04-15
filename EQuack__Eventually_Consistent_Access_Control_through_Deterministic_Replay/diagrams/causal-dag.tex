@@ -1,0 +1,218 @@
+% Causal DAG with semantic edge types for the main paper.
+% Required TikZ libraries in the parent document:
+%   arrows.meta, positioning, calc, fit, backgrounds, decorations.pathreplacing
+
+% --- Colors ---
+\definecolor{vccolor}{HTML}{0D9488}     % teal  – trust chain
+\definecolor{corecolor}{HTML}{2563EB}   % blue  – authorization chain
+\definecolor{opcolor}{HTML}{D97706}     % orange – data / causal
+\definecolor{policycolor}{HTML}{7C3AED} % purple – policy (grant)
+\definecolor{storecolor}{HTML}{15803D}  % green  – data store
+
+\begin{tikzpicture}[
+    every node/.style={font=\small\sffamily},
+    %% --- Node style ---
+    opnode/.style={
+        rectangle,
+        rounded corners=5pt,
+        minimum width=5.0cm,
+        align=left,
+        draw=#1!70!black,
+        fill=#1!8,
+        line width=0.8pt,
+        inner sep=6pt,
+        font=\scriptsize\ttfamily
+    },
+    %% --- Three semantic edge styles ---
+    trustlink/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        very thick,
+        draw=vccolor,
+        densely dashed,
+    },
+    authlink/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        very thick,
+        draw=corecolor,
+        densely dotted,
+    },
+    datalink/.style={
+        -{Stealth[length=3mm, width=2.5mm]},
+        very thick,
+        draw=opcolor,
+        solid,
+    },
+    %% --- Badge for event type ---
+    typebadge/.style={
+        fill=#1!20,
+        rounded corners=2pt,
+        font=\tiny\sffamily\bfseries,
+        inner sep=2pt,
+        text=#1!80!black
+    },
+    %% --- Replay-order circle ---
+    replaynum/.style={
+        circle,
+        fill=black!80,
+        text=white,
+        font=\scriptsize\sffamily\bfseries,
+        inner sep=1.5pt,
+        minimum size=5mm
+    },
+    %% --- Annotation box ---
+    annot/.style={
+        rectangle,
+        rounded corners=4pt,
+        draw=gray!60,
+        fill=white,
+        align=center,
+        font=\scriptsize\sffamily,
+        inner sep=5pt,
+        line width=0.6pt
+    }
+]
+
+% ==================================================================
+%  NODES  (compact layout — 3.0-unit vertical gap, 9.0-unit horiz)
+% ==================================================================
+
+% op1 — IssuerKey  (top-left)
+\node[opnode=vccolor] (op1) at (2.0, 8.5) {%
+    id: 0xa3f1\ldots\\
+    parents: [$\emptyset$] \quad\textrm{\scriptsize(genesis)}\\
+    hlc: (1001, 0)\\
+    key: PubA\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} TRUST / IssuerKey\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivA)%
+};
+
+% op2 — Credential  (middle-left)
+\node[opnode=vccolor] (op2) at (2.0, 5.5) {%
+    id: 0xb7c2\ldots\\
+    parents: [0xa3f1]\\
+    hlc: (1002, 0)\\
+    key: PubA\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} TRUST / Credential\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivA)%
+};
+
+% op3 — Data / MVReg = Val1  (top-right)
+\node[opnode=storecolor] (op3) at (11.0, 8.5) {%
+    id: 0xd4e8\ldots\\
+    parents: [0xa3f1]\\
+    hlc: (1003, 0)\\
+    key: PubB\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} DATA / MVReg $\leftarrow$ ``Val1''\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivB)%
+};
+
+% op4 — Grant  (bottom-left)
+\node[opnode=policycolor] (op4) at (2.0, 2.5) {%
+    id: 0xe5f9\ldots\\
+    parents: [0xb7c2]\\
+    hlc: (1004, 0)\\
+    key: PubA\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} GRANT\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivA)%
+};
+
+% op5 — Data / MVReg = Val2  (bottom-right)
+\node[opnode=storecolor] (op5) at (11.0, 2.5) {%
+    id: 0xf6a0\ldots\\
+    parents: [0xe5f9, 0xd4e8]\\
+    hlc: (1005, 0)\\
+    key: PubB\\[2pt]
+    \textrm{\scriptsize\sffamily payload:} DATA / MVReg $\leftarrow$ ``Val2''\\[2pt]
+    \textrm{\scriptsize\sffamily sig:} Ed25519(PrivB)%
+};
+
+% Title
+\node[font=\normalsize\sffamily\bfseries, anchor=north]
+    at ($(op1.north)!0.5!(op3.north)+(0,1.15)$)
+    {equack-core: Operation Structure \& Causal DAG};
+
+% ==================================================================
+%  EVENT-TYPE BADGES  (top-right of each node)
+% ==================================================================
+\node[typebadge=vccolor,       anchor=south west] at (op1.north east) {TRUST};
+\node[typebadge=vccolor,       anchor=south west] at (op2.north east) {CREDENTIAL};
+\node[typebadge=storecolor,    anchor=south west] at (op3.north east) {DATA};
+\node[typebadge=policycolor,   anchor=south west] at (op4.north east) {GRANT};
+\node[typebadge=storecolor,    anchor=south west] at (op5.north east) {DATA};
+
+% ==================================================================
+%  REPLAY-ORDER CIRCLES  (snug to top-left corner of each node)
+% ==================================================================
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op1.north west) {1};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op2.north west) {2};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op3.north west) {3};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op4.north west) {4};
+\node[replaynum] at ([xshift=-2mm, yshift=2mm]op5.north west) {5};
+
+% ==================================================================
+%  EDGES — three semantic categories
+% ==================================================================
+
+% op2 → op1 : trustlink  (Credential verifies IssuerKey)
+\draw[trustlink] (op2.north) -- (op1.south)
+    node[midway, right=3pt, font=\tiny\sffamily, text=vccolor!80!black] {verifies issuer};
+
+% op3 → op1 : datalink  (Data causally after IssuerKey — ordering only)
+\draw[datalink] (op3.west) -- (op1.east)
+    node[midway, above=2pt, font=\tiny\sffamily, text=opcolor!80!black] {causal dep};
+
+% op4 → op2 : authlink  (Grant activates Credential)
+\draw[authlink] (op4.north) -- (op2.south)
+    node[midway, right=3pt, font=\tiny\sffamily, text=corecolor!80!black] {activates VC};
+
+% op5 → op4 : authlink  (Data gated by Grant)
+\draw[authlink] (op5.west) -- (op4.east)
+    node[midway, above=2pt, font=\tiny\sffamily, text=corecolor!80!black] {gated by};
+
+% op5 → op3 : datalink  (CRDT merge point)
+\draw[datalink] (op5.north) -- (op3.south)
+    node[midway, right=3pt, font=\tiny\sffamily, text=opcolor!80!black] {CRDT merge};
+
+% ==================================================================
+%  LEGEND  (centred in the clear middle area)
+% ==================================================================
+\node[draw=gray!60, fill=white, rounded corners=5pt, align=left,
+      font=\scriptsize\sffamily, line width=0.7pt, inner sep=7pt]
+      (legend) at (8.5, 5.7) {%
+    \textbf{Topological Order Tie-breaking:}\\
+    1. Parents strictly before children\\
+    2. Lowest HLC (physical\_ms, logical)\\
+    3. Lowest Op-ID (BLAKE3)\\[5pt]
+    \textbf{Edge types:}\\
+    \tikz\draw[vccolor, densely dashed, very thick,
+      -{Stealth[length=2mm]}] (0,0) -- (0.9,0);
+      \;\; Trust chain\\
+    \tikz\draw[corecolor, densely dotted, very thick,
+      -{Stealth[length=2mm]}] (0,0) -- (0.9,0);
+      \;\; Authorization\\
+    \tikz\draw[opcolor, solid, very thick,
+      -{Stealth[length=2mm]}] (0,0) -- (0.9,0);
+      \;\; Data / causal%
+};
+
+% ==================================================================
+%  ANNOTATION BOXES
+% ==================================================================
+
+% Auth Epoch Builder — brace tight to the left column
+\draw[decorate, decoration={brace, amplitude=8pt, mirror},
+      thick, draw=corecolor!70!black]
+    ([xshift=-6mm]op1.north west) -- ([xshift=-6mm]op4.south west)
+    node[midway, left=10pt, annot, text=corecolor!80!black] {%
+        \textbf{Auth Epoch}\\Builder%
+    };
+
+% Deny-Wins Gate — op5 flows through the gate for APPLY/SKIP
+\node[annot, text=policycolor!80!black] (denylabel) at ([yshift=-10mm]op5.south) {%
+    \textbf{Deny-Wins Gate}%
+};
+\draw[-{Stealth[length=2mm]}, thick, draw=policycolor!60!black]
+    (op5.south) -- (denylabel.north)
+    node[midway, right=3pt, font=\tiny\sffamily, text=policycolor!70!black] {APPLY / SKIP};
+
+\end{tikzpicture}
