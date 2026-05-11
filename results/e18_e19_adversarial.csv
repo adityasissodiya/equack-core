@@ -1,0 +1,6 @@
+scenario,description,injected,applied,skipped,outcome
+E18-credential-revoked,50 pre-revoke writes apply; 50 post-revoke writes skipped at gate,50,50,50,PASS
+E18-forged-grant,Grant referencing an unknown-issuer VC opens no epoch; downstream writes denied,10,0,10,PASS
+E19-sig-forgery,Tampered data op fails Op::verify and never reaches the gate,1,1,0,PASS
+E19-hlc-after-exp,Fabricated future HLC ingests cleanly but is denied by the expired epoch,1,1,1,PASS
+E19-duplicate-opid,Duplicate op_id is deduplicated by DAG; underlying op applied once,1,1,0,PASS

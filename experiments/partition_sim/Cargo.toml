@@ -1,0 +1,18 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "partition_sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+blake3 = "1.0"
+ecac-core = { path = "../../crates/core" }
+serde_cbor = "0.11"
+hex = "0.4"
+base64 = "0.22"
+serde_json = "1.0"
+ed25519-dalek = "2.0"

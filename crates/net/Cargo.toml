@@ -1,0 +1,41 @@
+[package]
+name = "ecac-net"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Opt-in: use plaintext security instead of Noise (handy for flaky local tests)
+insecure-plain = ["libp2p/plaintext"]
+net = []                # <— add this so #[cfg(feature="net")] works
+default = []
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+bytes = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_cbor = "0.11"
+smallvec = "1"
+blake3 = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["pkcs8"] }
+async-trait = "0.1"
+# Core types (OpId, HLC, etc.)
+hex = "0.4"
+ecac-core = { path = "../core" }
+ecac-store = { path = "../store" }
+libp2p = { version = "0.54.1", default-features = false, features = [
+  "tcp", "dns", "tokio", "noise", "yamux",  "plaintext",
+  "gossipsub", "request-response", "identify", "macros", "ping"   # <- macros for #[derive(NetworkBehaviour)]
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }  # <- add sync,time
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+
+[dev-dependencies]
+rand = "0.8"
+env_logger = "0.11"
+log = "0.4"
+tempfile = "3"

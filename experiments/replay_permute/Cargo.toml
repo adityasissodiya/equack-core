@@ -1,0 +1,16 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "replay_permute"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+ecac-core = { path = "../../crates/core" }
+rand = "0.8"
+serde_cbor = "0.11"
+blake3 = "1.0"
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
